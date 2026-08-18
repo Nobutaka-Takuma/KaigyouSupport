@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------------
+# External data sources.
+#
+# Nothing in this file is fetched automatically at application start-up: the
+# ETL (`kaigyou-etl`) is the only component that touches the network, and the
+# web app never does. Each entry is handled by one adapter, and each adapter
+# implements download / validate / transform / load as separate steps.
+#
+# `url` values point at the publishers' documented download endpoints. Those
+# endpoints change from time to time (and several of them sit behind a form
+# rather than a stable link), so every adapter also accepts a locally supplied
+# file:
+#
+#     kaigyou-etl run mhlw_dental_clinics --input data/raw/tokyo_dental.csv
+#
+# If a download fails -- blocked network, moved URL, missing credential -- the
+# failure is written to `acquisition_runs` with its cause and the affected
+# tables are left empty. No placeholder rows are ever inserted in their place.
+# ---------------------------------------------------------------------------
+
+defaults:
+  prefecture_code: "13"          # 13 = 東京都. Change or extend to widen coverage.
+  timeout_seconds: 120
+  user_agent: "KaigyouSupport-ETL/0.1 (+https://github.com/Nobutaka-Takuma/KaigyouSupport)"
+
+sources:
+
+  mhlw_dental_clinics:
+    adapter: mhlw_clinics
+    name: "医療情報ネット（オープンデータ）歯科診療所"
+    publisher: "厚生労働省"
+    dataset_kind: official
+    homepage_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2300/initialize"
+    terms_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S9000/riyoukiyaku"
+    license: "厚生労働省 医療情報ネット 利用規約に従う"
+    # The prefecture CSV bundles are published from the open-data page above.
+    # Confirm the current path before relying on the automatic download.
+    url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2300/downloadCsv?prefectureCode=13&facilityKind=3"
+    encoding: cp932
+    facility_category: dental_clinic
+    # Column mapping. Publishers rename headers between releases; adjust here
+    # rather than in code. Each entry lists the header candidates to try.
+    columns:
+      facility_id: ["医療機関コード", "医療機関ID", "施設ID"]
+      name:        ["医療機関名称", "名称", "医療機関名"]
+      address:     ["所在地", "住所", "医療機関所在地"]
+      lat:         ["緯度", "latitude", "lat"]
+      lng:         ["経度", "longitude", "lng", "lon"]
+      opening_date: ["開設年月日", "開設日"]
+      clinic_types: ["診療科目", "標榜診療科"]
+      founder_type: ["開設者区分", "開設者"]
+      municipality_code: ["市区町村コード", "自治体コード"]
+
+  estat_population_mesh:
+    adapter: estat_mesh
+    name: "国勢調査 3次メッシュ（1kmメッシュ）人口・世帯"
+    publisher: "総務省統計局 / e-Stat 統計GIS"
+    dataset_kind: official
+    homepage_url: "https://www.e-stat.go.jp/gis/statmap-search?type=1"
+    license: "政府統計の総合窓口（e-Stat）利用規約 / CC BY 4.0 相当"
+    # The 統計GIS bulk endpoint. `dlserveyId` selects the census round and
+    # `code` the prefecture; both are supplied by params below.
+    url: "https://www.e-stat.go.jp/gis/statmap-search/data"
+    # NOTE: dlserveyId identifies the census round and mesh level. Confirm the
+    # current value on the 統計GIS page above before relying on the automatic
+    # download -- it changes with each census and is not documented as stable.
+    params:
+      dlserveyId: "A002005212020"   # 2020年国勢調査 3次メッシュ（要確認）
+      code: "13"
+      coordSys: "1"
+      format: "mesh"
+      downloadType: "5"
+    # Optional: a second census round used to derive population_growth.
+    growth_baseline:
+      dlserveyId: "A002005212015"   # 2015年国勢調査 3次メッシュ（要確認）
+      years: 5
+    mesh_size_m: 1000
+    encoding: cp932
+    columns:
+      mesh_code:  ["KEY_CODE", "MESH_ID", "メッシュコード"]
+      population: ["T001102001", "T000876001", "人口総数"]
+      age_0_14:   ["T001102002", "T000876020", "総数0～14歳"]
+      age_15_64:  ["T001102003", "T000876021", "総数15～64歳"]
+      age_65_plus: ["T001102004", "T000876022", "総数65歳以上"]
+      households: ["T001102006", "T000876023", "世帯総数"]
+
+  mlit_stations:
+    adapter: mlit_stations
+    name: "国土数値情報 駅別乗降客数（S12）"
+    publisher: "国土交通省"
+    dataset_kind: official
+    homepage_url: "https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-S12.html"
+    license: "国土数値情報 利用約款"
+    url: "https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-23/S12-23_GML.zip"
+    prefecture_code: "13"
+    # Attribute names in the S12 GeoJSON/shape payload.
+    columns:
+      station_id:   ["S12_001c", "S12_001g"]
+      name:         ["S12_001"]
+      operator:     ["S12_002"]
+      railway_line: ["S12_003"]
+      # S12 publishes one passenger column per year; the adapter picks the
+      # most recent non-null of these.
+      passengers:   ["S12_053", "S12_049", "S12_045", "S12_041"]
+
+  mlit_municipalities:
+    adapter: mlit_municipalities
+    name: "国土数値情報 行政区域（N03）"
+    publisher: "国土交通省"
+    dataset_kind: official
+    homepage_url: "https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-v3_1.html"
+    license: "国土数値情報 利用約款"
+    url: "https://nlftp.mlit.go.jp/ksj/gml/data/N03/N03-2023/N03-20230101_13_GML.zip"
+    prefecture_code: "13"
+    columns:
+      prefecture_name:   ["N03_001"]
+      municipality_name: ["N03_004", "N03_003"]
+      municipality_code: ["N03_007"]

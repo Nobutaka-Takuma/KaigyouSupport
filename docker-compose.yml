@@ -1,0 +1,25 @@
+# PostGIS only.
+#
+# The API and the web client run as ordinary local processes (see README);
+# containerising them adds nothing at MVP stage. The database is the one piece
+# with a non-trivial setup, so that is what this file provides.
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: kaigyou
+      POSTGRES_PASSWORD: kaigyou
+      POSTGRES_DB: kaigyou
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaigyou -d kaigyou"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

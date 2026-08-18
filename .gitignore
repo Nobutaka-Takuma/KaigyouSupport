@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+
+# Downloaded source data. Raw artefacts are reproducible via the ETL and are
+# subject to the publishers' terms, so they are not committed.
+data/raw/
+data/*.log
+
+# Local env
+.env
+.env.local
+*.tsbuildinfo
