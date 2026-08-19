@@ -27,29 +27,57 @@ sources:
 
   mhlw_dental_clinics:
     adapter: mhlw_clinics
-    name: "医療情報ネット（オープンデータ）歯科診療所"
+    name: "医療機能情報提供制度（医療情報ネット）歯科診療所 施設情報"
     publisher: "厚生労働省"
     dataset_kind: official
-    homepage_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2300/initialize"
+    homepage_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2400/initialize"
     terms_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S9000/riyoukiyaku"
     license: "厚生労働省 医療情報ネット 利用規約に従う"
-    # The prefecture CSV bundles are published from the open-data page above.
-    # Confirm the current path before relying on the automatic download.
-    url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2300/downloadCsv?prefectureCode=13&facilityKind=3"
-    encoding: cp932
+    # The published bundle is one zip per data category; the dental facility
+    # file is `0xx_dental_facility_info_YYYYMMDD.csv`. It is distributed from
+    # the page above rather than a stable direct link, so the usual route is:
+    #
+    #   kaigyou-etl run mhlw_dental_clinics --input <downloaded>.csv
+    #
+    # Leave `url` unset rather than guessing: a wrong URL produces a
+    # download failure that looks like an outage instead of a config gap.
+    url: null
+    encoding: utf-8-sig
     facility_category: dental_clinic
+    source_date: 2026-06-01
+    # The file covers all 47 prefectures. Set this to restrict the load; leave
+    # it unset to store the whole country (the schema is prefecture-agnostic).
+    prefecture_filter: null
     # Column mapping. Publishers rename headers between releases; adjust here
     # rather than in code. Each entry lists the header candidates to try.
     columns:
-      facility_id: ["医療機関コード", "医療機関ID", "施設ID"]
-      name:        ["医療機関名称", "名称", "医療機関名"]
-      address:     ["所在地", "住所", "医療機関所在地"]
-      lat:         ["緯度", "latitude", "lat"]
-      lng:         ["経度", "longitude", "lng", "lon"]
-      opening_date: ["開設年月日", "開設日"]
-      clinic_types: ["診療科目", "標榜診療科"]
-      founder_type: ["開設者区分", "開設者"]
+      facility_id:       ["ID", "医療機関コード", "医療機関ID"]
+      name:              ["正式名称", "医療機関名称", "名称"]
+      address:           ["所在地", "住所", "医療機関所在地"]
+      lat:               ["所在地座標（緯度）", "緯度", "latitude"]
+      lng:               ["所在地座標（経度）", "経度", "longitude"]
+      prefecture_code:   ["都道府県コード"]
+      # 3-digit municipality part; combined with the prefecture code to form
+      # the 5-digit JIS X0402 code.
       municipality_code: ["市区町村コード", "自治体コード"]
+      # Present in some releases / companion files, absent in others. Optional.
+      opening_date:      ["開設年月日", "開設日"]
+      clinic_types:      ["診療科目", "標榜診療科"]
+      founder_type:      ["開設者区分", "開設者"]
+    # Extra published fields kept verbatim in facilities.attributes (jsonb).
+    # Unknown keys are ignored, so a release that drops one still loads.
+    attribute_columns:
+      homepage:      "案内用ホームページアドレス"
+      name_kana:     "正式名称（フリガナ）"
+      short_name:    "略称"
+      closed_mon:    "毎週決まった曜日に休診（月）"
+      closed_tue:    "毎週決まった曜日に休診（火）"
+      closed_wed:    "毎週決まった曜日に休診（水）"
+      closed_thu:    "毎週決まった曜日に休診（木）"
+      closed_fri:    "毎週決まった曜日に休診（金）"
+      closed_sat:    "毎週決まった曜日に休診（土）"
+      closed_sun:    "毎週決まった曜日に休診（日）"
+      closed_holiday: "祝日に休診"
 
   estat_population_mesh:
     adapter: estat_mesh

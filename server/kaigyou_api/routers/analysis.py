@@ -27,6 +27,33 @@ router = APIRouter()
 ANALYSIS_TABLES = ["population_mesh", "facilities", "stations"]
 
 
+def _dataset_warnings(prov: dict[str, Any]) -> list[str]:
+    """Warn about combinations that make a derived figure meaningless.
+
+    Ratios like 人口/歯科医院 divide one dataset by another. If one side is real
+    and the other synthetic the quotient is not an estimate of anything, and
+    saying only "this database contains sample data" is not enough -- the
+    number itself has to be called out.
+    """
+    kinds: dict[str, set[str]] = {}
+    for entry in prov.get("sources", []):
+        kinds.setdefault(entry["dataset_label"], set()).add(entry["dataset_kind"])
+
+    sample = sorted(label for label, k in kinds.items() if "sample" in k)
+    official = sorted(label for label, k in kinds.items() if "official" in k)
+    warnings: list[str] = []
+    if sample:
+        warnings.append(
+            "合成（サンプル）データを含みます: " + "、".join(sample) + "。実データではありません。"
+        )
+    if sample and official:
+        warnings.append(
+            "実データ（" + "、".join(official) + "）と合成データ（" + "、".join(sample) + "）を"
+            "組み合わせた指標（人口/歯科医院、需要スコア等）は意味を持ちません。"
+        )
+    return warnings
+
+
 def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
              model: ScoringModel, category: str, mesh_size_m: int,
              prefecture_code: str) -> dict[str, Any]:
@@ -110,6 +137,7 @@ def candidate_analysis(
 
     result["model"] = model.describe()
     result["provenance"] = provenance.for_tables(conn, ANALYSIS_TABLES)
+    result["warnings"] = _dataset_warnings(result["provenance"]) + result["warnings"]
     result["disclaimer"] = DISCLAIMER
     result["score_disclaimer"] = SCORE_DISCLAIMER
     return result
@@ -173,15 +201,17 @@ def rankings(
     else:
         message = None
 
+    ranking_prov = provenance.for_tables(conn, ANALYSIS_TABLES + ["municipalities"])
     return {
         "items": items,
         "total": total,
+        "warnings": _dataset_warnings(ranking_prov),
         "limit": limit,
         "offset": offset,
         "radius_m": radius_m,
         "model": model.describe(),
         "message": message,
-        "provenance": provenance.for_tables(conn, ANALYSIS_TABLES + ["municipalities"]),
+        "provenance": ranking_prov,
         "disclaimer": DISCLAIMER,
         "score_disclaimer": SCORE_DISCLAIMER,
     }
@@ -221,11 +251,17 @@ def compare(
         item["label"] = names[i] if i < len(names) and names[i] else f"候補地 {chr(65 + i)}"
         results.append(item)
 
+    prov = provenance.for_tables(conn, ANALYSIS_TABLES)
+    dataset_warnings = _dataset_warnings(prov)
+    for item in results:
+        item["warnings"] = dataset_warnings + item["warnings"]
+
     return {
         "radius_m": radius,
         "locations": results,
         "model": model.describe(),
-        "provenance": provenance.for_tables(conn, ANALYSIS_TABLES),
+        "provenance": prov,
+        "warnings": dataset_warnings,
         "disclaimer": DISCLAIMER,
         "score_disclaimer": SCORE_DISCLAIMER,
     }

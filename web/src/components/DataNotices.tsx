@@ -40,6 +40,12 @@ export function GlobalNotices() {
           <Link to="/about">取得状況を見る →</Link>
         </div>
       )}
+      {status.mixed_datasets?.map((m) => (
+        <div key={m.dataset} className="notice notice--error">
+          <strong>データ混在</strong>
+          <span>{m.message}</span>
+        </div>
+      ))}
       {status.contains_sample_data && (
         <div className="notice notice--warn">
           <strong>サンプルデータ表示中</strong>

@@ -109,6 +109,11 @@ export function RankingPage() {
 
       {error && <p className="notice notice--error">{error}</p>}
       {data?.message && <p className="notice notice--warn">{data.message}</p>}
+      {data?.warnings?.map((w) => (
+        <p key={w} className="warn-inline">
+          {w}
+        </p>
+      ))}
       {loading && <p className="muted">読み込み中…</p>}
 
       {data && data.items.length > 0 && (

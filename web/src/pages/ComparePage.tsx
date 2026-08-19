@@ -134,6 +134,12 @@ export function ComparePage() {
           {error && <p className="notice notice--error">{error}</p>}
           {loading && <p className="muted">読み込み中…</p>}
 
+          {data?.warnings?.map((w) => (
+            <p key={w} className="warn-inline">
+              {w}
+            </p>
+          ))}
+
           {data && (
             <>
               <table className="datatable datatable--compare">

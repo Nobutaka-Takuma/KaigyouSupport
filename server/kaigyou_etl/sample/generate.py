@@ -289,11 +289,22 @@ def generate(conn: psycopg.Connection, audit: AcquisitionLog) -> dict[str, int]:
     return counts
 
 
-def drop(conn: psycopg.Connection) -> dict[str, int]:
-    """Remove every sample source and the rows attributed to it."""
+def drop(conn: psycopg.Connection, only: list[str] | None = None) -> dict[str, int]:
+    """Remove sample sources and the rows attributed to them.
+
+    ``only`` limits the removal to named source ids, which is what you want
+    after loading real data for one dataset while the others are still
+    unavailable.
+    """
     removed: dict[str, int] = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM data_sources WHERE dataset_kind = 'sample'")
+        if only:
+            cur.execute(
+                "SELECT id FROM data_sources WHERE dataset_kind = 'sample' AND id = ANY(%s)",
+                (only,),
+            )
+        else:
+            cur.execute("SELECT id FROM data_sources WHERE dataset_kind = 'sample'")
         ids = [r["id"] for r in cur.fetchall()]
         for source_id in ids:
             for table in ("facilities", "population_mesh", "stations", "municipalities"):

@@ -128,6 +128,7 @@ export interface RankingItem {
 export interface RankingResponse {
   items: RankingItem[];
   total: number;
+  warnings?: string[];
   limit: number;
   offset: number;
   radius_m: number;
@@ -140,6 +141,7 @@ export interface RankingResponse {
 
 export interface CompareResponse {
   radius_m: number;
+  warnings?: string[];
   locations: CandidateAnalysis[];
   model: ScoringModelInfo;
   provenance: Provenance;
@@ -179,6 +181,7 @@ export interface SourceStatus {
 export interface DataStatus {
   sources: SourceStatus[];
   contains_sample_data: boolean;
+  mixed_datasets: { dataset: string; dataset_label: string; message: string }[];
   official_sources_loaded: number;
   official_sources_configured: number;
   sample_sources_loaded: number;

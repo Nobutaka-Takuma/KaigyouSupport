@@ -64,6 +64,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.source,
         input_path=Path(args.input) if args.input else None,
         offline=args.offline,
+        prefecture_filter=args.prefecture,
     )
     _print_run(result)
     return EXIT_OK if result.ok else EXIT_PARTIAL
@@ -115,11 +116,11 @@ def cmd_generate_sample(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_drop_sample(_args: argparse.Namespace) -> int:
+def cmd_drop_sample(args: argparse.Namespace) -> int:
     from kaigyou_etl.sample.generate import drop
 
     with connect() as conn:
-        removed = drop(conn)
+        removed = drop(conn, only=args.source or None)
     print("削除:", ", ".join(f"{k}={v}" for k, v in removed.items()) or "(なし)")
     return EXIT_OK
 
@@ -168,6 +169,8 @@ def cmd_status(args: argparse.Namespace) -> int:
           f" / {status['official_sources_configured']}")
     if status["contains_sample_data"]:
         print("⚠ サンプル（合成）データが投入されています。実データではありません。")
+    for conflict in status.get("mixed_datasets") or []:
+        print(f"⛔ {conflict['message']}")
     return EXIT_OK if status["official_sources_loaded"] else EXIT_PARTIAL
 
 
@@ -187,6 +190,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("source")
     p.add_argument("--input", help="use a locally downloaded file instead of fetching")
     p.add_argument("--offline", action="store_true", help="never touch the network")
+    p.add_argument("--prefecture", default=None,
+                   help="load only this prefecture code (e.g. 13); default loads all")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("run-all", help="run every configured source")
@@ -196,7 +201,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("generate-sample", help="generate synthetic development data")
     p.set_defaults(func=cmd_generate_sample)
 
-    p = sub.add_parser("drop-sample", help="delete all synthetic data")
+    p = sub.add_parser("drop-sample", help="delete synthetic data")
+    p.add_argument("source", nargs="*",
+                   help="sample source ids to drop; omit to drop all")
     p.set_defaults(func=cmd_drop_sample)
 
     p = sub.add_parser("refresh-stats", help="recompute score normalisation statistics")

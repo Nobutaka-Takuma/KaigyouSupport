@@ -24,6 +24,13 @@ ADAPTER_TABLES = {
 
 _TABLES = ("facilities", "population_mesh", "stations", "municipalities")
 
+_TABLE_LABELS = {
+    "facilities": "歯科医院",
+    "population_mesh": "人口メッシュ",
+    "stations": "駅",
+    "municipalities": "行政区域",
+}
+
 
 def _row_counts(conn: psycopg.Connection) -> dict[str, dict[str, int]]:
     counts: dict[str, dict[str, int]] = {}
@@ -107,9 +114,30 @@ def data_status(conn: psycopg.Connection) -> dict[str, Any]:
     sample_loaded = [s for s in sources
                      if s["dataset_kind"] == "sample" and s["row_total"] > 0]
 
+    # A table holding both real and synthetic rows double-counts: the analysis
+    # queries by facility_category, not by source, so 8,000 real clinics plus
+    # 2,000 generated ones look like 10,000 competitors. Surface it loudly --
+    # this is a wrong-answer condition, not a cosmetic one.
+    mixed = []
+    for table in _TABLES:
+        kinds = {
+            (registered.get(sid, {}).get("dataset_kind") or "official")
+            for sid, c in counts.items() if c.get(table)
+        }
+        if {"official", "sample"} <= kinds:
+            mixed.append({
+                "dataset": table,
+                "dataset_label": _TABLE_LABELS.get(table, table),
+                "message": (
+                    f"{_TABLE_LABELS.get(table, table)}に実データと合成データが同時に存在します。"
+                    f"集計が二重計上になります。`kaigyou-etl drop-sample` で合成データを削除してください。"
+                ),
+            })
+
     return {
         "sources": sources,
         "contains_sample_data": bool(sample_loaded),
+        "mixed_datasets": mixed,
         "official_sources_loaded": len(official_loaded),
         "official_sources_configured": sum(
             1 for s in sources if s["dataset_kind"] == "official"

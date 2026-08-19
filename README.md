@@ -10,38 +10,47 @@
 
 ---
 
-## ⚠️ 現在のデータ取得状況（重要）
+## データ取得状況
 
-**この環境では、公的データを1件も取得できていません。**
-
-`kaigyou-etl run-all` を実行した結果:
-
-| 情報源 | 結果 | 原因 |
+| 情報源 | 結果 | 備考 |
 |---|---|---|
-| 厚生労働省 医療情報ネット（歯科診療所） | ❌ 取得失敗 | `network_blocked` — 実行環境のネットワークポリシーにより `www.iryou.teikyouseido.mhlw.go.jp` へ到達不可（プロキシが 403） |
-| e-Stat 統計GIS（国勢調査メッシュ人口） | ❌ 取得失敗 | `network_blocked` — `www.e-stat.go.jp` へ到達不可（同上） |
-| 国土数値情報 S12（駅別乗降客数） | ❌ 取得失敗 | `network_blocked` — `nlftp.mlit.go.jp` へ到達不可（同上） |
-| 国土数値情報 N03（行政区域） | ❌ 取得失敗 | `network_blocked` — `nlftp.mlit.go.jp` へ到達不可（同上） |
+| 厚労省 医療機能情報提供制度（歯科診療所） | ✅ **取り込み済 51,384件** | 手動ダウンロードしたCSVを `--input` で投入。全47都道府県（東京都 8,438件） |
+| e-Stat 統計GIS（国勢調査メッシュ人口） | ❌ 未取得 | `network_blocked` — 実行環境のネットワークポリシーにより `www.e-stat.go.jp` へ到達不可（プロキシが403） |
+| 国土数値情報 S12（駅別乗降客数） | ❌ 未取得 | `network_blocked` — `nlftp.mlit.go.jp` へ到達不可 |
+| 国土数値情報 N03（行政区域） | ❌ 未取得 | `network_blocked` — `nlftp.mlit.go.jp` へ到達不可 |
 
 取得できなかったデータについて、**架空の値を実データとして投入することは一切していません。**
-該当テーブルは空のままで、失敗内容は `acquisition_runs` テーブルに記録され、
-`kaigyou-etl status` と `/about` 画面、`GET /api/data-status` で常に確認できます。
+失敗内容は `acquisition_runs` に記録され、`kaigyou-etl status` / `/about` 画面 /
+`GET /api/data-status` で常に確認できます。
 
-### では画面に表示されている数値は何か
+### 未取得分は合成データで代替している（実データではない）
 
-パイプライン・GIS処理・API・UI の動作確認のために、**合成（サンプル）データ**を生成しています。
-これは実データではなく、実データを装うこともしません。具体的には:
+人口メッシュ・駅は動作確認のため**合成（サンプル）データ**を使っています。
+実データではなく、実データを装うこともしません。
 
-- 情報源名は `【サンプル】` で始まる
-- `data_sources.dataset_kind = 'sample'` として登録される
-- 医院名・駅名・エリア名にも `【サンプル】` が付く
-- API のすべての分析レスポンスが `provenance.contains_sample_data: true` を返す
-- **全画面の上部に赤／橙の警告バナーが常時表示される**（非表示にできません）
+- 情報源名は `【サンプル】` で始まり、`data_sources.dataset_kind = 'sample'`
+- API は `provenance.contains_sample_data: true` を返す
+- **全画面の上部に警告バナーが常時表示される**（非表示にできません）
 
-実データを投入する手順は下記「実データの取り込み」を参照してください。
-サンプルデータは `kaigyou-etl drop-sample` で完全に削除できます。
+### ⚠️ 実データと合成データの混在について
 
----
+現在のデータベースは **実データ（歯科医院）と合成データ（人口メッシュ・駅）が混在**しています。
+このため以下の数値は**意味を持ちません**:
+
+- 人口 / 歯科医院数（実医院数 ÷ 合成人口）
+- 需要スコア・成長スコア・アクセススコア・総合スコア
+
+一方、以下は**実データのみに基づくため有効**です:
+
+- 商圏内の歯科医院数（500m / 1km / 2km）
+- 最寄り歯科医院とその距離
+- 地図上の歯科医院分布
+
+この区別は API の `warnings` と分析パネルに明示されます。
+また、同一テーブルに実データと合成データが同時に存在する場合（二重計上になる状態）は、
+`kaigyou-etl status` と全画面バナーで検知・警告します。
+
+**人口メッシュを実データに差し替えれば、全指標が有効になります。**
 
 ## 構成
 
@@ -113,26 +122,60 @@ VITE_RASTER_ATTRIBUTION=© OpenStreetMap contributors
 
 ## 実データの取り込み
 
-### 自動ダウンロード
-
-```bash
-kaigyou-etl run mhlw_dental_clinics
-kaigyou-etl run estat_population_mesh
-kaigyou-etl run mlit_stations
-kaigyou-etl run mlit_municipalities
-```
-
-### 手動ダウンロードしたファイルを使う
+### 手動ダウンロードしたファイルを使う（推奨）
 
 いくつかの情報源はフォーム経由の配布で、安定した直リンクがありません。
 その場合は手元にダウンロードしたファイルを渡してください。
 
 ```bash
-kaigyou-etl run mhlw_dental_clinics --input ~/Downloads/tokyo_dental.csv
+# 歯科診療所（実績あり）。全47都道府県を含むファイルをそのまま投入できます
+kaigyou-etl run mhlw_dental_clinics --input 031_dental_facility_info_20260601.csv
+
+# 東京都だけに絞る場合
+kaigyou-etl run mhlw_dental_clinics --input <file>.csv --prefecture 13
+
 kaigyou-etl run estat_population_mesh --input ~/Downloads/tblT001102C13.zip
+kaigyou-etl run mlit_stations --input ~/Downloads/S12-23_GML.zip
 ```
 
 `--offline` を付けると、ネットワークに一切アクセスしません。
+
+### 自動ダウンロード
+
+`config/sources.yaml` に `url` が設定されている情報源は自動取得できます。
+
+```bash
+kaigyou-etl run mlit_stations
+kaigyou-etl run-all
+```
+
+歯科診療所は配布ページがフォーム経由のため `url` を空にしてあります
+（誤ったURLを設定すると、設定漏れが「サーバ障害」に見えてしまうため）。
+
+### どのファイルが必要か
+
+**歯科医院（取り込み実績あり）**
+厚労省「医療機能情報提供制度」の歯科施設情報 CSV
+（`0xx_dental_facility_info_YYYYMMDD.csv`、UTF-8 BOM付き、57列）。
+ID / 正式名称 / 所在地 / 都道府県コード / 市区町村コード / 緯度 / 経度 を使用します。
+
+> 実ファイルでは約6%（54,637件中3,253件）の座標が `0,0` です。
+> これらは投入せず破棄し、件数を `acquisition_runs` に記録します
+> （住所からのジオコーディングは行いません）。東京都の欠損は0.4%のみです。
+
+**診療科目（未取得・任意）**
+上記ファイルには標榜診療科が含まれません。同じ制度の別ファイル（診療科目情報）を
+取り込めば `facilities.clinic_types` が埋まり、小児歯科・矯正歯科などでの
+絞り込みが有効になります。`config/sources.yaml` の `columns.clinic_types` に
+実際の列名を追加してください。
+
+**人口メッシュ（最重要・未取得）**
+e-Stat 統計GIS の国勢調査メッシュ統計（東京都、1kmメッシュ）。
+これを入れると需要・成長・総合スコアが実データに基づくようになります。
+人口増減率には2時点（例: 2020年と2015年）が必要です。
+
+**駅（未取得）**
+国土数値情報 S12（駅別乗降客数）の zip。アクセススコアに使用します。
 
 ### 取り込み後
 

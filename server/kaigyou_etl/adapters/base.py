@@ -42,6 +42,8 @@ class AdapterContext:
     raw_dir: Path
     input_path: Path | None = None
     offline: bool = False
+    #: Restrict a multi-prefecture source to one prefecture code. None loads all.
+    prefecture_filter: str | None = None
 
     @property
     def prefecture_code(self) -> str:
