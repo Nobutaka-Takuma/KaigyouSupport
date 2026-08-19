@@ -60,7 +60,8 @@ def upsert_source(conn: psycopg.Connection, row: Mapping[str, Any]) -> None:
 
 def run_source(source_id: str, *, input_path: Path | None = None,
                offline: bool = False,
-               prefecture_filter: str | None = None) -> RunResult:
+               prefecture_filter: str | None = None,
+               baseline_path: Path | None = None) -> RunResult:
     """Execute the full pipeline for one configured source."""
     sources = cfg.sources_config()
     specs = sources.get("sources") or {}
@@ -77,6 +78,7 @@ def run_source(source_id: str, *, input_path: Path | None = None,
         input_path=input_path,
         offline=offline,
         prefecture_filter=prefecture_filter,
+        baseline_path=baseline_path,
     )
     adapter = get_adapter(spec["adapter"])(ctx)
 
@@ -94,7 +96,9 @@ def run_source(source_id: str, *, input_path: Path | None = None,
                           target_url=spec.get("url"),
                           params={"input": str(input_path) if input_path else None,
                                   "offline": offline,
-                                  "prefecture_filter": prefecture_filter}) as rec:
+                                  "prefecture_filter": prefecture_filter,
+                                  "baseline": str(baseline_path) if baseline_path else None,
+                                  }) as rec:
                 artifact = adapter.download()
                 rec.artifact_path = str(artifact)
                 rec.bytes = artifact.stat().st_size

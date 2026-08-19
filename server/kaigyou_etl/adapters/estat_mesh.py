@@ -19,7 +19,12 @@ from typing import Any, Iterable, Iterator
 import psycopg
 
 from kaigyou_core import mesh as meshlib
-from kaigyou_etl.acquisition import ERROR_EMPTY, ERROR_SCHEMA, AcquisitionError
+from kaigyou_etl.acquisition import (
+    ERROR_EMPTY,
+    ERROR_INPUT_MISSING,
+    ERROR_SCHEMA,
+    AcquisitionError,
+)
 from kaigyou_etl.adapters._util import (
     csv_rows,
     decode_bytes,
@@ -36,8 +41,8 @@ class EStatMeshAdapter(SourceAdapter):
     target_tables = ("population_mesh",)
 
     # ------------------------------------------------------------- artefacts
-    def _csv_texts(self, artifact: Path) -> list[str]:
-        encoding = self.spec.get("encoding")
+    def _csv_texts(self, artifact: Path, encoding: str | None = None) -> list[str]:
+        encoding = encoding or self.spec.get("encoding")
         if is_zip(artifact):
             members = zip_members(artifact, (".csv", ".txt"))
             if not members:
@@ -47,10 +52,11 @@ class EStatMeshAdapter(SourceAdapter):
             return [decode_bytes(open_member(artifact, m), encoding) for m in members]
         return [read_text(artifact, encoding)]
 
-    def _read(self, artifact: Path) -> tuple[list[str], list[dict[str, str]]]:
+    def _read(self, artifact: Path,
+              encoding: str | None = None) -> tuple[list[str], list[dict[str, str]]]:
         rows: list[dict[str, str]] = []
         headers: list[str] = []
-        for text in self._csv_texts(artifact):
+        for text in self._csv_texts(artifact, encoding):
             chunk = list(csv_rows(text))
             if chunk and not headers:
                 headers = list(chunk[0].keys())
@@ -70,7 +76,11 @@ class EStatMeshAdapter(SourceAdapter):
         code_col = resolved["mesh_code"]
         lengths: dict[int, int] = {}
         bad = 0
-        for row in rows[:5000]:
+        # Everything below is reported for the rows that will actually load, so
+        # the totals can be compared directly against the published headline
+        # figures rather than being inflated by rows we are about to drop.
+        loadable: list[dict[str, str]] = []
+        for row in rows:
             code = (row.get(code_col) or "").strip()
             try:
                 meshlib.size_m(code)
@@ -78,58 +88,116 @@ class EStatMeshAdapter(SourceAdapter):
                 bad += 1
                 continue
             lengths[len(code)] = lengths.get(len(code), 0) + 1
+            loadable.append(row)
         if not lengths:
             raise AcquisitionError(
                 ERROR_SCHEMA,
                 f"no valid JIS mesh codes in column {code_col!r} "
                 f"(sample: {[r.get(code_col) for r in rows[:3]]})",
             )
-        return {
+        facts: dict[str, Any] = {
             "row_count": len(rows),
             "mesh_code_lengths": lengths,
-            "invalid_mesh_codes_in_sample": bad,
+            "mesh_size_m": sorted({meshlib.NOMINAL_SIZE_M[n] for n in lengths}),
+            "loadable_rows": len(loadable),
+            "invalid_mesh_codes": bad,
             "resolved_columns": {k: v for k, v in resolved.items() if v},
         }
 
-    def _baseline_population(self) -> dict[str, int]:
-        """Population by mesh from the earlier census, if its file is present.
+        pop_col = resolved["population"]
+        populations = [to_int(r.get(pop_col)) for r in loadable]
+        facts["population_total"] = sum(p for p in populations if p is not None)
+        facts["rows_without_population"] = sum(1 for p in populations if p is None)
 
-        The baseline artefact is looked for in the same raw directory. It is
-        optional: no file means no growth rate, which the rest of the system
-        treats as missing data.
+        # Small cells are disclosure-controlled: their counts are merged into a
+        # neighbouring mesh rather than published in place. The grand total is
+        # preserved, so figures are loaded exactly as published -- reversing the
+        # suppression would mean inventing numbers -- but the extent is recorded
+        # because it displaces population by up to one mesh locally.
+        supp = self.spec.get("suppression_columns") or {}
+        flag_col = supp.get("flag")
+        if flag_col and flag_col in headers:
+            counts: dict[str, int] = {}
+            for r in loadable:
+                counts[(r.get(flag_col) or "").strip()] = (
+                    counts.get((r.get(flag_col) or "").strip(), 0) + 1
+                )
+            facts["suppression_flag_counts"] = counts
+            facts["suppressed_rows"] = sum(v for k, v in counts.items() if k not in ("", "0"))
+
+        baseline, baseline_facts = self._baseline_population()
+        facts.update(baseline_facts)
+        if baseline:
+            codes = {(r.get(code_col) or "").strip() for r in loadable}
+            matched = codes & set(baseline)
+            facts["baseline_matched_meshes"] = len(matched)
+            facts["meshes_without_baseline"] = len(codes - set(baseline))
+
+        return facts
+
+    def _baseline_population(self) -> tuple[dict[str, int], dict[str, Any]]:
+        """Population by mesh from the prior census round.
+
+        Optional. Without it ``population_growth`` stays NULL, which the
+        scoring layer reports as unavailable rather than assuming no change.
+
+        The prior round is a different statistics table with its own column
+        ids, so it is resolved through ``growth_baseline.columns`` rather than
+        the current round's mapping.
         """
         baseline = self.spec.get("growth_baseline") or {}
-        if not baseline:
-            return {}
-        candidates = sorted(self.ctx.raw_dir.glob("*baseline*")) or []
-        explicit = baseline.get("path")
-        if explicit:
-            candidates = [Path(explicit)]
-        for path in candidates:
-            if not path.exists():
-                continue
-            try:
-                headers, rows = self._read(path)
-                code_col = self.pick_column(headers, "mesh_code")
-                pop_col = self.pick_column(headers, "population")
-            except AcquisitionError:
-                continue
-            out: dict[str, int] = {}
-            for row in rows:
-                code = (row.get(code_col) or "").strip()
-                pop = to_int(row.get(pop_col))
-                if code and pop is not None:
-                    out[code] = pop
-            if out:
-                return out
-        return {}
+        path = self.ctx.baseline_path or (
+            Path(baseline["path"]) if baseline.get("path") else None
+        )
+        if not baseline or path is None:
+            return {}, {"baseline_supplied": False}
+        if not path.exists():
+            raise AcquisitionError(
+                ERROR_INPUT_MISSING, f"--baseline file does not exist: {path}"
+            )
+
+        headers, rows = self._read(path, encoding=baseline.get("encoding"))
+        columns = {k: (v if isinstance(v, list) else [v])
+                   for k, v in (baseline.get("columns") or {}).items()}
+        code_col = self._pick(headers, columns, "mesh_code", path)
+        pop_col = self._pick(headers, columns, "population", path)
+
+        out: dict[str, int] = {}
+        for row in rows:
+            code = (row.get(code_col) or "").strip()
+            pop = to_int(row.get(pop_col))
+            if code and pop is not None:
+                out[code] = pop
+        if not out:
+            raise AcquisitionError(
+                ERROR_EMPTY, f"baseline {path.name} yielded no population values"
+            )
+        return out, {
+            "baseline_supplied": True,
+            "baseline_file": path.name,
+            "baseline_rows": len(out),
+            "baseline_columns": {"mesh_code": code_col, "population": pop_col},
+        }
+
+    def _pick(self, headers: list[str], columns: dict[str, list[str]],
+              field: str, path: Path) -> str:
+        lookup = {h.strip().lower(): h for h in headers}
+        for candidate in columns.get(field, []):
+            hit = lookup.get(str(candidate).strip().lower())
+            if hit is not None:
+                return hit
+        raise AcquisitionError(
+            ERROR_SCHEMA,
+            f"{path.name}: no column for {field!r}; tried {columns.get(field)}, "
+            f"file has {headers[:20]}",
+        )
 
     def transform(self, artifact: Path) -> Iterator[dict[str, Any]]:
         headers, rows = self._read(artifact)
         col = {f: self.pick_column(headers, f,
                                    required=f in ("mesh_code", "population"))
                for f in self.column_map()}
-        baseline = self._baseline_population()
+        baseline, _ = self._baseline_population()
         years = float((self.spec.get("growth_baseline") or {}).get("years") or 5)
         source_date = self.source_date() or date.today()
         pref = self.ctx.prefecture_code

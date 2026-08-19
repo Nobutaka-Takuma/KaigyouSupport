@@ -14,6 +14,11 @@ import psycopg
 from kaigyou_core.scoring import Distribution, ScoringModel, distributions_from_rows, scope_key
 
 DEFAULT_CATEGORY = "dental_clinic"
+
+#: Fallback only. The real value comes from whatever mesh data is loaded --
+#: see :func:`resolve_mesh_size`. Hard-coding it would mean that loading 500m
+#: meshes silently returns zero population everywhere, which is the worst
+#: possible failure mode: plausible numbers that are simply wrong.
 DEFAULT_MESH_SIZE_M = 1000
 
 # Column names produced by kg_analyze_point, renamed to the vocabulary the
@@ -23,6 +28,44 @@ _RENAME = {
     "nearest_station_distance_m": "station_distance_m",
     "nearest_station_passengers": "daily_passengers",
 }
+
+
+def resolve_mesh_size(conn: psycopg.Connection, requested: int | None = None,
+                      prefecture_code: str | None = None) -> int | None:
+    """The mesh resolution to analyse at.
+
+    An explicit request wins. Otherwise pick the resolution that actually
+    carries the most population in the database, so the analysis follows the
+    data rather than a constant.
+    """
+    if requested:
+        return requested
+    sql = """
+        SELECT mesh_size_m
+        FROM population_mesh
+        {where}
+        GROUP BY mesh_size_m
+        ORDER BY sum(COALESCE(population, 0)) DESC, mesh_size_m
+        LIMIT 1
+    """
+    params: tuple = ()
+    if prefecture_code:
+        sql = sql.format(where="WHERE prefecture_code = %s")
+        params = (prefecture_code,)
+    else:
+        sql = sql.format(where="")
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    return row["mesh_size_m"] if row else None
+
+
+def available_mesh_sizes(conn: psycopg.Connection) -> list[int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT mesh_size_m FROM population_mesh ORDER BY mesh_size_m"
+        )
+        return [r["mesh_size_m"] for r in cur.fetchall()]
 
 
 def analyze_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
@@ -118,3 +161,66 @@ def area_label(conn: psycopg.Connection, mesh_id: int) -> str | None:
         )
         row = cur.fetchone()
     return row["name"] if row else None
+
+
+# --------------------------------------------------------------- area labels
+# JIS X0402 name, as it appears inside a full address string.
+_MUNICIPALITY_RE = __import__("re").compile(
+    r"^(?:.{2,3}?[都道府県])?(.+?[区市町村])"
+)
+
+
+def municipality_names_from_facilities(
+    conn: psycopg.Connection, prefecture_code: str | None = None
+) -> dict[str, str]:
+    """Derive a JIS-code -> municipality-name map from facility addresses.
+
+    A stand-in for the boundary dataset: when 行政区域 polygons have not been
+    loaded, the published facility addresses still carry the municipality, and
+    naming a mesh "江東区" from real addresses beats leaving it blank. Callers
+    are expected to say which of the two produced a label.
+    """
+    where = ["f.address IS NOT NULL", "f.municipality_code IS NOT NULL"]
+    params: list[Any] = []
+    if prefecture_code:
+        where.append("f.prefecture_code = %s")
+        params.append(prefecture_code)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT f.municipality_code, f.address
+            FROM facilities f
+            JOIN data_sources ds ON ds.id = f.source_id AND ds.dataset_kind = 'official'
+            WHERE {' AND '.join(where)}
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    tally: dict[str, dict[str, int]] = {}
+    for row in rows:
+        match = _MUNICIPALITY_RE.match(row["address"].strip())
+        if not match:
+            continue
+        name = match.group(1)
+        counts = tally.setdefault(row["municipality_code"], {})
+        counts[name] = counts.get(name, 0) + 1
+
+    # The modal spelling wins; stray typos in individual addresses drop out.
+    return {code: max(counts.items(), key=lambda kv: kv[1])[0]
+            for code, counts in tally.items() if counts}
+
+
+def has_official_boundaries(conn: psycopg.Connection) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM municipalities m
+                JOIN data_sources ds ON ds.id = m.source_id
+                WHERE ds.dataset_kind = 'official'
+            ) AS present
+            """
+        )
+        return bool(cur.fetchone()["present"])

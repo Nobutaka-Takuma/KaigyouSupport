@@ -110,13 +110,16 @@ def stations(
 def meshes(
     conn: psycopg.Connection = Depends(get_conn),
     bbox: str | None = Query(None),
-    mesh_size_m: int = Query(1000, description="メッシュサイズ。データ側の値と一致させる"),
+    mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
     profile: str | None = Query(None, description="指定するとスコアも返す"),
     radius_m: int | None = Query(None),
     limit: int = Query(8000, ge=1, le=40000),
 ) -> dict[str, Any]:
     """Mesh polygons with their population attributes, and -- when a scoring
     profile is named -- the precomputed score for the heat map."""
+    from kaigyou_core.analysis import resolve_mesh_size
+
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m)
     where = ["m.mesh_size_m = %s"]
     params: list[Any] = [mesh_size_m]
     box = parse_bbox(bbox)
@@ -155,6 +158,7 @@ def meshes(
 
     return feature_collection(
         _features(rows),
+        mesh_size_m=mesh_size_m,
         provenance=provenance.for_tables(conn, ["population_mesh"]),
         truncated=len(rows) >= limit,
     )

@@ -65,6 +65,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         input_path=Path(args.input) if args.input else None,
         offline=args.offline,
         prefecture_filter=args.prefecture,
+        baseline_path=Path(args.baseline) if args.baseline else None,
     )
     _print_run(result)
     return EXIT_OK if result.ok else EXIT_PARTIAL
@@ -192,6 +193,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--offline", action="store_true", help="never touch the network")
     p.add_argument("--prefecture", default=None,
                    help="load only this prefecture code (e.g. 13); default loads all")
+    p.add_argument("--baseline",
+                   help="prior-period file, for sources that derive a change rate "
+                        "from two rounds (e.g. the 2015 census against 2020)")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("run-all", help="run every configured source")

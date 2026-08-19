@@ -81,36 +81,50 @@ sources:
 
   estat_population_mesh:
     adapter: estat_mesh
-    name: "国勢調査 3次メッシュ（1kmメッシュ）人口・世帯"
+    name: "国勢調査 500mメッシュ 人口・世帯（2020年）"
     publisher: "総務省統計局 / e-Stat 統計GIS"
     dataset_kind: official
     homepage_url: "https://www.e-stat.go.jp/gis/statmap-search?type=1"
     license: "政府統計の総合窓口（e-Stat）利用規約 / CC BY 4.0 相当"
-    # The 統計GIS bulk endpoint. `dlserveyId` selects the census round and
-    # `code` the prefecture; both are supplied by params below.
-    url: "https://www.e-stat.go.jp/gis/statmap-search/data"
-    # NOTE: dlserveyId identifies the census round and mesh level. Confirm the
-    # current value on the 統計GIS page above before relying on the automatic
-    # download -- it changes with each census and is not documented as stable.
-    params:
-      dlserveyId: "A002005212020"   # 2020年国勢調査 3次メッシュ（要確認）
-      code: "13"
-      coordSys: "1"
-      format: "mesh"
-      downloadType: "5"
-    # Optional: a second census round used to derive population_growth.
-    growth_baseline:
-      dlserveyId: "A002005212015"   # 2015年国勢調査 3次メッシュ（要確認）
-      years: 5
-    mesh_size_m: 1000
+    # Distributed from the 統計GIS search form as `tblTxxxxxxHnn.txt` (Shift-JIS,
+    # a Japanese label row under the header). Like the clinic file it has no
+    # stable direct link, so the normal route is:
+    #
+    #   kaigyou-etl run estat_population_mesh \
+    #       --input  tblT001141H13.txt \
+    #       --baseline tblT000847H13.txt
+    #
+    url: null
     encoding: cp932
+    source_date: 2020-10-01
+    # Mesh resolution is NOT set here: it is derived from the length of
+    # KEY_CODE (8 digits = 1km, 9 = 500m, 10 = 250m) and stored per row, so
+    # swapping resolutions is a matter of loading a different file.
     columns:
-      mesh_code:  ["KEY_CODE", "MESH_ID", "メッシュコード"]
-      population: ["T001102001", "T000876001", "人口総数"]
-      age_0_14:   ["T001102002", "T000876020", "総数0～14歳"]
-      age_15_64:  ["T001102003", "T000876021", "総数15～64歳"]
-      age_65_plus: ["T001102004", "T000876022", "総数65歳以上"]
-      households: ["T001102006", "T000876023", "世帯総数"]
+      mesh_code:   ["KEY_CODE", "MESH_ID", "メッシュコード"]
+      population:  ["T001141001", "T000876001", "人口総数"]
+      age_0_14:    ["T001141004", "T000876020", "総数0～14歳"]
+      age_15_64:   ["T001141010", "T000876021", "総数15～64歳"]
+      age_65_plus: ["T001141019", "T000876022", "総数65歳以上"]
+      households:  ["T001141034", "T000876023", "世帯総数"]
+    # Suppression bookkeeping columns. Values are counted during validate and
+    # reported; the published figures are loaded as-is rather than being
+    # "un-suppressed", which would mean inventing numbers.
+    suppression_columns:
+      flag: "HTKSYORI"
+      moved_to: "HTKSAKI"
+      merged_from: "GASSAN"
+    # Prior census round, used only to derive population_growth. Its column
+    # ids differ from the current round (65歳以上 is 019 in 2020 but 016 in
+    # 2015), so it carries its own mapping.
+    growth_baseline:
+      name: "国勢調査 500mメッシュ 人口（2015年）"
+      source_date: 2015-10-01
+      years: 5
+      encoding: cp932
+      columns:
+        mesh_code:  ["KEY_CODE"]
+        population: ["T000847001", "人口総数"]
 
   mlit_stations:
     adapter: mlit_stations

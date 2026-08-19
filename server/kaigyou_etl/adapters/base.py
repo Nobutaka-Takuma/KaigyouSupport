@@ -44,6 +44,8 @@ class AdapterContext:
     offline: bool = False
     #: Restrict a multi-prefecture source to one prefecture code. None loads all.
     prefecture_filter: str | None = None
+    #: Prior-period artefact, for sources that derive a change rate from two rounds.
+    baseline_path: Path | None = None
 
     @property
     def prefecture_code(self) -> str:

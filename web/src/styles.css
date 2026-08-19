@@ -361,3 +361,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .panel { width: 100%; border-left: 0; border-top: 1px solid var(--border); }
   .mapwrap { height: 55vh; flex: none; }
 }
+
+.caveats { padding-left: 20px; }
+.caveats li { margin-bottom: 6px; }

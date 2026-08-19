@@ -61,10 +61,12 @@ profiles:
     # --- Growth ------------------------------------------------------------
     growth:
       metric: population_growth
-      # Fractional change over the source's comparison interval that maps to
-      # the bottom and top of the scale.
-      low: -0.05    #  -5% -> 0
-      high: 0.08    #  +8% -> 100
+      # Fractional change over the source's comparison interval (2015->2020)
+      # that maps to the bottom and top of the scale. Set from the observed
+      # spread of Tokyo 500m meshes with 100+ residents: p10 = -7.6%,
+      # p90 = +11.4%. Small meshes swing hard, so the tails are clipped.
+      low: -0.08    #  -8%  -> 0
+      high: 0.12    # +12%  -> 100
 
     # --- Accessibility -----------------------------------------------------
     accessibility:
@@ -104,8 +106,8 @@ profiles:
       cap: 20000
     growth:
       metric: population_growth
-      low: -0.05
-      high: 0.08
+      low: -0.08
+      high: 0.12
     accessibility:
       weights:
         station_distance: 0.6

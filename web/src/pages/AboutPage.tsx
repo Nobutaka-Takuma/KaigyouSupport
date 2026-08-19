@@ -54,6 +54,17 @@ export function AboutPage() {
         )}
       </section>
 
+      {meta && meta.caveats?.length > 0 && (
+        <section>
+          <h2>数値を読むときの注意</h2>
+          <ul className="caveats">
+            {meta.caveats.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <section>
         <h2>データ取得状況</h2>
         {error && <p className="notice notice--error">取得状況を読み込めません: {error}</p>}

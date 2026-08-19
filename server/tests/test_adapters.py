@@ -147,57 +147,130 @@ def test_renamed_columns_are_resolved_from_config(tmp_path):
 
 
 # ---------------------------------------------------------------------- mesh
+MESH_2020 = FIXTURES / "estat_mesh_2020.txt"
+MESH_2015 = FIXTURES / "estat_mesh_2015.txt"
+
+
 @pytest.fixture
 def mesh_adapter(tmp_path):
     return build("estat_population_mesh", tmp_path)
 
 
-def test_mesh_units_row_is_skipped(mesh_adapter):
-    facts = mesh_adapter.validate(FIXTURES / "estat_mesh_sample.csv")
-    assert facts["row_count"] == 4       # header + units row excluded
-    assert facts["mesh_code_lengths"] == {8: 3}
-    assert facts["invalid_mesh_codes_in_sample"] == 1
+@pytest.fixture
+def mesh_adapter_with_baseline(tmp_path):
+    adapter = build("estat_population_mesh", tmp_path)
+    adapter.ctx.baseline_path = MESH_2015
+    return adapter
 
 
-def test_mesh_geometry_is_derived_from_the_code(mesh_adapter):
-    records = {r["mesh_code"]: r
-               for r in mesh_adapter.transform(FIXTURES / "estat_mesh_sample.csv")}
-    row = records["53394611"]
-    assert row["mesh_size_m"] == 1000
+def test_japanese_label_row_is_skipped(mesh_adapter):
+    """e-Stat inserts a row of column captions under the header."""
+    facts = mesh_adapter.validate(MESH_2020)
+    assert facts["row_count"] == 6      # 7 lines minus the caption row
+
+
+def test_real_schema_columns_are_resolved(mesh_adapter):
+    facts = mesh_adapter.validate(MESH_2020)
+    assert facts["resolved_columns"]["population"] == "T001141001"
+    assert facts["resolved_columns"]["age_65_plus"] == "T001141019"
+    assert facts["resolved_columns"]["households"] == "T001141034"
+
+
+def test_mesh_resolution_comes_from_the_code_length(mesh_adapter):
+    facts = mesh_adapter.validate(MESH_2020)
+    assert facts["mesh_size_m"] == [500]      # 9-digit codes
+    assert facts["mesh_code_lengths"] == {9: 5}   # bad-code is not counted
+
+
+def test_validate_reports_the_population_total(mesh_adapter):
+    """The one figure that can be checked against the published headline.
+
+    It counts only rows that will actually load, so an unusable row cannot
+    inflate the total into agreeing with the official figure by accident.
+    """
+    facts = mesh_adapter.validate(MESH_2020)
+    assert facts["population_total"] == 12540 + 8300 + 317 + 1   # bad-code excluded
+    assert facts["loadable_rows"] == 5
+    assert facts["invalid_mesh_codes"] == 1
+
+
+def test_validate_reports_suppression_extent(mesh_adapter):
+    facts = mesh_adapter.validate(MESH_2020)
+    assert facts["suppression_flag_counts"] == {"0": 3, "1": 1, "2": 1}
+    assert facts["suppressed_rows"] == 2   # the merge target and the merged cell
+
+
+def test_geometry_is_derived_from_the_mesh_code(mesh_adapter):
+    records = {r["mesh_code"]: r for r in mesh_adapter.transform(MESH_2020)}
+    row = records["533946113"]
+    assert row["mesh_size_m"] == 500
     assert row["polygon_wkt"].startswith("POLYGON((")
-    assert row["centroid_lat"] == pytest.approx(35.6792, abs=1e-3)
     assert row["population"] == 12540
+    assert row["age_65_plus"] == 2960
     assert row["households"] == 6900
 
 
-def test_suppressed_counts_become_null_not_zero(mesh_adapter):
-    records = {r["mesh_code"]: r
-               for r in mesh_adapter.transform(FIXTURES / "estat_mesh_sample.csv")}
-    assert records["53394613"]["population"] is None
-    assert records["53394613"]["households"] is None
+def test_unpublished_counts_become_null_not_zero(mesh_adapter):
+    records = {r["mesh_code"]: r for r in mesh_adapter.transform(MESH_2020)}
+    assert records["533946121"]["population"] is None
+    assert records["533946121"]["households"] is None
 
 
 def test_invalid_mesh_codes_are_skipped(mesh_adapter):
-    codes = {r["mesh_code"]
-             for r in mesh_adapter.transform(FIXTURES / "estat_mesh_sample.csv")}
+    codes = {r["mesh_code"] for r in mesh_adapter.transform(MESH_2020)}
     assert "bad-code" not in codes
 
 
+def test_suppressed_rows_are_loaded_as_published(mesh_adapter):
+    """Reversing the disclosure control would mean inventing numbers."""
+    records = {r["mesh_code"]: r for r in mesh_adapter.transform(MESH_2020)}
+    assert records["533946111"]["population"] == 317   # merge target
+    assert records["533946112"]["population"] == 1     # suppressed cell
+
+
+# --------------------------------------------------------------- growth rate
 def test_growth_is_null_without_a_baseline(mesh_adapter):
-    records = list(mesh_adapter.transform(FIXTURES / "estat_mesh_sample.csv"))
+    records = list(mesh_adapter.transform(MESH_2020))
     assert all(r["population_growth"] is None for r in records)
 
 
-def test_growth_is_computed_when_the_baseline_is_present(tmp_path):
-    baseline = tmp_path / "estat_mesh_baseline.csv"
-    baseline.write_bytes((FIXTURES / "estat_mesh_baseline.csv").read_bytes())
-    adapter = build("estat_population_mesh", tmp_path,
-                    {"growth_baseline": {"path": str(baseline), "years": 5}})
+def test_baseline_uses_its_own_column_ids(mesh_adapter_with_baseline):
+    """2015 calls total population T000847001, 2020 calls it T001141001."""
+    _, facts = mesh_adapter_with_baseline._baseline_population()
+    assert facts["baseline_columns"]["population"] == "T000847001"
+    assert facts["baseline_rows"] == 3
+
+
+def test_growth_is_computed_against_the_prior_round(mesh_adapter_with_baseline):
     records = {r["mesh_code"]: r
-               for r in adapter.transform(FIXTURES / "estat_mesh_sample.csv")}
-    # 12540 vs 12000 over the interval
-    assert records["53394611"]["population_growth"] == pytest.approx(0.045)
-    assert records["53394612"]["population_growth"] == pytest.approx(-0.0235, abs=1e-3)
+               for r in mesh_adapter_with_baseline.transform(MESH_2020)}
+    assert records["533946113"]["population_growth"] == pytest.approx(
+        (12540 - 12000) / 12000
+    )
+    assert records["533946114"]["population_growth"] == pytest.approx(
+        (8300 - 8500) / 8500
+    )
+
+
+def test_meshes_absent_from_the_baseline_have_no_growth(mesh_adapter_with_baseline):
+    records = {r["mesh_code"]: r
+               for r in mesh_adapter_with_baseline.transform(MESH_2020)}
+    assert records["533946112"]["population_growth"] is None
+
+
+def test_validate_reports_baseline_coverage(mesh_adapter_with_baseline):
+    facts = mesh_adapter_with_baseline.validate(MESH_2020)
+    assert facts["baseline_supplied"] is True
+    assert facts["baseline_matched_meshes"] == 3
+    assert facts["meshes_without_baseline"] == 2   # 112 and 121; bad-code is excluded
+
+
+def test_a_missing_baseline_file_is_a_named_failure(tmp_path):
+    adapter = build("estat_population_mesh", tmp_path)
+    adapter.ctx.baseline_path = tmp_path / "nope.txt"
+    with pytest.raises(AcquisitionError) as exc:
+        adapter.validate(MESH_2020)
+    assert exc.value.error_type == "input_missing"
 
 
 # ------------------------------------------------------------------ download

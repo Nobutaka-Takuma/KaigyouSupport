@@ -69,6 +69,7 @@ export interface CandidateAnalysis {
     daily_passengers: number | null;
   };
   mesh_count: number | null;
+  mesh_size_m?: number | null;
   scores: Scores;
   warnings: string[];
   by_radius?: Record<string, RadiusMetrics>;
@@ -100,6 +101,7 @@ export interface Meta {
   disclaimer: string;
   score_disclaimer: string;
   out_of_scope: string[];
+  caveats: string[];
 }
 
 export interface RankingItem {

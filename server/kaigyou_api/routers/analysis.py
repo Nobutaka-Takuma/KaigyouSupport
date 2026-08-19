@@ -19,6 +19,7 @@ from kaigyou_core.analysis import (
     analyze_point,
     facility_counts,
     load_distributions,
+    resolve_mesh_size,
 )
 from kaigyou_core.scoring import ScoringModel, scope_key
 
@@ -27,29 +28,51 @@ router = APIRouter()
 ANALYSIS_TABLES = ["population_mesh", "facilities", "stations"]
 
 
+# Which score components each dataset feeds. Used to say precisely what is
+# affected when one dataset is synthetic, instead of condemning the whole
+# response -- a real population figure divided by a real clinic count stays
+# meaningful even while the station data is still a placeholder.
+_DATASET_COMPONENTS = {
+    "population_mesh": ("需要", "成長", "競合"),
+    "facilities": ("競合",),
+    "stations": ("アクセス",),
+}
+
+
 def _dataset_warnings(prov: dict[str, Any]) -> list[str]:
-    """Warn about combinations that make a derived figure meaningless.
-
-    Ratios like 人口/歯科医院 divide one dataset by another. If one side is real
-    and the other synthetic the quotient is not an estimate of anything, and
-    saying only "this database contains sample data" is not enough -- the
-    number itself has to be called out.
-    """
+    """Say which figures on this response rest on synthetic data."""
     kinds: dict[str, set[str]] = {}
+    labels: dict[str, str] = {}
     for entry in prov.get("sources", []):
-        kinds.setdefault(entry["dataset_label"], set()).add(entry["dataset_kind"])
+        kinds.setdefault(entry["dataset"], set()).add(entry["dataset_kind"])
+        labels[entry["dataset"]] = entry["dataset_label"]
 
-    sample = sorted(label for label, k in kinds.items() if "sample" in k)
-    official = sorted(label for label, k in kinds.items() if "official" in k)
-    warnings: list[str] = []
-    if sample:
+    sample = sorted(d for d, k in kinds.items() if "sample" in k)
+    if not sample:
+        return []
+
+    affected: list[str] = []
+    for dataset in sample:
+        affected.extend(_DATASET_COMPONENTS.get(dataset, ()))
+    affected = sorted(set(affected))
+
+    warnings = [
+        "合成（サンプル）データを含みます: "
+        + "、".join(labels.get(d, d) for d in sample)
+        + "。実データではありません。"
+    ]
+    if affected:
         warnings.append(
-            "合成（サンプル）データを含みます: " + "、".join(sample) + "。実データではありません。"
+            "このため " + "・".join(f"{a}スコア" for a in affected)
+            + " と総合スコアは実データに基づきません。"
         )
-    if sample and official:
+    unaffected = sorted(
+        set().union(*(set(v) for v in _DATASET_COMPONENTS.values())) - set(affected)
+    )
+    if unaffected:
         warnings.append(
-            "実データ（" + "、".join(official) + "）と合成データ（" + "、".join(sample) + "）を"
-            "組み合わせた指標（人口/歯科医院、需要スコア等）は意味を持ちません。"
+            "実データのみに基づく指標: " + "・".join(f"{a}スコア" for a in unaffected)
+            + "、および商圏人口・歯科医院数・最寄り歯科距離。"
         )
     return warnings
 
@@ -72,6 +95,21 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         warnings.append("この地点の商圏に人口メッシュデータがありません。")
     if metrics.get("nearest_station") is None:
         warnings.append("駅データが未取得のため、アクセス指標を算出できません。")
+
+    # The census counts where people live, not where they are during business
+    # hours. In office and entertainment districts the two differ by an order
+    # of magnitude, and the population-per-clinic ratio understates demand
+    # badly there. Say so on the affected sites rather than in the footnotes.
+    population = metrics.get("population")
+    facility_count = metrics.get("facility_count") or 0
+    if population is not None and facility_count > 0:
+        per_clinic = population / facility_count
+        if per_clinic < 800 and facility_count >= 5:
+            warnings.append(
+                "人口は国勢調査の常住人口（夜間人口）です。この地点は歯科医院数に対して"
+                "常住人口が極端に少なく、オフィス街・繁華街の可能性があります。"
+                "昼間人口は含まれていないため、競合・需要スコアは実態を過小評価します。"
+            )
 
     return {
         "location": {"lat": lat, "lng": lng},
@@ -112,12 +150,14 @@ def candidate_analysis(
     radius: int = Query(1000, ge=100, le=10000, description="商圏半径（m）"),
     all_radii: bool = Query(True, description="設定済みの全半径について人口・競合も返す"),
     category: str = Query(DEFAULT_CATEGORY),
-    mesh_size_m: int = Query(DEFAULT_MESH_SIZE_M),
+    mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
     prefecture_code: str = Query("13"),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     result = _analyze(conn, lat, lng, radius, model, category, mesh_size_m, prefecture_code)
+    result["mesh_size_m"] = mesh_size_m
 
     if all_radii:
         by_radius = {}
@@ -223,11 +263,12 @@ def compare(
     radius: int = Query(1000, ge=100, le=10000),
     labels: str | None = Query(None, description="地点名をセミコロン区切りで"),
     category: str = Query(DEFAULT_CATEGORY),
-    mesh_size_m: int = Query(DEFAULT_MESH_SIZE_M),
+    mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
     prefecture_code: str = Query("13"),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     parsed: list[tuple[float, float]] = []
     for chunk in points.split(";"):
         chunk = chunk.strip()
@@ -258,6 +299,7 @@ def compare(
 
     return {
         "radius_m": radius,
+        "mesh_size_m": mesh_size_m,
         "locations": results,
         "model": model.describe(),
         "provenance": prov,

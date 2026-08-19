@@ -18,17 +18,26 @@ from typing import Any
 import psycopg
 
 from kaigyou_core import config as cfg
-from kaigyou_core.analysis import DEFAULT_CATEGORY, DEFAULT_MESH_SIZE_M, mesh_catchments
+from kaigyou_core.analysis import (
+    DEFAULT_CATEGORY,
+    has_official_boundaries,
+    mesh_catchments,
+    municipality_names_from_facilities,
+    resolve_mesh_size,
+)
 from kaigyou_core.scoring import DISTRIBUTION_METRICS, ScoringModel, distributions_from_rows, scope_key
 
 
 def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
-                  mesh_size_m: int = DEFAULT_MESH_SIZE_M,
+                  mesh_size_m: int | None = None,
                   prefecture_code: str = "13",
                   facility_category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
+    if mesh_size_m is None:
+        raise RuntimeError("no population mesh data loaded; nothing to compute statistics from")
     model = ScoringModel(cfg.scoring_config())
     radii = radii or sorted(set(model.radii + [model.mesh_scoring_radius_m]))
-    summary: dict[str, Any] = {"radii": radii, "scopes": {}}
+    summary: dict[str, Any] = {"radii": radii, "mesh_size_m": mesh_size_m, "scopes": {}}
 
     for radius in radii:
         rows = mesh_catchments(conn, radius, mesh_size_m=mesh_size_m,
@@ -74,9 +83,12 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
 
 def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                         radius_m: int | None = None,
-                        mesh_size_m: int = DEFAULT_MESH_SIZE_M,
+                        mesh_size_m: int | None = None,
                         prefecture_code: str = "13",
                         facility_category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
+    if mesh_size_m is None:
+        raise RuntimeError("no population mesh data loaded; nothing to score")
     model = ScoringModel(cfg.scoring_config(), profile)
     radius = radius_m or model.mesh_scoring_radius_m
     scope = scope_key(mesh_size_m, radius, prefecture_code)
@@ -92,6 +104,13 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     rows = mesh_catchments(conn, radius, mesh_size_m=mesh_size_m,
                            prefecture_code=prefecture_code,
                            facility_category=facility_category)
+
+    # Area names for the ranking table. Official boundary polygons are the
+    # right source; without them, fall back to the municipality recorded on
+    # the nearby facilities, which is real published data either way.
+    use_boundaries = has_official_boundaries(conn)
+    labels = ({} if use_boundaries
+              else _derive_area_labels(conn, mesh_size_m, prefecture_code))
 
     with conn.cursor() as cur:
         cur.execute(
@@ -116,11 +135,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     %(population_per_facility)s, %(nearest_facility_distance_m)s,
                     %(nearest_station)s, %(station_distance_m)s, %(daily_passengers)s,
                     %(demand)s, %(competition)s, %(growth)s, %(accessibility)s,
-                    %(overall)s,
-                    (SELECT mu.name FROM municipalities mu
-                      JOIN population_mesh pm ON pm.id = %(mesh_id)s
-                     WHERE ST_Contains(mu.geom, pm.centroid) LIMIT 1),
-                    now()
+                    %(overall)s, %(area_label)s, now()
                 )
                 ON CONFLICT (mesh_id, profile, radius_m) DO UPDATE SET
                     overall_score = EXCLUDED.overall_score,
@@ -146,10 +161,17 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     "growth": scored["growth"],
                     "accessibility": scored["accessibility"],
                     "overall": scored["overall"],
+                    "area_label": (
+                        _boundary_label(conn, row["mesh_id"]) if use_boundaries
+                        else labels.get(row["mesh_id"])
+                    ),
                 },
             )
     conn.commit()
-    return {"profile": model.profile_name, "radius_m": radius, "meshes_scored": len(rows)}
+    return {"profile": model.profile_name, "radius_m": radius,
+            "area_label_source": ("municipalities" if use_boundaries
+                                  else "derived_from_facility_addresses"),
+            "mesh_size_m": mesh_size_m, "meshes_scored": len(rows)}
 
 
 def _describe(values: list[float]) -> dict[str, Any]:
@@ -172,3 +194,53 @@ def _describe(values: list[float]) -> dict[str, Any]:
         "stddev_value": variance ** 0.5,
         "sample_count": n,
     }
+
+
+def _boundary_label(conn: psycopg.Connection, mesh_id: int) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT mu.name
+            FROM municipalities mu
+            JOIN data_sources ds ON ds.id = mu.source_id AND ds.dataset_kind = 'official'
+            JOIN population_mesh pm ON pm.id = %s
+            WHERE ST_Contains(mu.geom, pm.centroid)
+            LIMIT 1
+            """,
+            (mesh_id,),
+        )
+        row = cur.fetchone()
+    return row["name"] if row else None
+
+
+def _derive_area_labels(conn: psycopg.Connection, mesh_size_m: int,
+                        prefecture_code: str) -> dict[int, str]:
+    """Label each mesh with the municipality most of its nearby clinics are in."""
+    names = municipality_names_from_facilities(conn, prefecture_code)
+    if not names:
+        return {}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (m.id) m.id AS mesh_id, x.municipality_code
+            FROM population_mesh m
+            CROSS JOIN LATERAL (
+                SELECT f.municipality_code, count(*) AS n
+                FROM facilities f
+                JOIN data_sources ds
+                  ON ds.id = f.source_id AND ds.dataset_kind = 'official'
+                WHERE f.municipality_code IS NOT NULL
+                  AND ST_DWithin(f.geom::geography, m.centroid::geography, 1500)
+                GROUP BY f.municipality_code
+                ORDER BY n DESC
+                LIMIT 1
+            ) x
+            WHERE m.mesh_size_m = %s AND m.prefecture_code = %s
+            """,
+            (mesh_size_m, prefecture_code),
+        )
+        rows = cur.fetchall()
+
+    return {r["mesh_id"]: names[r["municipality_code"]]
+            for r in rows if r["municipality_code"] in names}
