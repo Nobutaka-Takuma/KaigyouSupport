@@ -1,6 +1,6 @@
 # データ取得状況レポート
 
-生成: `kaigyou-etl status` / 2026-08-19T10:53:23Z
+生成: `kaigyou-etl status` / 2026-08-19T11:14:05Z
 
 ```
 データ取得状況
@@ -13,13 +13,9 @@
          国土数値情報 行政区域（N03）
          理由: download: network_blocked: could not reach https://nlftp.mlit.go.jp/ksj/gml/data/N03/N03-2023/N03-20230101_13_GML.zip: ProxyError: 403 Forbidden
          URL : https://nlftp.mlit.go.jp/ksj/gml/data/N03/N03-2023/N03-20230101_13_GML.zip
-[FAILED] mlit_stations              official rows=      0
+[OK    ] mlit_stations              official rows=   9317
          国土数値情報 駅別乗降客数（S12）
-         理由: download: network_blocked: could not reach https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-23/S12-23_GML.zip: ProxyError: 403 Forbidden
-         URL : https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-23/S12-23_GML.zip
-[OK    ] sample_stations            SAMPLE   rows=    230
-         【サンプル】駅・乗降客数（合成データ）
+         URL : https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-25/S12-25_GML.zip
 ==============================================================================
-公的データを取得できた情報源: 2 / 4
-⚠ サンプル（合成）データが投入されています。実データではありません。
+公的データを取得できた情報源: 3 / 4
 ```

@@ -133,17 +133,52 @@ sources:
     dataset_kind: official
     homepage_url: "https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-S12.html"
     license: "国土数値情報 利用約款"
-    url: "https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-23/S12-23_GML.zip"
-    prefecture_code: "13"
-    # Attribute names in the S12 GeoJSON/shape payload.
+    url: "https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-25/S12-25_GML.zip"
+    source_date: 2025-01-01
+    # The zip ships the same shapefile twice, under Shift-JIS/ and UTF-8/.
+    # Preference order; the first directory present wins.
+    archive_variants:
+      - { path: "UTF-8", encoding: "utf-8" }
+      - { path: "Shift-JIS", encoding: "cp932" }
     columns:
-      station_id:   ["S12_001c", "S12_001g"]
+      station_id:   ["S12_001c"]           # stationCode
+      group_id:     ["S12_001g"]           # groupCode -- same station, any operator
       name:         ["S12_001"]
       operator:     ["S12_002"]
       railway_line: ["S12_003"]
-      # S12 publishes one passenger column per year; the adapter picks the
-      # most recent non-null of these.
-      passengers:   ["S12_053", "S12_049", "S12_045", "S12_041"]
+
+    # Passenger counts are published as one four-column block per survey year:
+    #   duplicate, dataEorN, remarks, passengers
+    # starting at S12_006 / S12_009 for 2011 and advancing by 4 each year
+    # (so 2024 is S12_058 / S12_061). Bump last_year when a new edition ships;
+    # years whose columns are absent from the file are skipped and reported.
+    passenger_series:
+      first_year: 2011
+      last_year: 2024
+      column_template: "S12_{index:03d}"
+      duplicate_start: 6
+      passengers_start: 9
+      stride: 4
+      # Only rows flagged 1 carry the figure. Rows flagged 2 are the same
+      # operator's other entries for the station and are published as 0 --
+      # counting them as "no data" would silently drop real passengers.
+      primary_duplicate_code: "1"
+
+    # A large interchange is published as several rows, one per operator, each
+    # with its own count. Reporting only the nearest row would describe
+    # Shinjuku by its Metro entrance alone (200k/day) rather than the station
+    # (2.7M/day), so rows sharing a group are combined into one station.
+    # S12 publishes no prefecture. It is taken from the nearest loaded mesh
+    # within this distance; beyond it the column is left NULL rather than
+    # guessed.
+    prefecture_match_radius_m: 3000
+
+    grouping:
+      enabled: true
+      # Guard against a blank or reused group code tying together stations that
+      # are nowhere near each other: beyond this spread, fall back to the
+      # per-operator station code.
+      max_spread_m: 2000
 
   mlit_municipalities:
     adapter: mlit_municipalities

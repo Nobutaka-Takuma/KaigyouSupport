@@ -273,6 +273,119 @@ def test_a_missing_baseline_file_is_a_named_failure(tmp_path):
     assert exc.value.error_type == "input_missing"
 
 
+# ------------------------------------------------------------------ stations
+STATION_FILE = FIXTURES / "mlit_s12_stations.zip"
+
+
+@pytest.fixture
+def stations_adapter(tmp_path):
+    return build("mlit_stations", tmp_path)
+
+
+def stations_by_name(adapter):
+    return {r["name"]: r for r in adapter.transform(STATION_FILE)}
+
+
+def test_year_columns_are_derived_from_config(stations_adapter):
+    facts = stations_adapter.validate(STATION_FILE)
+    assert facts["latest_year"] == 2024
+    assert facts["years_available"] == list(range(2011, 2025))
+
+
+def test_operators_of_one_station_are_combined(stations_adapter):
+    """Shinjuku is eleven published rows but one station."""
+    rows = stations_by_name(stations_adapter)
+    hub = rows["大結節"]
+    assert hub["daily_passengers"] == 1_500_000     # 1,000,000 + 500,000
+    assert hub["attributes"]["record_count"] == 3
+    assert set(hub["attributes"]["operators"]) == {"東日本旅客鉄道", "京王電鉄"}
+    assert "ほか" in hub["operator"]
+
+
+def test_duplicate_rows_contribute_zero_not_missing_data(stations_adapter):
+    """A row flagged 2 is published as 0 because it is counted elsewhere.
+
+    Treating it as "no data for 2024" would silently fall back to an older
+    year and report a stale figure.
+    """
+    hub = stations_by_name(stations_adapter)["大結節"]
+    assert hub["passengers_year"] == 2024
+
+
+def test_the_newest_year_with_data_is_used(stations_adapter):
+    row = stations_by_name(stations_adapter)["旧年"]
+    assert row["daily_passengers"] == 12345
+    assert row["passengers_year"] == 2018
+
+
+def test_a_station_with_no_published_figure_stays_null(stations_adapter):
+    row = stations_by_name(stations_adapter)["無数値"]
+    assert row["daily_passengers"] is None
+    assert row["passengers_year"] is None
+
+
+def test_blank_group_codes_do_not_merge_unrelated_stations(stations_adapter):
+    """Two stations 65km apart share an empty group code in the real file."""
+    rows = stations_by_name(stations_adapter)
+    assert rows["空グループ北"]["daily_passengers"] == 700
+    assert rows["空グループ南"]["daily_passengers"] == 800
+
+
+def test_a_group_spanning_an_implausible_distance_is_split(stations_adapter):
+    rows = stations_by_name(stations_adapter)
+    assert rows["散在A"]["daily_passengers"] == 111
+    assert rows["散在B"]["daily_passengers"] == 222
+
+
+def test_line_geometry_is_reduced_to_a_point(stations_adapter):
+    hub = stations_by_name(stations_adapter)["大結節"]
+    # midpoint of the two counted platforms' segments
+    assert hub["lng"] == pytest.approx(139.70055, abs=1e-4)
+    assert hub["lat"] == pytest.approx(35.69030, abs=1e-4)
+
+
+def test_prefecture_is_left_unset_because_s12_does_not_publish_one(stations_adapter):
+    assert all(r["prefecture_code"] is None
+               for r in stations_adapter.transform(STATION_FILE))
+
+
+def test_validate_counts_stations_not_rows(stations_adapter):
+    facts = stations_adapter.validate(STATION_FILE)
+    assert facts["feature_count"] == 9
+    assert facts["station_count"] == 7       # the three-operator hub collapses
+    assert facts["stations_without_passengers"] == 1
+
+
+def test_encoding_variant_is_selected_by_config(tmp_path):
+    """The archive ships the layer twice; reading the wrong copy mangles names."""
+    adapter = build("mlit_stations", tmp_path,
+                    {"archive_variants": [{"path": "Shift-JIS", "encoding": "cp932"}]})
+    assert "大結節" in stations_by_name(adapter)
+
+    adapter = build("mlit_stations", tmp_path,
+                    {"archive_variants": [{"path": "UTF-8", "encoding": "utf-8"}]})
+    assert "大結節" in stations_by_name(adapter)
+
+
+def test_a_missing_variant_directory_is_a_named_failure(tmp_path):
+    adapter = build("mlit_stations", tmp_path,
+                    {"archive_variants": [{"path": "NoSuchDir", "encoding": "utf-8"}]})
+    with pytest.raises(AcquisitionError) as exc:
+        adapter.validate(STATION_FILE)
+    assert exc.value.error_type == "schema_mismatch"
+
+
+def test_an_edition_without_the_configured_years_is_reported(tmp_path):
+    adapter = build("mlit_stations", tmp_path,
+                    {"passenger_series": {"first_year": 2100, "last_year": 2101,
+                                          "column_template": "S12_{index:03d}",
+                                          "duplicate_start": 900,
+                                          "passengers_start": 903, "stride": 4}})
+    with pytest.raises(AcquisitionError) as exc:
+        adapter.validate(STATION_FILE)
+    assert exc.value.error_type == "schema_mismatch"
+
+
 # ------------------------------------------------------------------ download
 def test_missing_input_file_is_a_named_failure(tmp_path):
     adapter = build("mhlw_dental_clinics", tmp_path)

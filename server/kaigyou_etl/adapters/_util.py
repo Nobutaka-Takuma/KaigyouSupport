@@ -101,8 +101,14 @@ def to_float(value: Any) -> float | None:
         return None
 
 
-def read_shapefile(path: Path, member_prefix: str | None = None) -> tuple[list[str], list[Any]]:
+def read_shapefile(path: Path, member_prefix: str | None = None,
+                   encoding: str = "cp932") -> tuple[list[str], list[Any]]:
     """Read a shapefile from a zip (or a bare .shp) using pyshp.
+
+    ``member_prefix`` selects among several copies inside one archive -- the
+    国土数値情報 archives ship the same layer twice, under ``Shift-JIS/`` and
+    ``UTF-8/``, and reading one with the other's encoding silently mangles
+    every Japanese name.
 
     Returns (field names, list of pyshp ShapeRecord).
     """
@@ -111,7 +117,14 @@ def read_shapefile(path: Path, member_prefix: str | None = None) -> tuple[list[s
     if is_zip(path):
         shp_members = zip_members(path, (".shp",))
         if member_prefix:
-            shp_members = [m for m in shp_members if member_prefix in m] or shp_members
+            matched = [m for m in shp_members if member_prefix in m]
+            if not matched:
+                raise AcquisitionError(
+                    ERROR_SCHEMA,
+                    f"{path.name} has no .shp under {member_prefix!r}; "
+                    f"members: {shp_members[:5]}",
+                )
+            shp_members = matched
         if not shp_members:
             raise AcquisitionError(ERROR_SCHEMA, f"{path.name} contains no .shp member")
         stem = shp_members[0][:-4]
@@ -127,10 +140,10 @@ def read_shapefile(path: Path, member_prefix: str | None = None) -> tuple[list[s
                         continue
                     raise AcquisitionError(ERROR_SCHEMA, f"{path.name} missing .{ext} for {stem}")
                 parts[ext] = io.BytesIO(zf.read(member))
-        reader = shapefile.Reader(**{k: v for k, v in parts.items()}, encoding="cp932",
+        reader = shapefile.Reader(**{k: v for k, v in parts.items()}, encoding=encoding,
                                   encodingErrors="replace")
     else:
-        reader = shapefile.Reader(str(path), encoding="cp932", encodingErrors="replace")
+        reader = shapefile.Reader(str(path), encoding=encoding, encodingErrors="replace")
 
     fields = [f[0] for f in reader.fields[1:]]
     return fields, list(reader.iterShapeRecords())
