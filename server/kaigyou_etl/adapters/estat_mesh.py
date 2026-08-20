@@ -239,12 +239,14 @@ class EStatMeshAdapter(SourceAdapter):
             }
 
     def load(self, conn: psycopg.Connection, records: Iterable[dict[str, Any]]) -> int:
-        count = 0
+        rows = [{k: v for k, v in rec.items() if k != "growth_years"}
+                | {"source_id": self.source_id}
+                for rec in records]
         with conn.cursor() as cur:
             cur.execute("DELETE FROM population_mesh WHERE source_id = %s", (self.source_id,))
-            for rec in records:
-                cur.execute(
-                    """
+            return self.insert_many(
+                cur,
+                """
                     INSERT INTO population_mesh (
                         source_id, mesh_code, mesh_size_m, prefecture_code, geom, centroid,
                         population, age_0_14, age_15_64, age_65_plus, households,
@@ -266,12 +268,9 @@ class EStatMeshAdapter(SourceAdapter):
                         population_growth = EXCLUDED.population_growth,
                         source_date = EXCLUDED.source_date,
                         last_updated = now()
-                    """,
-                    {k: v for k, v in rec.items() if k != "growth_years"}
-                    | {"source_id": self.source_id},
-                )
-                count += 1
-        return count
+                """,
+                rows,
+            )
 
 
 def _opt(row: dict[str, str], col: dict[str, str | None], field: str) -> int | None:

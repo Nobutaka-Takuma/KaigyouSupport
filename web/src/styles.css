@@ -418,9 +418,16 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .toggle { padding: 4px 0; }
 
   /* --- map fills what is left --------------------------------------- */
-  .mappage__body { flex-direction: column; position: relative; flex: 1; min-height: 0; }
+  .mappage__body { flex-direction: column; position: relative; flex: 1; min-height: 0;
+                   --sheet-clearance: 0px; }
+  /* Once there is an analysis to show, everything on the map's bottom edge
+     moves up by the height of the collapsed sheet. */
+  .mappage__body:has(.panel__grip) { --sheet-clearance: 56px; }
   .mapwrap { flex: 1; height: auto; min-height: 0; }
-  .map__legend { bottom: 12px; right: 8px; font-size: 10.5px; padding: 4px 8px; }
+  /* Above the attribution row, not on top of it: the tile provider's credit
+     has to stay readable, and the legend is nearly the full width here. */
+  .map__legend { bottom: calc(44px + var(--sheet-clearance)); right: 8px;
+                 font-size: 10.5px; padding: 4px 8px; }
   .map__hint, .map__error { max-width: calc(100vw - 24px); font-size: 11.5px; }
 
   /* --- analysis arrives as a sheet over the map ---------------------- */
@@ -478,9 +485,8 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .mappage__body:has(.panel--open) .maplibregl-ctrl-top-right,
   .mappage__body:has(.panel--open) .maplibregl-ctrl-bottom-left,
   .mappage__body:has(.panel--open) .maplibregl-ctrl-bottom-right { display: none; }
-  .mappage__body:has(.panel__grip) .map__legend { bottom: 64px; }
-  .mappage__body:has(.panel__grip) .maplibregl-ctrl-bottom-left,
-  .mappage__body:has(.panel__grip) .maplibregl-ctrl-bottom-right { margin-bottom: 56px; }
+  .maplibregl-ctrl-bottom-left,
+  .maplibregl-ctrl-bottom-right { margin-bottom: var(--sheet-clearance); }
 
   .panel__empty { display: none; }
   .datatable { font-size: 12.5px; }

@@ -124,12 +124,12 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
             }
 
     def load(self, conn: psycopg.Connection, records: Iterable[dict[str, Any]]) -> int:
-        count = 0
+        rows = [rec | {"source_id": self.source_id} for rec in records]
         with conn.cursor() as cur:
             cur.execute("DELETE FROM municipalities WHERE source_id = %s", (self.source_id,))
-            for rec in records:
-                cur.execute(
-                    """
+            return self.insert_many(
+                cur,
+                """
                     INSERT INTO municipalities (
                         source_id, municipality_code, name, prefecture_code,
                         prefecture_name, geom, source_date, last_updated
@@ -148,8 +148,6 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
                         geom = EXCLUDED.geom,
                         source_date = EXCLUDED.source_date,
                         last_updated = now()
-                    """,
-                    rec | {"source_id": self.source_id},
-                )
-                count += 1
-        return count
+                """,
+                rows,
+            )

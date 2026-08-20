@@ -1,0 +1,14 @@
+# Runtime dependencies of the API only -- this is what Vercel installs into the
+# serverless function.
+#
+# The ETL's dependencies (httpx for downloads, pyshp for shapefiles) are
+# deliberately absent: acquisition runs on a workstation against the database,
+# never inside a request. Keeping them out keeps the function small and means a
+# publisher's file format cannot break the deployed API.
+fastapi>=0.115
+psycopg[binary]>=3.2
+pydantic>=2.9
+PyYAML>=6.0
+
+# The project's own packages (kaigyou_core, kaigyou_api).
+./server
