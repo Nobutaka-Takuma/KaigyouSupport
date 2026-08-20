@@ -1,7 +1,5 @@
 fastapi
 uvicorn
-pydantic
 psycopg[binary]
 psycopg_pool
 pyyaml
-./server
