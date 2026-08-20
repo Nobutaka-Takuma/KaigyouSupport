@@ -8,11 +8,5 @@
       "maxDuration": 30,
       "includeFiles": "{config,server,web/dist}/**"
     }
-  },
-  "rewrites": [
-    {
-      "source": "/((?!api/).*)",
-      "destination": "/index.html"
-    }
-  ]
+  }
 }

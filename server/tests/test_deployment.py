@@ -367,3 +367,38 @@ def test_the_catch_all_cannot_be_walked_out_of(client_with_web):
 
 def test_health_reports_whether_the_client_was_bundled(client_with_web):
     assert client_with_web.get("/api/health").json()["web_client_bundled"] is True
+
+
+def test_no_rewrite_can_swallow_an_asset_request():
+    """A catch-all rewrite to /index.html serves HTML where JS was expected.
+
+    `/((?!api/).*)` -> `/index.html` looks like a reasonable SPA fallback, and
+    is one when the platform checks the filesystem first. Vercel does not, for
+    a project whose backend framework it has detected: it routes by the
+    destination path, so a request for /assets/index-abc123.js is answered with
+    the page. The browser reports
+
+        Failed to load module script: Expected a JavaScript-or-Wasm module
+        script but the server responded with a MIME type of "text/html"
+
+    and renders nothing at all -- a blank page with a working API behind it.
+
+    The SPA fallback belongs in the application (see main.py's catch-all),
+    which serves a real file whenever one exists and index.html only when none
+    does.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    config = json.loads((root / "vercel.json").read_text(encoding="utf-8"))
+
+    for rewrite in config.get("rewrites", []):
+        if not rewrite.get("destination", "").endswith(".html"):
+            continue
+        pattern = re.compile(rewrite["source"].rstrip("$") + "$")
+        assert not pattern.match("/assets/index-abc123.js"), (
+            f"rewrite {rewrite['source']!r} -> {rewrite['destination']!r} also "
+            "matches asset requests, which serves them the page instead"
+        )
