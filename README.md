@@ -280,7 +280,9 @@ Vercel（静的ファイル＋API）と Supabase（PostGIS）に載せる手順�
 公開側は読むだけです。要点だけ：
 
 - Supabase のリージョンは **Tokyo**。接続文字列は用途で使い分けます
-  — 投入は Direct (5432)、Vercel からは Transaction pooler (6543)。
+  — 投入は **Session pooler (5432)**、Vercel からは **Transaction pooler (6543)**。
+  どちらもホストは `pooler.supabase.com` で、ユーザ名は `postgres.<プロジェクトID>` です。
+  `db.<ref>.supabase.co` の Direct connection は IPv6 専用なので使いません。
 - Vercel の環境変数は `DATABASE_URL` と `VITE_RASTER_*` の3つ。
 - `VITE_` で始まる変数はビルド時に埋め込まれるので、変更したら再デプロイが必要です。
 - 公開URLは誰でも見られます。限定したいなら Vercel の Deployment Protection を有効に。

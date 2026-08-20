@@ -175,3 +175,46 @@ def test_health_says_so_when_the_database_url_is_missing(monkeypatch):
     body = TestClient(app).get("/api/health").json()
     assert body["database_url_set"] is False
     assert body["database_pooled"] is None
+
+
+# ------------------------------------------------- unreachable direct host
+@pytest.mark.parametrize("message", [
+    # Windows
+    "failed to resolve host 'db.abc.supabase.co': [Errno 11001] getaddrinfo failed",
+    # Linux
+    "failed to resolve host 'db.abc.supabase.co': [Errno -2] Name or service not known",
+    # Half-configured IPv6
+    "connection failed: Network is unreachable",
+    # libpq with nothing to say for itself
+    "connection is bad: no error details available",
+])
+def test_the_ipv6_only_direct_host_is_explained_however_it_fails(message):
+    """The wording differs per platform, so the rule cannot depend on it."""
+    hint = db.connection_hint(
+        "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres", message)
+    assert hint is not None
+    assert "Session pooler" in hint
+
+
+def test_a_pooler_host_is_left_alone():
+    """It reached the right host; whatever went wrong, this is not the advice."""
+    assert db.connection_hint(
+        "postgresql://postgres.abc:pw@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres",
+        "connection failed: timeout expired") is None
+
+
+def test_a_local_database_is_left_alone():
+    assert db.connection_hint(
+        "postgresql://kaigyou:kaigyou@127.0.0.1:5432/kaigyou",
+        "connection refused") is None
+
+
+@pytest.mark.parametrize("message", [
+    'password authentication failed for user "postgres"',
+    'database "postgres" does not exist',
+    'permission denied for schema public',
+])
+def test_getting_far_enough_to_be_rejected_means_the_host_was_fine(message):
+    """Being told no is proof the address resolved -- do not blame the address."""
+    assert db.connection_hint(
+        "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres", message) is None

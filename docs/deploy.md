@@ -32,21 +32,36 @@
 
    （`kaigyou-etl migrate` も同じことをしますが、権限の問題を先に潰しておくほうが確実です。）
 
-### 接続文字列は2種類あり、用途が違います
+### 接続文字列は3種類あり、使うのは Pooler の2つです
 
-Supabase の **Project Settings → Database → Connection string** に出てくるものです。
-**この2つを取り違えると、動くけれど遅い／たまに落ちる、という分かりにくい壊れ方をします。**
+Supabase の **Project Settings → Database → Connection string** に出てきます。
 
-| | ポート | 使う場面 | 理由 |
-|---|---|---|---|
-| **Direct connection** | 5432 | 手元PCからのデータ投入（ETL） | 接続を張りっぱなしにできる。大量INSERTが速い |
-| **Transaction pooler** | 6543 | Vercel の関数から | リクエストごとに接続が生まれては消えるため、プールが要る |
+| | ホスト / ポート | 使う場面 |
+|---|---|---|
+| Direct connection | `db.<ref>.supabase.co` : 5432 | **使いません**（下記） |
+| **Session pooler** | `aws-N-<region>.pooler.supabase.com` : **5432** | 手元PCからのデータ投入（ETL） |
+| **Transaction pooler** | `aws-N-<region>.pooler.supabase.com` : **6543** | Vercel の関数から |
 
-Vercel 側でうっかり 5432 を使うと、アクセスが増えたところで接続数を使い切ります。
-逆にプーラ経由では PostgreSQL のプリペアドステートメントが使えません
-（PgBouncer がトランザクションごとに別のバックエンドを割り当てるため）。
-接続文字列を見て自動で切り替えるようにしてあるので、設定はURLを貼るだけで済みます
-（`server/kaigyou_core/db.py` の `is_pooled`）。
+**Direct connection は IPv6 でしか引けません。** 2024年初頭から Supabase は直接接続を
+IPv6 専用にしています。家庭用回線や社内ネットワークは IPv4 のみのことが多く、その場合
+名前解決の時点で落ちます。
+
+```
+error: OperationalError: failed to resolve host 'db.<ref>.supabase.co':
+       [Errno 11001] getaddrinfo failed
+```
+
+これが出たら回線の問題でもタイプミスでもありません。**Session pooler に変えてください。**
+Pooler は全プランで IPv4 に対応しています。
+
+**Pooler ではユーザ名が変わります。** `postgres` ではなく `postgres.<プロジェクトID>` です。
+ダッシュボードの文字列をそのまま貼れば間違えません。
+
+Session（5432）と Transaction（6543）の違いは接続の寿命です。Session は接続を張って
+いる間ずっと同じバックエンドなので大量INSERTに向き、Transaction はトランザクション毎に
+バックエンドを割り当てるのでサーバレスに向きます。後者ではプリペアドステートメントが
+使えないため、接続文字列を見て自動で切り替えます
+（`server/kaigyou_core/db.py` の `is_pooled`）。設定はURLを貼るだけです。
 
 ---
 
@@ -54,23 +69,35 @@ Vercel 側でうっかり 5432 を使うと、アクセスが増えたところ�
 
 ローカルの Postgres に入れたときと同じコマンドを、`DATABASE_URL` だけ変えて実行します。
 
+使うのは **Session pooler**（ホストが `pooler.supabase.com`、ポート **5432**）です。
+
 Windows (PowerShell):
 
 ```powershell
-$env:DATABASE_URL = "postgresql://postgres:<パスワード>@db.<プロジェクトID>.supabase.co:5432/postgres?sslmode=require"
+$env:DATABASE_URL = 'postgresql://postgres.<プロジェクトID>:<パスワード>@aws-N-<region>.pooler.supabase.com:5432/postgres?sslmode=require'
 
 .\.venv\Scripts\kaigyou-etl migrate
 .\.venv\Scripts\kaigyou-etl load-local download
 ```
 
+> **PowerShell では引用符を `'`（シングル）にしてください。**
+> `"`（ダブル）で囲むと `$` が変数展開されます。パスワードに `$` が含まれていると
+> `$6XrTDQT` のような部分が空文字に置き換わり、`$$` に至っては別の値が入ります。
+> 画面上は正しく見えるのに認証だけ失敗する、という追いにくい壊れ方をします。
+> シングルクォートなら中身はそのまま渡ります。
+> （パスワードに `'` が入っている場合は `''` と2つ重ねてください。）
+
 macOS / Linux:
 
 ```bash
-export DATABASE_URL="postgresql://postgres:<パスワード>@db.<プロジェクトID>.supabase.co:5432/postgres?sslmode=require"
+export DATABASE_URL='postgresql://postgres.<プロジェクトID>:<パスワード>@aws-N-<region>.pooler.supabase.com:5432/postgres?sslmode=require'
 
 .venv/bin/kaigyou-etl migrate
 .venv/bin/kaigyou-etl load-local download
 ```
+
+`?` や `$` を含むパスワードでも、URL に直接書いて構いません（libpq が正しく読みます）。
+パーセントエンコードは不要です。
 
 `download` は5つの元データを置いてあるフォルダです（README「実データを表示するまで」参照）。
 `load-local` は中身を見て種類を判別するので、ファイル名は問いません。
@@ -189,7 +216,9 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | 地図は出るが灰色一色 | `VITE_RASTER_TILES` 未設定 | 設定して**再デプロイ** |
 | 画面上部に「サンプルデータ表示中」 | 開発用の合成データが残っている | `kaigyou-etl drop-sample` を Supabase 側の `DATABASE_URL` で実行 |
 | ビルドが `No module named kaigyou_api` で落ちる | `requirements.txt` の `./server` が入っていない | リポジトリ直下の `requirements.txt` を確認 |
-| データ投入が異常に遅い | プーラ (6543) 経由で投入している | Direct connection (5432) に変更 |
+| 投入時に `getaddrinfo failed` / `failed to resolve host db.*.supabase.co` | Direct connection は IPv6 専用。回線が IPv4 のみ | **Session pooler**（`pooler.supabase.com` の 5432）に変更。ユーザ名も `postgres.<プロジェクトID>` に変わります |
+| 認証だけ失敗する（ホストは引けている） | PowerShell の `"` でパスワードの `$` が変数展開された | 引用符を `'` に変える |
+| データ投入が異常に遅い | Transaction pooler (6543) 経由で投入している | Session pooler (5432) に変更 |
 
 手元の環境が原因かどうかは、まずローカルで切り分けられます。
 

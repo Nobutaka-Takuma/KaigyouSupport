@@ -50,14 +50,51 @@ def is_pooled(url: str | None = None) -> bool:
         return False
 
 
+def connection_hint(url: str, message: str) -> str | None:
+    """Turn a connection failure into the thing to actually change.
+
+    Only one case so far, but it is the one that stops people: Supabase's
+    direct host has been IPv6-only since early 2024, and most home and office
+    connections are IPv4. So the direct host is simply unreachable, and says so
+    differently on every platform -- "getaddrinfo failed" on Windows, "Name or
+    service not known" on Linux, "network is unreachable" where IPv6 is half
+    configured, or nothing useful at all. Matching the wording would work on
+    one machine and not the next.
+
+    So this matches the situation instead: a direct Supabase host that we could
+    not reach. Authentication errors are excluded, because getting far enough
+    to be rejected means the host resolved and the address is not the problem.
+    """
+    if ".supabase.co" not in url or "pooler.supabase.com" in url:
+        return None
+    lowered = message.lower()
+    if any(word in lowered for word in
+           ("password", "authentication", "role ", "database ", "permission")):
+        return None
+    return (
+        "Supabase の Direct connection (db.<ref>.supabase.co) は IPv6 専用です。"
+        "IPv4 のみの回線からは接続できません。"
+        "ダッシュボードの Session pooler "
+        "(aws-N-<region>.pooler.supabase.com のポート 5432) に変えてください。"
+        "ユーザ名も postgres ではなく postgres.<プロジェクトID> になります。"
+    )
+
+
 @contextmanager
 def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
-    conn = psycopg.connect(
-        dsn(),
-        row_factory=dict_row,
-        autocommit=autocommit,
-        prepare_threshold=None if is_pooled() else 5,
-    )
+    url = dsn()
+    try:
+        conn = psycopg.connect(
+            url,
+            row_factory=dict_row,
+            autocommit=autocommit,
+            prepare_threshold=None if is_pooled(url) else 5,
+        )
+    except psycopg.OperationalError as exc:
+        hint = connection_hint(url, str(exc))
+        if hint is None:
+            raise
+        raise psycopg.OperationalError(f"{exc}\n\nヒント: {hint}") from exc
     try:
         yield conn
     finally:
