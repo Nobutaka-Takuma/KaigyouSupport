@@ -14,6 +14,11 @@ import { useCandidates, MAX_CANDIDATES } from "../lib/candidates";
 
 const PAGE_SIZE = 50;
 
+/** Mesh resolution comes from the loaded data, so it is never written inline. */
+function meshLabel(metres: number): string {
+  return metres >= 1000 ? `${metres / 1000}km` : `${metres}m`;
+}
+
 export function RankingPage() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [profile, setProfile] = useState("");
@@ -58,7 +63,8 @@ export function RankingPage() {
       <header className="page__head">
         <h1>東京都 開業候補地ランキング</h1>
         <p className="muted">
-          1kmメッシュ単位で、候補地点分析と同じエンジン・同じ重みでスコアを算出しています。
+          {data?.mesh_size_m ? `${meshLabel(data.mesh_size_m)}メッシュ` : "メッシュ"}
+          単位で、候補地点分析と同じエンジン・同じ重みでスコアを算出しています。
           {data && `（商圏半径 ${distance(data.radius_m)}）`}
         </p>
         {data && <ProvisionalBadge label={data.model.label} />}

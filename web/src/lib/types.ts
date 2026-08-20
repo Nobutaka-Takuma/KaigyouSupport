@@ -130,6 +130,7 @@ export interface RankingItem {
 export interface RankingResponse {
   items: RankingItem[];
   total: number;
+  mesh_size_m: number | null;
   warnings?: string[];
   limit: number;
   offset: number;

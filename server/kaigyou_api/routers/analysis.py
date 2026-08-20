@@ -245,6 +245,7 @@ def rankings(
     return {
         "items": items,
         "total": total,
+        "mesh_size_m": resolve_mesh_size(conn),
         "warnings": _dataset_warnings(ranking_prov),
         "limit": limit,
         "offset": offset,
