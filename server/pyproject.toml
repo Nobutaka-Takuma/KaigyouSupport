@@ -30,6 +30,3 @@ packages = ["kaigyou_core", "kaigyou_etl", "kaigyou_etl.adapters", "kaigyou_api"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.vercel]
-entrypoint = "server.kaigyou_api.main:app"

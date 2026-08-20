@@ -1,29 +1,31 @@
 """Vercel entry point for the API.
 
-Vercel routes every ``/api/*`` request into this one function (see
-``vercel.json``) and serves the built web client from the same domain, so the
-browser never makes a cross-origin request and there is no CORS to configure.
+Vercel detects a FastAPI application by *reading* this file, not by running
+it: it looks for a module-level name ``app`` in one of a fixed set of
+locations, ``api/index.py`` among them. That detection is static, so the
+import below must stay exactly where it is.
+
+    DO NOT wrap this import in try/except, a function, or an ``if``.
+
+Doing so hides the name from the detector and the build fails before anything
+runs, with "Found api/index.py but it does not define a top-level 'app'
+FastAPI instance" -- which reads like a problem with the application and is
+not one. (Asked for a boot-time error message, this file once did exactly
+that, and cost a deploy to learn it. Diagnosis lives in /api/health and in
+the platform's runtime logs instead.)
 
 The ETL does not run here. It is a laptop job that writes to the database
 directly; this function only reads.
-
-If importing the application fails, this module still exports a working ASGI
-app -- one that reports why. A crash at import time never reaches FastAPI, so
-the platform answers ``FUNCTION_INVOCATION_FAILED`` and nothing else: no
-module name, no line, nothing to act on. Serving the reason costs one small
-fallback and saves reading deploy logs to learn that a dependency is missing.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
-import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# The function's working directory is not guaranteed, and config/ is found by
+# The working directory is not guaranteed, and config/ is otherwise found by
 # walking up from it. Pointing at the bundle root removes the guesswork.
 os.environ.setdefault("KAIGYOU_ROOT", str(ROOT))
 
@@ -33,37 +35,6 @@ _server = ROOT / "server"
 if _server.is_dir() and str(_server) not in sys.path:
     sys.path.insert(0, str(_server))
 
-
-def _boot_failure_app(exc: BaseException):
-    """A bare ASGI app that answers every request with the import error.
-
-    Bare because the import that failed may well have been FastAPI's: this
-    cannot depend on anything the application needs.
-    """
-    traceback.print_exc()
-    detail = f"{type(exc).__name__}: {exc}"
-
-    async def app(scope, receive, send):
-        if scope["type"] != "http":
-            return
-        body = json.dumps({
-            "detail": "APIの起動に失敗しました。",
-            "error": detail,
-            "hint": ("依存関係またはビルド設定の問題です。"
-                     "Vercel の Deployments → 対象のデプロイ → Logs に"
-                     "完全なトレースバックが出ています。"),
-        }, ensure_ascii=False).encode()
-        await send({"type": "http.response.start", "status": 503,
-                    "headers": [(b"content-type", b"application/json; charset=utf-8"),
-                                (b"cache-control", b"no-store")]})
-        await send({"type": "http.response.body", "body": body})
-
-    return app
-
-
-try:
-    from kaigyou_api.main import app
-except Exception as exc:  # noqa: BLE001 - any import error must still answer
-    app = _boot_failure_app(exc)
+from kaigyou_api.main import app  # noqa: E402  <- top level on purpose; see above
 
 __all__ = ["app"]

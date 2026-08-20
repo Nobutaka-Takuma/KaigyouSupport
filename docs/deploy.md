@@ -106,6 +106,12 @@ Supabase 無料枠の 500MB に収まります。
 
 4. **Deploy** を押します。
 
+`vercel.json` はこのままで動きます。**`/api/(.*)` の rewrite を足さないでください** —
+Vercel は FastAPI アプリを認識して `/api/*` を直接そのアプリに渡すので、
+rewrite があるとかえって全部 404 になります。
+`api/index.py` の `app` の import も、トップレベルから動かさないでください
+（Vercel はこのファイルを実行せずに解析して `app` を探します）。
+
 `VITE_` で始まる変数は**ビルド時に埋め込まれます**。
 あとから値を変えたときは、再デプロイしないと反映されません。
 
@@ -171,6 +177,9 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
+| ビルドが `does not define a top-level "app" FastAPI instance` で失敗 | `api/index.py` の `app` が**モジュール直下に無い** | Vercel はこのファイルを**実行せず、構文解析して** `app` を探します。`try/except` や関数の中に入れると見つかりません。`from kaigyou_api.main import app` は必ずトップレベルに置いてください（`server/tests/test_deployment.py` が検査します） |
+| 同上。`[tool.vercel] entrypoint` を足しても直らない | `server/pyproject.toml` に書いている／モジュールパスが違う | Vercel が読むのは**リポジトリ直下**の `pyproject.toml` です。また `server` はパッケージではないので `server.kaigyou_api.main:app` は import できません。`api/index.py` を直せばこの設定自体が不要です |
+| `/api/*` が全部 404 | `vercel.json` に `/api/(.*)` の rewrite がある | Vercel の FastAPI 対応は `/api/*` をアプリに直接ルーティングします。rewrite があると**転送先のパス**（`/api/index`）でルーティングされ、全部 404 になります。この rewrite は置かないでください |
 | `500: FUNCTION_INVOCATION_FAILED` | 関数が**起動前に**落ちている。多くは依存関係が入っていない | `/api/health` を開くと、起動失敗なら 503 と一緒に原因のモジュール名が出ます。ビルド設定で `installCommand` を上書きすると `pip install -r requirements.txt` が走らなくなるので注意 |
 | `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |
 | `/api/health` が `database_pooled: false` | Vercel で Direct connection (5432) を使っている | Transaction pooler (6543) の接続文字列に変更して再デプロイ |

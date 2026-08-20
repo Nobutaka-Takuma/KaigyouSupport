@@ -104,50 +104,48 @@ def test_no_rows_means_no_round_trips():
     assert cur.calls == []
 
 
-# ------------------------------------------------------------ boot failures
-def _drive(app, path="/api/meta"):
-    """Call a bare ASGI app the way a server would, and return status + body."""
-    import asyncio
-    import json as _json
+# ------------------------------------------------------- the entry point
+def test_the_entry_point_exposes_app_at_module_level():
+    """Vercel reads api/index.py; it does not run it.
 
-    sent = []
-
-    async def send(message):
-        sent.append(message)
-
-    async def receive():
-        return {"type": "http.request", "body": b""}
-
-    asyncio.run(app({"type": "http", "method": "GET", "path": path,
-                     "headers": []}, receive, send))
-    return sent[0]["status"], _json.loads(sent[1]["body"])
-
-
-def test_a_failed_import_still_answers_with_the_reason():
-    """Vercel's FUNCTION_INVOCATION_FAILED page names nothing at all.
-
-    An import error never reaches FastAPI's handlers, so the entry point keeps
-    a dependency-free app that says which module was missing.
+    Detection is static: the platform parses the file looking for a
+    module-level name ``app``. Wrapping the import in try/except -- which is
+    tempting, because an import failure otherwise reaches the browser as an
+    unexplained FUNCTION_INVOCATION_FAILED -- moves the binding inside a Try
+    node, where the detector does not look. The build then fails with "does
+    not define a top-level 'app' FastAPI instance", which sounds like a
+    problem with the application and is not one.
     """
+    import ast
+    from pathlib import Path
+
+    entry = Path(__file__).resolve().parents[2] / "api" / "index.py"
+    tree = ast.parse(entry.read_text(encoding="utf-8"))
+
+    bound = []
+    for node in tree.body:  # module level only, as the detector does
+        if isinstance(node, ast.ImportFrom):
+            bound += [alias.asname or alias.name for alias in node.names]
+        elif isinstance(node, ast.Assign):
+            bound += [t.id for t in node.targets if isinstance(t, ast.Name)]
+
+    assert "app" in bound, (
+        "api/index.py must bind 'app' at module level or Vercel's build fails; "
+        f"top-level names are {bound}"
+    )
+
+
+def test_the_entry_point_actually_serves_the_application():
+    """Statically visible is necessary but not sufficient -- it must import."""
     import sys
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
-    from api.index import _boot_failure_app
+    from pathlib import Path
 
-    app = _boot_failure_app(ModuleNotFoundError("No module named 'fastapi'"))
-    status, body = _drive(app)
-    assert status == 503
-    assert "No module named 'fastapi'" in body["error"]
-    assert "Logs" in body["hint"]
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from api.index import app
 
+    from kaigyou_api.main import app as real_app
 
-def test_the_boot_failure_app_answers_on_every_path():
-    import sys
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
-    from api.index import _boot_failure_app
-
-    app = _boot_failure_app(RuntimeError("boom"))
-    for path in ("/api/meta", "/api/health", "/api/clinics"):
-        assert _drive(app, path)[0] == 503
+    assert app is real_app
 
 
 # ------------------------------------------------------------------- health
