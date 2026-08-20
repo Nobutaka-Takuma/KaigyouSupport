@@ -386,6 +386,98 @@ def test_an_edition_without_the_configured_years_is_reported(tmp_path):
     assert exc.value.error_type == "schema_mismatch"
 
 
+# ------------------------------------------------------------ municipalities
+BOUNDARY_FILE = FIXTURES / "mlit_n03_municipalities.zip"
+
+
+@pytest.fixture
+def municipalities_adapter(tmp_path):
+    return build("mlit_municipalities", tmp_path)
+
+
+def municipalities_by_name(adapter):
+    return {r["name"]: r for r in adapter.transform(BOUNDARY_FILE)}
+
+
+def test_encoding_comes_from_the_cpg_declaration(municipalities_adapter):
+    """N03 ships flat and UTF-8 while older layers are Shift-JIS.
+
+    The adapter's own default is cp932, so reading these names correctly is
+    only possible by honouring the publisher's .cpg sidecar.
+    """
+    names = municipalities_by_name(municipalities_adapter)
+    assert "千代田区" in names
+    assert "所属未定地" not in names
+
+
+def test_parts_of_one_municipality_are_collected(municipalities_adapter):
+    """Ogasawara is 4,812 published parts but one municipality."""
+    islands = municipalities_by_name(municipalities_adapter)["島村"]
+    assert len(islands["parts"]) == 3
+    assert islands["municipality_code"] == "13421"
+
+
+def test_one_row_per_municipality(municipalities_adapter):
+    records = list(municipalities_adapter.transform(BOUNDARY_FILE))
+    codes = [r["municipality_code"] for r in records]
+    assert len(codes) == len(set(codes))
+    assert set(codes) == {"13101", "13102", "13421", "13303"}
+
+
+def test_the_prefecture_level_catch_all_is_excluded(municipalities_adapter):
+    """13000 所属未定地 is reclaimed land, not a municipality.
+
+    Letting it through would label meshes with an area name that does not
+    exist as a place.
+    """
+    codes = {r["municipality_code"] for r in municipalities_adapter.transform(BOUNDARY_FILE)}
+    assert "13000" not in codes
+
+
+def test_validate_reports_what_was_excluded(municipalities_adapter):
+    facts = municipalities_adapter.validate(BOUNDARY_FILE)
+    assert facts["feature_count"] == 9
+    assert facts["municipality_count"] == 4
+    assert facts["excluded_features"] == {"13000 所属未定地": 2}
+    assert facts["most_fragmented"]["13421"] == 3
+
+
+def test_prefecture_code_is_taken_from_the_municipality_code(municipalities_adapter):
+    assert all(r["prefecture_code"] == "13"
+               for r in municipalities_adapter.transform(BOUNDARY_FILE))
+
+
+def test_prefecture_name_is_carried_through(municipalities_adapter):
+    assert municipalities_by_name(municipalities_adapter)["千代田区"]["prefecture_name"] == "東京都"
+
+
+def test_a_district_on_only_some_parts_does_not_split_the_municipality(municipalities_adapter):
+    """N03 fills 郡 on a handful of rows and leaves it blank on the rest."""
+    records = [r for r in municipalities_adapter.transform(BOUNDARY_FILE)
+               if r["municipality_code"] == "13303"]
+    assert len(records) == 1
+    assert len(records[0]["parts"]) == 2
+
+
+def test_geometry_is_emitted_as_polygon_wkt(municipalities_adapter):
+    part = municipalities_by_name(municipalities_adapter)["千代田区"]["parts"][0]
+    assert part.startswith(("POLYGON((", "MULTIPOLYGON("))
+
+
+def test_prefecture_filter_restricts_the_load(tmp_path):
+    adapter = build("mlit_municipalities", tmp_path)
+    adapter.ctx.prefecture_filter = "27"
+    assert list(adapter.transform(BOUNDARY_FILE)) == []
+
+
+def test_a_file_with_only_excluded_codes_is_a_named_failure(tmp_path):
+    adapter = build("mlit_municipalities", tmp_path,
+                    {"exclude_code_suffixes": ["0", "1", "2", "3"]})
+    with pytest.raises(AcquisitionError) as exc:
+        adapter.validate(BOUNDARY_FILE)
+    assert exc.value.error_type == "empty_dataset"
+
+
 # ------------------------------------------------------------------ download
 def test_missing_input_file_is_a_named_failure(tmp_path):
     adapter = build("mhlw_dental_clinics", tmp_path)

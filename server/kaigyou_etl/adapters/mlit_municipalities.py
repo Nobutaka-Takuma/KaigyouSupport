@@ -1,13 +1,17 @@
 """国土数値情報「行政区域」(N03) -> municipalities.
 
-N03 publishes one polygon per administrative part, so a ward or city with
-detached areas appears several times. Parts sharing a JIS code are merged into
-one MultiPolygon by PostGIS on load (ST_Union), keeping one row per
-municipality.
+N03 publishes one polygon per administrative *part*, so a municipality with
+islands or exclaves appears many times over -- Ogasawara alone is 4,812 parts
+and 234k vertices. Parts sharing a JIS code are collected into one MultiPolygon
+so the table keeps one row per municipality.
+
+The parts of a municipality are disjoint by construction, so they are collected
+rather than unioned: ST_UnaryUnion over five thousand island polygons is
+expensive and would not change the result of a point-in-polygon test.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -28,20 +32,45 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
             raise AcquisitionError(ERROR_EMPTY, f"{artifact.name} contains no features")
         return fields, records
 
+    def _excluded(self, code: str) -> bool:
+        """True for the prefecture-level catch-all rather than a municipality."""
+        suffixes = self.spec.get("exclude_code_suffixes") or []
+        return any(code.endswith(str(sfx)) for sfx in suffixes)
+
     def validate(self, artifact: Path) -> dict[str, Any]:
         fields, records = self._read(artifact)
         code_col = self.pick_column(fields, "municipality_code")
-        codes = {str(dict(zip(fields, r.record)).get(code_col) or "").strip()
-                 for r in records}
-        codes.discard("")
+        name_col = self.pick_column(fields, "municipality_name")
+
+        codes = Counter()
+        excluded = Counter()
+        vertices = 0
+        for rec in records:
+            row = dict(zip(fields, rec.record))
+            code = str(row.get(code_col) or "").strip()
+            if not code:
+                continue
+            vertices += len(getattr(rec.shape, "points", []) or [])
+            if self._excluded(code):
+                excluded[f"{code} {str(row.get(name_col) or '').strip()}"] += 1
+            else:
+                codes[code] += 1
+
         if not codes:
             raise AcquisitionError(
-                ERROR_EMPTY, f"no municipality codes in column {code_col!r}"
+                ERROR_EMPTY,
+                f"no municipality codes in column {code_col!r} after excluding "
+                f"{self.spec.get('exclude_code_suffixes')}",
             )
+
         return {
             "feature_count": len(records),
             "municipality_count": len(codes),
-            "fields": fields,
+            "vertex_count": vertices,
+            "excluded_features": dict(excluded),
+            "most_fragmented": dict(codes.most_common(3)),
+            "resolved_columns": {"municipality_code": code_col,
+                                 "municipality_name": name_col},
         }
 
     def transform(self, artifact: Path) -> Iterator[dict[str, Any]]:
@@ -49,35 +78,46 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
         code_col = self.pick_column(fields, "municipality_code")
         name_col = self.pick_column(fields, "municipality_name")
         pref_col = self.pick_column(fields, "prefecture_name", required=False)
+        district_col = self.pick_column(fields, "district_name", required=False)
         source_date = self.source_date() or date.today()
-        pref = self.ctx.prefecture_code
+        fallback_pref = self.ctx.prefecture_code
+        wanted = self.spec.get("prefecture_filter") or self.ctx.prefecture_filter
 
         grouped: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"parts": [], "name": None, "prefecture_name": None}
+            lambda: {"parts": [], "names": Counter(), "prefecture_name": None,
+                     "district": None}
         )
         for rec in records:
             row = dict(zip(fields, rec.record))
             code = str(row.get(code_col) or "").strip()
-            if not code:
+            if not code or self._excluded(code):
                 continue
             wkt = shape_to_wkt(rec.shape)
             if wkt is None:
                 continue
             entry = grouped[code]
             entry["parts"].append(wkt)
-            entry["name"] = entry["name"] or (str(row.get(name_col) or "").strip() or None)
-            if pref_col:
-                entry["prefecture_name"] = entry["prefecture_name"] or (
-                    str(row.get(pref_col) or "").strip() or None
-                )
+            name = str(row.get(name_col) or "").strip()
+            if name:
+                entry["names"][name] += 1
+            if pref_col and not entry["prefecture_name"]:
+                entry["prefecture_name"] = str(row.get(pref_col) or "").strip() or None
+            # The district is filled in on only a handful of rows, so take it
+            # from whichever part carries it.
+            if district_col and not entry["district"]:
+                entry["district"] = str(row.get(district_col) or "").strip() or None
 
         for code, entry in grouped.items():
-            if not entry["name"]:
+            if not entry["names"]:
+                continue
+            prefecture_code = code[:2] if len(code) >= 2 else fallback_pref
+            if wanted and prefecture_code != str(wanted):
                 continue
             yield {
                 "municipality_code": code,
-                "name": entry["name"],
-                "prefecture_code": code[:2] if len(code) >= 2 else pref,
+                # The modal spelling; a stray variant on one island loses.
+                "name": entry["names"].most_common(1)[0][0],
+                "prefecture_code": prefecture_code,
                 "prefecture_name": entry["prefecture_name"],
                 "parts": entry["parts"],
                 "source_date": source_date,
@@ -96,11 +136,11 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
                     ) VALUES (
                         %(source_id)s, %(municipality_code)s, %(name)s,
                         %(prefecture_code)s, %(prefecture_name)s,
-                        ST_Multi(ST_CollectionExtract(
-                            ST_MakeValid(ST_UnaryUnion(ST_Collect(
-                                (SELECT array_agg(ST_GeomFromText(w, 4326))
-                                   FROM unnest(%(parts)s::text[]) AS w)
-                            ))), 3)),
+                        (
+                            SELECT ST_Multi(ST_CollectionExtract(
+                                ST_Collect(ST_MakeValid(ST_GeomFromText(w, 4326))), 3))
+                            FROM unnest(%(parts)s::text[]) AS w
+                        ),
                         %(source_date)s, now()
                     )
                     ON CONFLICT (source_id, municipality_code) DO UPDATE SET
@@ -109,7 +149,7 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
                         source_date = EXCLUDED.source_date,
                         last_updated = now()
                     """,
-                    {**rec, "source_id": self.source_id},
+                    rec | {"source_id": self.source_id},
                 )
                 count += 1
         return count

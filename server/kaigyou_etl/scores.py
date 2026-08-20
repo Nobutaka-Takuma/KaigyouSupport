@@ -27,6 +27,11 @@ from kaigyou_core.analysis import (
 )
 from kaigyou_core.scoring import DISTRIBUTION_METRICS, ScoringModel, distributions_from_rows, scope_key
 
+#: How far a mesh centre may sit outside every municipality and still borrow
+#: the nearest one's name. Waterfront reclaimed land is the case this exists
+#: for; beyond it the mesh is left unlabelled rather than guessed at.
+BOUNDARY_FALLBACK_RADIUS_M = 3000
+
 
 def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
                   mesh_size_m: int | None = None,
@@ -109,7 +114,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     # right source; without them, fall back to the municipality recorded on
     # the nearby facilities, which is real published data either way.
     use_boundaries = has_official_boundaries(conn)
-    labels = ({} if use_boundaries
+    labels = (_boundary_area_labels(conn, mesh_size_m, prefecture_code) if use_boundaries
               else _derive_area_labels(conn, mesh_size_m, prefecture_code))
 
     with conn.cursor() as cur:
@@ -161,10 +166,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     "growth": scored["growth"],
                     "accessibility": scored["accessibility"],
                     "overall": scored["overall"],
-                    "area_label": (
-                        _boundary_label(conn, row["mesh_id"]) if use_boundaries
-                        else labels.get(row["mesh_id"])
-                    ),
+                    "area_label": labels.get(row["mesh_id"]),
                 },
             )
     conn.commit()
@@ -196,21 +198,46 @@ def _describe(values: list[float]) -> dict[str, Any]:
     }
 
 
-def _boundary_label(conn: psycopg.Connection, mesh_id: int) -> str | None:
+def _boundary_area_labels(conn: psycopg.Connection, mesh_size_m: int,
+                          prefecture_code: str) -> dict[int, str]:
+    """Name each mesh by the municipality its centre falls in.
+
+    A centre can fall outside every municipality: N03 publishes reclaimed land
+    and water whose affiliation is not settled as a separate 所属未定地 entry,
+    which is excluded because it is not a municipality. Several of the highest
+    scoring waterfront meshes sit there, so those fall back to the nearest
+    municipality -- still the right locator for the reader, and never invented.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT mu.name
-            FROM municipalities mu
-            JOIN data_sources ds ON ds.id = mu.source_id AND ds.dataset_kind = 'official'
-            JOIN population_mesh pm ON pm.id = %s
-            WHERE ST_Contains(mu.geom, pm.centroid)
-            LIMIT 1
+            SELECT m.id AS mesh_id,
+                   COALESCE(inside.name, nearby.name) AS name
+            FROM population_mesh m
+            LEFT JOIN LATERAL (
+                SELECT mu.name
+                FROM municipalities mu
+                JOIN data_sources ds
+                  ON ds.id = mu.source_id AND ds.dataset_kind = 'official'
+                WHERE ST_Contains(mu.geom, m.centroid)
+                LIMIT 1
+            ) AS inside ON true
+            LEFT JOIN LATERAL (
+                SELECT mu.name
+                FROM municipalities mu
+                JOIN data_sources ds
+                  ON ds.id = mu.source_id AND ds.dataset_kind = 'official'
+                WHERE inside.name IS NULL
+                  AND ST_DWithin(mu.geom::geography, m.centroid::geography, %s)
+                ORDER BY mu.geom::geography <-> m.centroid::geography
+                LIMIT 1
+            ) AS nearby ON true
+            WHERE m.mesh_size_m = %s AND m.prefecture_code = %s
             """,
-            (mesh_id,),
+            (BOUNDARY_FALLBACK_RADIUS_M, mesh_size_m, prefecture_code),
         )
-        row = cur.fetchone()
-    return row["name"] if row else None
+        rows = cur.fetchall()
+    return {r["mesh_id"]: r["name"] for r in rows if r["name"]}
 
 
 def _derive_area_labels(conn: psycopg.Connection, mesh_size_m: int,

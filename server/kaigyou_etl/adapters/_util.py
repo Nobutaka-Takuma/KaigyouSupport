@@ -106,9 +106,14 @@ def read_shapefile(path: Path, member_prefix: str | None = None,
     """Read a shapefile from a zip (or a bare .shp) using pyshp.
 
     ``member_prefix`` selects among several copies inside one archive -- the
-    国土数値情報 archives ship the same layer twice, under ``Shift-JIS/`` and
+    S12 archives ship the same layer twice, under ``Shift-JIS/`` and
     ``UTF-8/``, and reading one with the other's encoding silently mangles
     every Japanese name.
+
+    A ``.cpg`` sidecar, when present, is the publisher's own declaration of the
+    dbf encoding and wins over ``encoding``: N03 ships flat and UTF-8 while
+    older 国土数値情報 layers are Shift-JIS, and guessing wrong corrupts every
+    municipality name without erroring.
 
     Returns (field names, list of pyshp ShapeRecord).
     """
@@ -140,13 +145,35 @@ def read_shapefile(path: Path, member_prefix: str | None = None,
                         continue
                     raise AcquisitionError(ERROR_SCHEMA, f"{path.name} missing .{ext} for {stem}")
                 parts[ext] = io.BytesIO(zf.read(member))
+            declared = zf.read(f"{stem}.cpg").decode("ascii", "ignore").strip() \
+                if f"{stem}.cpg" in names else ""
+        encoding = _resolve_encoding(declared, encoding)
         reader = shapefile.Reader(**{k: v for k, v in parts.items()}, encoding=encoding,
                                   encodingErrors="replace")
     else:
+        cpg = path.with_suffix(".cpg")
+        declared = cpg.read_text(encoding="ascii", errors="ignore").strip() \
+            if cpg.exists() else ""
+        encoding = _resolve_encoding(declared, encoding)
         reader = shapefile.Reader(str(path), encoding=encoding, encodingErrors="replace")
 
     fields = [f[0] for f in reader.fields[1:]]
     return fields, list(reader.iterShapeRecords())
+
+
+def _resolve_encoding(declared: str, fallback: str) -> str:
+    """Trust a .cpg declaration when Python recognises the codec it names."""
+    if not declared:
+        return fallback
+    candidate = declared.replace("-", "_").lower()
+    aliases = {"utf_8": "utf-8", "utf8": "utf-8", "sjis": "cp932",
+               "shift_jis": "cp932", "ms932": "cp932"}
+    candidate = aliases.get(candidate, declared)
+    try:
+        "".encode(candidate)
+    except LookupError:
+        return fallback
+    return candidate
 
 
 def shape_to_wkt(shape: Any) -> str | None:
