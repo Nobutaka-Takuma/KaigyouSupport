@@ -258,3 +258,47 @@ def test_health_answers_and_names_the_cause_when_routers_fail(monkeypatch):
     for module in [m for m in sys.modules if m.startswith("kaigyou_api")]:
         del sys.modules[module]
     importlib.import_module("kaigyou_api.main")
+
+
+# --------------------------------------------------- what the platform installs
+def test_requirements_names_no_local_paths():
+    """A local path requirement cannot be installed by Vercel's installer.
+
+    uv derives the package name from the directory, so `./server` is looked for
+    under the name `server` while the distribution calls itself
+    `kaigyou-support`, and the build fails on the mismatch:
+
+        x Failed to build `server @ file:///vercel/path0/server`
+        `-> Package metadata name `kaigyou-support` does not match given name `server`
+
+    Our packages reach the function as source instead -- see vercel.json's
+    includeFiles and the sys.path line in api/index.py.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    lines = [line.strip() for line in
+             (root / "requirements.txt").read_text(encoding="utf-8").splitlines()]
+    requirements = [line for line in lines if line and not line.startswith("#")]
+
+    assert requirements, "requirements.txt lists nothing"
+    for line in requirements:
+        assert not line.startswith((".", "/", "-e")), (
+            f"{line!r} is a local path; Vercel's uv-based install rejects these"
+        )
+        assert "file:" not in line, f"{line!r} points at the filesystem"
+
+
+def test_the_bundle_carries_the_source_the_entry_point_expects():
+    """includeFiles must cover both config/ and server/, or nothing imports."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    config = json.loads((root / "vercel.json").read_text(encoding="utf-8"))
+    included = config["functions"]["api/index.py"]["includeFiles"]
+
+    assert "config" in included, "config/*.yaml would not reach the function"
+    assert "server" in included, (
+        "server/ would not reach the function, and it is not installed either"
+    )

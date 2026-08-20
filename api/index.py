@@ -29,8 +29,13 @@ ROOT = Path(__file__).resolve().parent.parent
 # walking up from it. Pointing at the bundle root removes the guesswork.
 os.environ.setdefault("KAIGYOU_ROOT", str(ROOT))
 
-# Normally the package arrives via ``./server`` in requirements.txt. This covers
-# a bundle where the install did not happen but the sources are present.
+# This is how kaigyou_api and kaigyou_core get imported -- they are NOT
+# installed. requirements.txt lists published packages only, and server/ rides
+# along as source via `includeFiles` in vercel.json.
+#
+# The alternative, a `./server` line in requirements.txt, cannot work here: uv
+# derives the package name from the directory (`server`), the distribution
+# calls itself `kaigyou-support`, and the build is rejected on the mismatch.
 _server = ROOT / "server"
 if _server.is_dir() and str(_server) not in sys.path:
     sys.path.insert(0, str(_server))

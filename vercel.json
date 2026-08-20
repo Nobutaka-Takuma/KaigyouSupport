@@ -6,10 +6,13 @@
     "api/index.py": {
       "memory": 1024,
       "maxDuration": 30,
-      "includeFiles": "config/**"
+      "includeFiles": "{config,server}/**"
     }
   },
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
   ]
 }

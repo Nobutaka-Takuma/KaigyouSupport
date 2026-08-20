@@ -1,24 +1,24 @@
 # What Vercel installs into the serverless function.
 #
-# Keep this the only requirements file in the repository. Vercel's Python
-# builder prefers one sitting next to the entry point (api/requirements.txt)
-# over this one, so a second file silently replaces this list -- and a list
-# without the line at the bottom produces a function that cannot import its
-# own code, which surfaces only as FUNCTION_INVOCATION_FAILED.
+# PyPI packages only. Our own code is NOT listed here: it reaches the function
+# as source, via `includeFiles` in vercel.json, and api/index.py puts server/
+# on sys.path.
+#
+# That indirection is not a preference, it is a constraint. A local path
+# requirement (`./server`) makes Vercel's installer -- uv -- derive the package
+# name from the directory and then reject the build, because the directory is
+# called `server` and the distribution is called `kaigyou-support`:
+#
+#     x Failed to build `server @ file:///vercel/path0/server`
+#     `-> Package metadata name `kaigyou-support` does not match given name `server`
+#
+# Keep this file to published packages and the problem cannot come back.
 fastapi>=0.115
 psycopg[binary]>=3.2
 pydantic>=2.9
 PyYAML>=6.0
 
-# The project's own packages: kaigyou_core and kaigyou_api. Without this the
-# function has no application to serve. The path is relative to the repository
-# root, which is where Vercel runs pip.
-./server
-
 # Deliberately absent:
 #   uvicorn      -- Vercel invokes the ASGI app directly; there is no server to run.
 #   psycopg_pool -- connections are pooled by Supabase (PgBouncer), not in-process.
-#                   A pool inside a function that handles one request at a time
-#                   would hold connections open for nothing.
-#   httpx, pyshp -- acquisition only. The ETL runs on a workstation; a publisher's
-#                   file format cannot break the deployed API.
+#   httpx, pyshp -- acquisition only. The ETL runs on a workstation, never here.
