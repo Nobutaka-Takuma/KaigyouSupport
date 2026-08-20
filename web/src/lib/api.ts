@@ -7,6 +7,7 @@
  */
 import type {
   CandidateAnalysis,
+  ClinicDetail,
   CompareResponse,
   DataStatus,
   GeoJSONResponse,
@@ -54,8 +55,14 @@ export const api = {
   meta: () => get<Meta>("/meta"),
   dataStatus: () => get<DataStatus>("/data-status"),
 
-  clinics: (params: { bbox?: string; clinic_type?: string; limit?: number }) =>
-    get<GeoJSONResponse>("/clinics", params),
+  clinics: (params: {
+    bbox?: string;
+    clinic_type?: string;
+    fields?: "points" | "minimal" | "full";
+    limit?: number;
+  }) => get<GeoJSONResponse>("/clinics", params),
+
+  clinic: (id: number) => get<ClinicDetail>(`/clinics/${id}`),
 
   stations: (params: { bbox?: string; q?: string; limit?: number }) =>
     get<GeoJSONResponse>("/stations", params),
@@ -68,8 +75,11 @@ export const api = {
     limit?: number;
   }) => get<GeoJSONResponse>("/meshes", params),
 
-  municipalities: (params: { prefecture_code?: string } = {}) =>
-    get<GeoJSONResponse>("/municipalities", params),
+  municipalities: (params: {
+    prefecture_code?: string;
+    bbox?: string;
+    simplify_deg?: number;
+  } = {}) => get<GeoJSONResponse>("/municipalities", params),
 
   candidateAnalysis: (params: {
     lat: number;

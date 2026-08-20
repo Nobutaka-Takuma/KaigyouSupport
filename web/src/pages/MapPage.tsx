@@ -20,6 +20,16 @@ import { AccessTable, PopulationTable, ScorePanel } from "../components/ScorePan
 
 const TOKYO_CENTER: [number, number] = [139.7671, 35.6812];
 
+/** Below these zooms a layer covers too much ground to be worth sending. */
+const MIN_ZOOM = { meshes: 10, clinics: 11, stations: 10 };
+
+const EMPTY_RESPONSE = {
+  type: "FeatureCollection" as const,
+  features: [],
+  provenance: { sources: [], contains_sample_data: false, datasets_unavailable: [] },
+  truncated: false,
+};
+
 type MeshMetric = "population" | "overall_score";
 
 interface LayerState {
@@ -50,6 +60,13 @@ export function MapPage() {
   const [analysing, setAnalysing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [layerError, setLayerError] = useState<string | null>(null);
+  const [zoomedOut, setZoomedOut] = useState(false);
+  const viewportRequest = useRef(0);
+  // On a phone the controls and the panel cannot both be on screen with the
+  // map. The radius chips stay visible; everything else folds away, and the
+  // analysis arrives as a sheet over the map rather than below it.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
   const [stationQuery, setStationQuery] = useState("");
   const [stationHits, setStationHits] = useState<GeoJSON.Feature[]>([]);
 
@@ -156,15 +173,26 @@ export function MapPage() {
       map.on("mouseenter", "clinics-circle", () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", "clinics-circle", () => (map.getCanvas().style.cursor = ""));
       map.on("click", "clinics-circle", (e) => {
-        const f = e.features?.[0];
-        if (!f) return;
-        new maplibregl.Popup()
+        const id = e.features?.[0]?.properties?.id;
+        if (id === undefined) return;
+        // The layer carries positions only; fetch the one record being asked
+        // about rather than shipping every name and address to every phone.
+        const popup = new maplibregl.Popup()
           .setLngLat(e.lngLat)
-          .setHTML(
-            `<strong>${escapeHtml(String(f.properties?.name ?? ""))}</strong><br>` +
-              `${escapeHtml(String(f.properties?.address ?? ""))}`,
-          )
+          .setHTML("<em>読み込み中…</em>")
           .addTo(map);
+        api
+          .clinic(Number(id))
+          .then((clinic) => {
+            const types = clinic.clinic_types?.length
+              ? `<br><span class="popup__types">${escapeHtml(clinic.clinic_types.join("、"))}</span>`
+              : "";
+            popup.setHTML(
+              `<strong>${escapeHtml(clinic.name)}</strong><br>` +
+                `${escapeHtml(clinic.address ?? "")}${types}`,
+            );
+          })
+          .catch((err) => popup.setHTML(escapeHtml(err.message)));
       });
 
       setReady(true);
@@ -177,38 +205,65 @@ export function MapPage() {
   }, []);
 
   // ------------------------------------------------------------- load layers
+  // Every layer follows the viewport. Loading all of Tokyo is
+  // 13MB, which is fine on a desktop and unusable on a phone; a city-level
+  // viewport is well under one.
+  const loadViewport = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const b = map.getBounds();
+    const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]
+      .map((v) => v.toFixed(5))
+      .join(",");
+    const zoom = map.getZoom();
+
+    const request = ++viewportRequest.current;
+    try {
+      const [muni, mesh, clinics, stations] = await Promise.all([
+        // Most of the boundary payload is Izu and Ogasawara coastline, a
+        // thousand kilometres from anything the user is looking at.
+        api.municipalities({ prefecture_code: "13", bbox }),
+        zoom >= MIN_ZOOM.meshes
+          ? api.meshes({ bbox, profile: profile || undefined, limit: 4000 })
+          : Promise.resolve(EMPTY_RESPONSE),
+        zoom >= MIN_ZOOM.clinics
+          ? api.clinics({ bbox, fields: "points", limit: 5000 })
+          : Promise.resolve(EMPTY_RESPONSE),
+        zoom >= MIN_ZOOM.stations
+          ? api.stations({ bbox, limit: 2000 })
+          : Promise.resolve(EMPTY_RESPONSE),
+      ]);
+      // A slow response for an older viewport must not overwrite a newer one.
+      if (request !== viewportRequest.current) return;
+
+      (map.getSource("municipalities") as maplibregl.GeoJSONSource)?.setData(muni as never);
+      (map.getSource("meshes") as maplibregl.GeoJSONSource)?.setData(mesh as never);
+      (map.getSource("clinics") as maplibregl.GeoJSONSource)?.setData(clinics as never);
+      (map.getSource("stations") as maplibregl.GeoJSONSource)?.setData(stations as never);
+      setZoomedOut(zoom < MIN_ZOOM.clinics);
+      setLayerError(null);
+    } catch (e) {
+      if (request === viewportRequest.current) {
+        setLayerError(e instanceof Error ? e.message : String(e));
+      }
+    }
+  }, [profile]);
+
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const map = mapRef.current;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const [muni, mesh, clinics, stations] = await Promise.all([
-          api.municipalities({}),
-          api.meshes({ profile: profile || undefined, limit: 40000 }),
-          api.clinics({ limit: 20000 }),
-          api.stations({ limit: 20000 }),
-        ]);
-        if (cancelled) return;
-        (map.getSource("municipalities") as maplibregl.GeoJSONSource)?.setData(muni as never);
-        (map.getSource("meshes") as maplibregl.GeoJSONSource)?.setData(mesh as never);
-        (map.getSource("clinics") as maplibregl.GeoJSONSource)?.setData(clinics as never);
-        (map.getSource("stations") as maplibregl.GeoJSONSource)?.setData(stations as never);
-        setLayerError(
-          mesh.features.length === 0 && clinics.features.length === 0
-            ? "地図に表示できるデータがありません。ETLでデータを取り込んでください。"
-            : null,
-        );
-      } catch (e) {
-        if (!cancelled) setLayerError(e instanceof Error ? e.message : String(e));
-      }
-    })();
-
-    return () => {
-      cancelled = true;
+    let timer: number | undefined;
+    const schedule = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(loadViewport, 250);
     };
-  }, [ready, profile]);
+    schedule();
+    map.on("moveend", schedule);
+    return () => {
+      window.clearTimeout(timer);
+      map.off("moveend", schedule);
+    };
+  }, [ready, loadViewport]);
 
   // ------------------------------------------------------- mesh colour ramp
   useEffect(() => {
@@ -280,8 +335,10 @@ export function MapPage() {
   useEffect(() => {
     if (!point) {
       setAnalysis(null);
+      setSheetOpen(false);
       return;
     }
+    setSheetOpen(true);
     let cancelled = false;
     setAnalysing(true);
     setError(null);
@@ -326,8 +383,17 @@ export function MapPage() {
 
   return (
     <div className="mappage">
-      <div className="toolbar">
-        <label>
+      <div className={settingsOpen ? "toolbar toolbar--open" : "toolbar"}>
+        <button
+          type="button"
+          className="toolbar__toggle"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen((v) => !v)}
+        >
+          {settingsOpen ? "設定を閉じる" : "表示設定"}
+        </button>
+
+        <label className="toolbar__foldable">
           分析プロファイル
           <select value={profile} onChange={(e) => setProfile(e.target.value)}>
             {meta?.profiles.map((p) => (
@@ -352,7 +418,7 @@ export function MapPage() {
           ))}
         </div>
 
-        <label>
+        <label className="toolbar__foldable">
           メッシュ表示
           <select value={meshMetric} onChange={(e) => setMeshMetric(e.target.value as MeshMetric)}>
             <option value="overall_score">候補地スコア</option>
@@ -360,7 +426,7 @@ export function MapPage() {
           </select>
         </label>
 
-        <div className="toolbar__layers">
+        <div className="toolbar__layers toolbar__foldable">
           {(
             [
               ["meshes", "メッシュ"],
@@ -380,7 +446,7 @@ export function MapPage() {
           ))}
         </div>
 
-        <div className="toolbar__search">
+        <div className="toolbar__search toolbar__foldable">
           <input
             value={stationQuery}
             placeholder="駅名で移動"
@@ -420,6 +486,11 @@ export function MapPage() {
             </div>
           )}
           {layerError && <div className="map__error">{layerError}</div>}
+          {zoomedOut && !layerError && (
+            <div className="map__hint map__hint--zoom">
+              広域表示のため歯科医院を省略しています。拡大すると表示されます。
+            </div>
+          )}
           <div className="map__legend">
             <span className="dot dot--clinic" /> 歯科医院
             <span className="dot dot--station" /> 駅
@@ -427,7 +498,20 @@ export function MapPage() {
           </div>
         </div>
 
-        <aside className="panel">
+        <aside className={sheetOpen ? "panel panel--open" : "panel"}>
+          {analysis && (
+            <button
+              type="button"
+              className="panel__grip"
+              aria-expanded={sheetOpen}
+              onClick={() => setSheetOpen((v) => !v)}
+            >
+              <span className="panel__grip-bar" />
+              <span className="panel__grip-label">
+                {sheetOpen ? "閉じる" : `総合スコア ${analysis.scores.overall ?? "—"}`}
+              </span>
+            </button>
+          )}
           {!point && (
             <div className="panel__empty">
               <h2>候補地点を指定してください</h2>
