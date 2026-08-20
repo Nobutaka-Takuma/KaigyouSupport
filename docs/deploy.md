@@ -125,9 +125,23 @@ Supabase 無料枠の 500MB に収まります。
 
 | URL | 期待される結果 |
 |---|---|
-| `https://<your-app>.vercel.app/api/health` | `{"status":"ok"}`（DBを見ない生存確認） |
+| `https://<your-app>.vercel.app/api/health` | 下記の診断JSON（DBに接続せず答えます） |
 | `https://<your-app>.vercel.app/api/data-status` | 4つの情報源が `official` で並ぶ |
 | `https://<your-app>.vercel.app/` | 地図が出て、赤い点が見える |
+
+`/api/health` は、デプロイで間違えやすい3点をそのまま返します。
+**接続はしない**ので、データベースが落ちていても答えます。
+認証情報は含まれないため、そのまま貼り付けて構いません。
+
+```json
+{
+  "status": "ok",
+  "config_found": true,       // config/*.yaml が関数に同梱されているか
+  "config_dir": "/var/task/config",
+  "database_url_set": true,   // DATABASE_URL が設定されているか
+  "database_pooled": true     // ← false なら Direct (5432) を使っている。6543 に直す
+}
+```
 
 `/api/data-status` が空、あるいは「公的データ未取得」の赤い帯が出る場合は、
 Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベース**を指しています。
@@ -157,8 +171,11 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
+| `500: FUNCTION_INVOCATION_FAILED` | 関数が**起動前に**落ちている。多くは依存関係が入っていない | `/api/health` を開くと、起動失敗なら 503 と一緒に原因のモジュール名が出ます。ビルド設定で `installCommand` を上書きすると `pip install -r requirements.txt` が走らなくなるので注意 |
+| `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |
+| `/api/health` が `database_pooled: false` | Vercel で Direct connection (5432) を使っている | Transaction pooler (6543) の接続文字列に変更して再デプロイ |
 | `prepared statement "_pg3_0" does not exist` | プーラ経由なのにプリペアドステートメントが有効 | 通常は自動判定されます。判定が外れる接続文字列なら `KAIGYOU_DB_PREPARE=off` を設定 |
-| API が全部 500、`/api/health` は OK | `DATABASE_URL` が未設定か誤り | Vercel の環境変数を確認。設定後は**再デプロイが必要** |
+| API が全部 500、`/api/health` は 200 | `DATABASE_URL` が未設定か誤り | `/api/health` の `database_url_set` を確認。設定後は**再デプロイが必要** |
 | `remaining connection slots are reserved` | Direct connection (5432) を Vercel で使っている | Transaction pooler (6543) に変更 |
 | 地図は出るが灰色一色 | `VITE_RASTER_TILES` 未設定 | 設定して**再デプロイ** |
 | 画面上部に「サンプルデータ表示中」 | 開発用の合成データが残っている | `kaigyou-etl drop-sample` を Supabase 側の `DATABASE_URL` で実行 |

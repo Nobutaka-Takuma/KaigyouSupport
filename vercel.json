@@ -1,7 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "npm --prefix web ci",
-  "buildCommand": "npm --prefix web run build",
+  "buildCommand": "npm --prefix web ci && npm --prefix web run build",
   "outputDirectory": "web/dist",
   "functions": {
     "api/index.py": {

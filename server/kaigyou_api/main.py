@@ -73,6 +73,30 @@ async def unhandled(request: Request, exc: Exception) -> JSONResponse:
 # client from the same domain routes only /api/* into the function.
 @app.get("/health", tags=["meta"])
 @app.get("/api/health", tags=["meta"])
-def health() -> dict[str, str]:
-    """Liveness only -- deliberately does not touch the database."""
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    """Liveness, plus the three things a deployment gets wrong.
+
+    Deliberately does not open a connection -- this has to answer even when the
+    database is the problem. It reports whether the settings are *present*, not
+    what they are: a missing DATABASE_URL and a wrong one look different here,
+    and neither prints the credentials.
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_core.db import dsn, is_pooled
+
+    configured = bool(os.getenv("DATABASE_URL"))
+    try:
+        config_dir = cfg.config_dir()
+        config_found = (config_dir / "sources.yaml").is_file()
+    except Exception:  # noqa: BLE001 - health must not raise
+        config_dir, config_found = None, False
+
+    return {
+        "status": "ok",
+        "config_found": config_found,
+        "config_dir": str(config_dir) if config_dir else None,
+        "database_url_set": configured,
+        # Wrong on a serverless platform: the direct connection runs out of
+        # slots. Reported so it can be seen without opening a connection.
+        "database_pooled": is_pooled(dsn()) if configured else None,
+    }

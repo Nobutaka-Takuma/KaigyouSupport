@@ -102,3 +102,78 @@ def test_no_rows_means_no_round_trips():
     cur = RecordingCursor()
     assert SourceAdapter.insert_many(cur, "INSERT ...", []) == 0
     assert cur.calls == []
+
+
+# ------------------------------------------------------------ boot failures
+def _drive(app, path="/api/meta"):
+    """Call a bare ASGI app the way a server would, and return status + body."""
+    import asyncio
+    import json as _json
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    asyncio.run(app({"type": "http", "method": "GET", "path": path,
+                     "headers": []}, receive, send))
+    return sent[0]["status"], _json.loads(sent[1]["body"])
+
+
+def test_a_failed_import_still_answers_with_the_reason():
+    """Vercel's FUNCTION_INVOCATION_FAILED page names nothing at all.
+
+    An import error never reaches FastAPI's handlers, so the entry point keeps
+    a dependency-free app that says which module was missing.
+    """
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+    from api.index import _boot_failure_app
+
+    app = _boot_failure_app(ModuleNotFoundError("No module named 'fastapi'"))
+    status, body = _drive(app)
+    assert status == 503
+    assert "No module named 'fastapi'" in body["error"]
+    assert "Logs" in body["hint"]
+
+
+def test_the_boot_failure_app_answers_on_every_path():
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+    from api.index import _boot_failure_app
+
+    app = _boot_failure_app(RuntimeError("boom"))
+    for path in ("/api/meta", "/api/health", "/api/clinics"):
+        assert _drive(app, path)[0] == 503
+
+
+# ------------------------------------------------------------------- health
+def test_health_reports_the_settings_without_printing_them(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    secret = "postgresql://postgres:hunter2@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres"
+    monkeypatch.setenv("DATABASE_URL", secret)
+    body = TestClient(app).get("/api/health").json()
+
+    assert body["status"] == "ok"
+    assert body["database_url_set"] is True
+    assert body["database_pooled"] is True
+    assert body["config_found"] is True
+    # The whole point is that this is safe to paste into a chat window.
+    assert "hunter2" not in str(body)
+
+
+def test_health_says_so_when_the_database_url_is_missing(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    body = TestClient(app).get("/api/health").json()
+    assert body["database_url_set"] is False
+    assert body["database_pooled"] is None
