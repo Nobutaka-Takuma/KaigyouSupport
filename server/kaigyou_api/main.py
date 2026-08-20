@@ -8,8 +8,6 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from kaigyou_api.routers import analysis, layers, meta
-
 log = logging.getLogger("kaigyou.api")
 
 app = FastAPI(
@@ -30,9 +28,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(meta.router, prefix="/api", tags=["meta"])
-app.include_router(layers.router, prefix="/api", tags=["layers"])
-app.include_router(analysis.router, prefix="/api", tags=["analysis"])
+# The routers are imported here rather than at the top of the file so that a
+# failure to import one does not take the application down with it.
+#
+# On a serverless platform an exception during module import happens before any
+# handler exists, so the request dies with a generic FUNCTION_INVOCATION_FAILED
+# and no way to ask what went wrong. Keeping ``app`` alive means /api/health
+# still answers -- and can say that the routers are the thing that is broken.
+#
+# ``app = FastAPI(...)`` above stays a plain top-level assignment on purpose:
+# Vercel finds the application by parsing this file, not by running it.
+ROUTER_IMPORT_ERROR: str | None = None
+try:
+    from kaigyou_api.routers import analysis, layers, meta
+
+    app.include_router(meta.router, prefix="/api", tags=["meta"])
+    app.include_router(layers.router, prefix="/api", tags=["layers"])
+    app.include_router(analysis.router, prefix="/api", tags=["analysis"])
+except Exception as exc:  # noqa: BLE001 - report it rather than die at import
+    log.exception("failed to load API routers")
+    ROUTER_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 #: Managed platforms set one of these. A public URL should not narrate its own
@@ -92,7 +107,9 @@ def health() -> dict[str, object]:
         config_dir, config_found = None, False
 
     return {
-        "status": "ok",
+        "status": "ok" if ROUTER_IMPORT_ERROR is None else "degraded",
+        "routers_loaded": ROUTER_IMPORT_ERROR is None,
+        "router_error": ROUTER_IMPORT_ERROR,
         "config_found": config_found,
         "config_dir": str(config_dir) if config_dir else None,
         "database_url_set": configured,

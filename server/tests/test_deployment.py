@@ -218,3 +218,43 @@ def test_getting_far_enough_to_be_rejected_means_the_host_was_fine(message):
     """Being told no is proof the address resolved -- do not blame the address."""
     assert db.connection_hint(
         "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres", message) is None
+
+
+# ------------------------------------------- staying alive to be diagnosed
+def test_health_answers_and_names_the_cause_when_routers_fail(monkeypatch):
+    """A broken import must not take the whole application down.
+
+    On a serverless platform an exception during module import happens before
+    any handler exists, so the request dies as FUNCTION_INVOCATION_FAILED with
+    nothing to go on. Keeping `app` alive costs one try/except and turns that
+    into an answer.
+    """
+    import builtins
+    import importlib
+    import sys
+
+    from fastapi.testclient import TestClient  # imports httpx before the guard
+
+    real_import = builtins.__import__
+
+    def guard(name, *args, **kwargs):
+        if name.startswith("kaigyou_api.routers"):
+            raise ModuleNotFoundError("No module named 'psycopg'")
+        return real_import(name, *args, **kwargs)
+
+    for module in [m for m in sys.modules if m.startswith("kaigyou_api")]:
+        del sys.modules[module]
+    monkeypatch.setattr(builtins, "__import__", guard)
+    broken = importlib.import_module("kaigyou_api.main")
+    monkeypatch.setattr(builtins, "__import__", real_import)
+
+    body = TestClient(broken.app, raise_server_exceptions=False).get("/api/health")
+    assert body.status_code == 200
+    assert body.json()["status"] == "degraded"
+    assert body.json()["routers_loaded"] is False
+    assert "psycopg" in body.json()["router_error"]
+
+    # Leave the module registry as we found it, or later tests get the stub.
+    for module in [m for m in sys.modules if m.startswith("kaigyou_api")]:
+        del sys.modules[module]
+    importlib.import_module("kaigyou_api.main")
