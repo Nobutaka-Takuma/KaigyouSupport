@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm --prefix web ci",
+  "buildCommand": "npm --prefix web run build",
+  "outputDirectory": "web/dist",
+  "functions": {
+    "api/index.py": {
+      "memory": 1024,
+      "maxDuration": 30,
+      "includeFiles": "config/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
+}

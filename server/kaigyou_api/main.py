@@ -35,25 +35,44 @@ app.include_router(layers.router, prefix="/api", tags=["layers"])
 app.include_router(analysis.router, prefix="/api", tags=["analysis"])
 
 
+#: Managed platforms set one of these. A public URL should not narrate its own
+#: exceptions -- the message can carry a connection string or a table name --
+#: so the detail is withheld there unless the operator asks for it back.
+_HOSTED_MARKERS = ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME", "K_SERVICE")
+
+
+def expose_error_detail() -> bool:
+    override = os.getenv("KAIGYOU_ERROR_DETAIL")
+    if override is not None:
+        return override.strip().lower() not in {"", "0", "false", "no", "off"}
+    return not any(os.getenv(marker) for marker in _HOSTED_MARKERS)
+
+
 @app.exception_handler(Exception)
 async def unhandled(request: Request, exc: Exception) -> JSONResponse:
     """Answer with the cause instead of a bare 500.
 
     Config missing, database unreachable and migration not applied all look
     identical from the browser otherwise, which sends the operator hunting in
-    the wrong place. This is a local single-operator tool, so naming the
-    exception is worth more than hiding it.
+    the wrong place. Run locally -- one operator, one machine -- naming the
+    exception is worth more than hiding it. Deployed, it is not: see
+    :func:`expose_error_detail`. Either way the full traceback goes to the log.
     """
     log.exception("unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": f"{type(exc).__name__}: {exc}",
-            "hint": "kaigyou-etl doctor を実行すると原因と対処が表示されます。",
-        },
-    )
+    if expose_error_detail():
+        detail = f"{type(exc).__name__}: {exc}"
+        hint = "kaigyou-etl doctor を実行すると原因と対処が表示されます。"
+    else:
+        detail = "サーバ内部エラー"
+        hint = "サーバのログに詳細が記録されています。"
+    return JSONResponse(status_code=500, content={"detail": detail, "hint": hint})
 
 
+# Both paths, because only one of them is reachable in each setting: run
+# locally the app owns the whole origin, but a deployment that serves the web
+# client from the same domain routes only /api/* into the function.
 @app.get("/health", tags=["meta"])
+@app.get("/api/health", tags=["meta"])
 def health() -> dict[str, str]:
+    """Liveness only -- deliberately does not touch the database."""
     return {"status": "ok"}

@@ -208,3 +208,17 @@ export interface CandidatePoint {
   lng: number;
   label: string;
 }
+
+export interface ClinicDetail {
+  id: number;
+  facility_id: string;
+  name: string;
+  address: string | null;
+  facility_category: string;
+  clinic_types: string[];
+  opening_date: string | null;
+  founder_type: string | null;
+  attributes: Record<string, string>;
+  source_date: string | null;
+  source_name: string;
+}

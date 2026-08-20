@@ -3,18 +3,20 @@ name = "kaigyou-support"
 version = "0.1.0"
 description = "Location intelligence for dental clinic openings (Tokyo MVP)"
 requires-python = ">=3.11"
+# What serving a request needs, and nothing else. The serverless deployment
+# installs exactly this: acquisition runs on a workstation, so httpx and pyshp
+# have no business inside a function that only reads the database.
 dependencies = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
     "psycopg[binary]>=3.2",
     "pydantic>=2.9",
     "PyYAML>=6.0",
-    "httpx>=0.27",
-    "pyshp>=2.3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+etl = ["httpx>=0.27", "pyshp>=2.3"]
+serve = ["uvicorn[standard]>=0.32"]
+dev = ["kaigyou-support[etl,serve]", "pytest>=8.0"]
 
 [project.scripts]
 kaigyou-etl = "kaigyou_etl.cli:main"

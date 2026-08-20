@@ -189,6 +189,7 @@ a { color: var(--accent); }
   border: 1px solid var(--warn-border);
 }
 .map__error { top: auto; bottom: 10px; background: var(--error-bg); border-color: var(--error-border); }
+.map__hint--zoom { top: auto; bottom: 44px; left: 50%; transform: translateX(-50%); text-align: center; }
 
 .map__legend {
   position: absolute;
@@ -356,11 +357,151 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .candidates ul { list-style: none; margin: 0; padding: 0; }
 .candidates li { display: flex; gap: 8px; align-items: baseline; }
 
+/* The toolbar's fold-away toggle only exists on small screens. */
+.toolbar__toggle { display: none; }
+
 @media (max-width: 900px) {
-  .mappage__body { flex-direction: column; }
-  .panel { width: 100%; border-left: 0; border-top: 1px solid var(--border); }
-  .mapwrap { height: 55vh; flex: none; }
+  :root { font-size: 15px; }
+
+  /* --- chrome: give the map the screen ------------------------------- */
+  .app { height: 100dvh; overflow: hidden; }
+  .app__header {
+    padding: 6px 12px;
+    gap: 6px;
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+  /* The brand goes: four tab labels do not fit beside it, and a nav that
+     overflows while right-aligned clips its *first* tab -- the current one. */
+  .app__brand { display: none; }
+  .app__header nav {
+    flex: 1;
+    flex-wrap: nowrap;
+    gap: 2px;
+    overflow-x: auto;
+    justify-content: flex-start;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .app__header nav::-webkit-scrollbar { display: none; }
+  .app__header nav a { padding: 5px 9px; font-size: 12.5px; white-space: nowrap; }
+
+  .notice { padding: 7px 12px; font-size: 12px; }
+
+  /* --- toolbar: radius chips stay, the rest folds -------------------- */
+  .toolbar {
+    position: relative;
+    gap: 8px;
+    padding: 7px 12px;
+    align-items: center;
+  }
+  .toolbar__toggle {
+    display: inline-block;
+    order: 2;
+    margin-left: auto;
+    font-size: 12px;
+    padding: 5px 10px;
+  }
+  .toolbar__radii { order: 1; gap: 5px; }
+  .toolbar .toolbar__foldable { display: none; order: 3; }
+  .toolbar.toolbar--open .toolbar__foldable { display: flex; }
+  .toolbar--open { flex-direction: column; align-items: stretch; }
+  .toolbar--open .toolbar__toggle { order: 0; margin-left: 0; align-self: flex-end; }
+  .toolbar--open .toolbar__radii { order: 1; }
+  .toolbar__search { position: static; }
+  .toolbar__search input { flex: 1; min-width: 0; }
+  .searchhits { left: 12px; right: 12px; min-width: 0; }
+
+  /* Comfortable touch targets. */
+  .chip { padding: 8px 16px; font-size: 14px; }
+  .toolbar select, .toolbar input, button { min-height: 38px; }
+  .toggle { padding: 4px 0; }
+
+  /* --- map fills what is left --------------------------------------- */
+  .mappage__body { flex-direction: column; position: relative; flex: 1; min-height: 0;
+                   --sheet-clearance: 0px; }
+  /* Once there is an analysis to show, everything on the map's bottom edge
+     moves up by the height of the collapsed sheet. */
+  .mappage__body:has(.panel__grip) { --sheet-clearance: 56px; }
+  .mapwrap { flex: 1; height: auto; min-height: 0; }
+  /* Above the attribution row, not on top of it: the tile provider's credit
+     has to stay readable, and the legend is nearly the full width here. */
+  .map__legend { bottom: calc(44px + var(--sheet-clearance)); right: 8px;
+                 font-size: 10.5px; padding: 4px 8px; }
+  .map__hint, .map__error { max-width: calc(100vw - 24px); font-size: 11.5px; }
+
+  /* --- analysis arrives as a sheet over the map ---------------------- */
+  .panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: 82%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -6px 22px rgba(0, 0, 0, 0.16);
+    padding: 0 16px calc(28px + env(safe-area-inset-bottom));
+    /* Collapsed to the grip; the map keeps the rest of the screen. */
+    transform: translateY(calc(100% - 52px));
+    transition: transform 0.22s ease;
+    overscroll-behavior: contain;
+  }
+  .panel--open { transform: translateY(0); }
+  /* With nothing selected the sheet has nothing to say -- stay out of the way. */
+  .panel:not(.panel--open):not(:has(.panel__grip)) { transform: translateY(100%); }
+
+  .panel__grip {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    width: calc(100% + 32px);
+    margin: 0 -16px;
+    padding: 8px 16px 10px;
+    border: 0;
+    border-radius: 14px 14px 0 0;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    min-height: 52px;
+  }
+  .panel__grip-bar {
+    width: 38px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  .panel__grip-label { font-size: 13px; font-weight: 600; }
+
+  /* The sheet and the map's own overlays claim the same bottom corner. The
+     sheet wins: while it is open the legend, scale bar and zoom buttons are
+     covering the numbers the reader opened it for. Collapsed to the grip they
+     are still useful, just lifted clear of it. */
+  .panel { z-index: 10; }
+  .mappage__body:has(.panel--open) .map__legend,
+  .mappage__body:has(.panel--open) .maplibregl-ctrl-top-right,
+  .mappage__body:has(.panel--open) .maplibregl-ctrl-bottom-left,
+  .mappage__body:has(.panel--open) .maplibregl-ctrl-bottom-right { display: none; }
+  .maplibregl-ctrl-bottom-left,
+  .maplibregl-ctrl-bottom-right { margin-bottom: var(--sheet-clearance); }
+
+  .panel__empty { display: none; }
+  .datatable { font-size: 12.5px; }
+  .datatable th, .datatable td { padding: 6px 6px; }
+  .scorepanel__value { font-size: 36px; }
+
+  /* --- the other screens --------------------------------------------- */
+  .page { padding: 14px 12px 40px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .filters { gap: 10px; }
+  .datatable--wide { display: block; overflow-x: auto; white-space: nowrap; }
+  .datatable--compare { display: block; overflow-x: auto; }
+  .sourcecard dl { grid-template-columns: 1fr; }
 }
 
-.caveats { padding-left: 20px; }
-.caveats li { margin-bottom: 6px; }
+/* Fine-grained: the narrowest common phones. */
+@media (max-width: 400px) {
+  .toolbar__radii span { display: none; }
+}

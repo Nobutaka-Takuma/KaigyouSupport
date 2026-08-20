@@ -172,12 +172,14 @@ class MHLWClinicsAdapter(SourceAdapter):
             }
 
     def load(self, conn: psycopg.Connection, records: Iterable[dict[str, Any]]) -> int:
-        count = 0
+        rows = [{**rec, "source_id": self.source_id,
+                 "attributes": Json(rec.get("attributes") or {})}
+                for rec in records]
         with conn.cursor() as cur:
             cur.execute("DELETE FROM facilities WHERE source_id = %s", (self.source_id,))
-            for rec in records:
-                cur.execute(
-                    """
+            return self.insert_many(
+                cur,
+                """
                     INSERT INTO facilities (
                         source_id, facility_id, facility_category, name, address,
                         prefecture_code, municipality_code, geom, opening_date,
@@ -199,12 +201,9 @@ class MHLWClinicsAdapter(SourceAdapter):
                         municipality_code = EXCLUDED.municipality_code,
                         source_date = EXCLUDED.source_date,
                         last_updated = now()
-                    """,
-                    {**rec, "source_id": self.source_id,
-                     "attributes": Json(rec.get("attributes") or {})},
-                )
-                count += 1
-        return count
+                """,
+                rows,
+            )
 
 
 def _get(row: dict[str, str], col: dict[str, str | None], field: str) -> str | None:

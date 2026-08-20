@@ -1,0 +1,16 @@
+# Vercel deploys the API function and the built web client. Nothing else needs
+# to be uploaded, and the source data must not be: download/ holds the
+# publishers' files, which are theirs to distribute, not ours.
+download/
+downloads/
+data/
+db/
+.venv/
+node_modules/
+web/node_modules/
+web/dist/
+**/__pycache__/
+**/*.egg-info/
+.pytest_cache/
+server/tests/
+docs/

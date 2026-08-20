@@ -83,6 +83,7 @@ External Data → ETL（download/validate/transform/load）→ PostGIS → API �
 | `server/kaigyou_api/` | 読み取り専用 HTTP API。外部データを取得しない |
 | `web/` | MapLibre GL JS + React のフロントエンド。API 以外と通信しない |
 | `server/tests/` | 単体テスト＋PostGIS 結合テスト |
+| `api/` | Vercel のサーバレス関数の入口（`kaigyou_api` を読み込むだけ） |
 
 UI・API・ETL は別プロセスであり、UI からデータ取得処理を起動する経路はありません。
 
@@ -253,17 +254,36 @@ kaigyou-etl refresh-stats && kaigyou-etl compute-scores
 
 ## 背景地図タイル
 
-地図タイルは同梱していません。`web/.env` に以下のいずれかを設定してください
+地図タイルは同梱していません。`web/.env` に設定してください
 （未設定でも、自前のデータレイヤーのみで地図は動作します）。
+`web/.env.example` の既定値は国土地理院の淡色地図で、APIキーもアカウントも要りません。
 
 ```
+VITE_RASTER_TILES=https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png
+VITE_RASTER_ATTRIBUTION=国土地理院
+# ベクタタイルのスタイルJSONを使う場合は代わりに
 VITE_BASEMAP_STYLE=https://example.com/style.json
-# または
-VITE_RASTER_TILES=https://tile.openstreetmap.org/{z}/{x}/{y}.png
-VITE_RASTER_ATTRIBUTION=© OpenStreetMap contributors
 ```
 
-タイル提供元の利用規約を必ず確認してください。
+`VITE_RASTER_ATTRIBUTION` は地図右下に常時表示されます。
+タイル提供元の利用規約は出典表示を求めるのが通例なので、消さないでください。
+これらはビルド時に埋め込まれるため、変更後は再ビルドが必要です。
+
+---
+
+## スマホから見る（デプロイ）
+
+Vercel（静的ファイル＋API）と Supabase（PostGIS）に載せる手順は
+**[docs/deploy.md](docs/deploy.md)** にあります。
+
+構成は変わりません。データ取得（ETL）は手元のPCから Supabase に直接書き込み、
+公開側は読むだけです。要点だけ：
+
+- Supabase のリージョンは **Tokyo**。接続文字列は用途で使い分けます
+  — 投入は Direct (5432)、Vercel からは Transaction pooler (6543)。
+- Vercel の環境変数は `DATABASE_URL` と `VITE_RASTER_*` の3つ。
+- `VITE_` で始まる変数はビルド時に埋め込まれるので、変更したら再デプロイが必要です。
+- 公開URLは誰でも見られます。限定したいなら Vercel の Deployment Protection を有効に。
 
 ---
 

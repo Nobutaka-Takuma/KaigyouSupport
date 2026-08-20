@@ -250,12 +250,14 @@ class MLITStationsAdapter(SourceAdapter):
             }
 
     def load(self, conn: psycopg.Connection, records: Iterable[dict[str, Any]]) -> int:
-        count = 0
+        rows = [{**rec, "source_id": self.source_id,
+                 "attributes": Json(rec.get("attributes") or {})}
+                for rec in records]
         with conn.cursor() as cur:
             cur.execute("DELETE FROM stations WHERE source_id = %s", (self.source_id,))
-            for rec in records:
-                cur.execute(
-                    """
+            count = self.insert_many(
+                cur,
+                """
                     INSERT INTO stations (
                         source_id, station_id, name, operator, railway_line,
                         prefecture_code, geom, daily_passengers, passengers_year,
@@ -275,11 +277,9 @@ class MLITStationsAdapter(SourceAdapter):
                         attributes = EXCLUDED.attributes,
                         source_date = EXCLUDED.source_date,
                         last_updated = now()
-                    """,
-                    {**rec, "source_id": self.source_id,
-                     "attributes": Json(rec.get("attributes") or {})},
-                )
-                count += 1
+                """,
+                rows,
+            )
 
             # S12 carries no prefecture. Rather than guess one, take it from
             # the nearest loaded mesh. Strict containment is not enough: the

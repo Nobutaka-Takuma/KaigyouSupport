@@ -31,6 +31,11 @@ from kaigyou_etl.acquisition import (
     AcquisitionError,
 )
 
+#: Rows per round trip. Large enough that the network stops being the
+#: bottleneck, small enough that a batch of boundary polygons still fits in
+#: memory comfortably.
+BATCH_ROWS = 500
+
 
 @dataclass
 class AdapterContext:
@@ -190,6 +195,25 @@ class SourceAdapter(ABC):
         """Write records, returning the number stored."""
 
     # ---------------------------------------------------------------- helpers
+    @staticmethod
+    def insert_many(cur: psycopg.Cursor, sql: str,
+                    rows: Sequence[Mapping[str, Any]]) -> int:
+        """Run one INSERT per row, but not one round trip per row.
+
+        Against a database on localhost the difference is a few seconds. Against
+        a hosted one it is the difference between a minute and half an hour:
+        51,384 clinics at a 15ms round trip is thirteen minutes of waiting on
+        the network. psycopg pipelines ``executemany``, so the rows go out
+        without waiting for each result in turn.
+
+        Chunked because the whole batch is buffered before it is sent, and the
+        municipal boundaries carry megabytes of WKT apiece.
+        """
+        rows = list(rows)
+        for start in range(0, len(rows), BATCH_ROWS):
+            cur.executemany(sql, rows[start:start + BATCH_ROWS])
+        return len(rows)
+
     def column_map(self) -> dict[str, list[str]]:
         raw = self.spec.get("columns") or {}
         return {k: (v if isinstance(v, list) else [v]) for k, v in raw.items()}
