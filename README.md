@@ -104,7 +104,7 @@ export DATABASE_URL=postgresql://kaigyou:kaigyou@127.0.0.1:5432/kaigyou
 make migrate
 
 # 4. 実データを投入（下記「実データを表示するまで」を参照）
-make load-local DIR=~/Downloads
+kaigyou-etl load-local ~/Downloads
 
 # 5. 起動
 make api            # http://127.0.0.1:8000  （API ドキュメント /docs）
@@ -128,40 +128,65 @@ make web            # http://127.0.0.1:5173
 `kaigyou-etl run <source>` で自動取得も試せますが、手元にダウンロードしたものを
 渡すのが確実です。
 
-| ファイル | 入手先 |
+| データ | 入手先 |
 |---|---|
-| `031_dental_facility_info_YYYYMMDD.csv` | 厚労省 [医療機能情報提供制度](https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2400/initialize) の歯科施設情報 |
-| `tblT001141H13.txt`（2020年） | [e-Stat 統計GIS](https://www.e-stat.go.jp/gis/statmap-search?type=1) 国勢調査 500mメッシュ 東京都 |
-| `tblT000847H13.txt`（2015年） | 同上（人口増減率の基準に使用） |
-| `S12-25_GML.zip` | [国土数値情報 S12](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-S12.html) 駅別乗降客数 |
-| `N03-20240101_13_GML.zip` | [国土数値情報 N03](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-v3_1.html) 行政区域 東京都 |
+| 歯科施設情報 CSV | 厚労省 [医療機能情報提供制度](https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2400/initialize) |
+| 国勢調査 500mメッシュ（最新年） | [e-Stat 統計GIS](https://www.e-stat.go.jp/gis/statmap-search?type=1) 東京都 |
+| 国勢調査 500mメッシュ（前回） | 同上（人口増減率の基準に使用） |
+| 駅別乗降客数 zip | [国土数値情報 S12](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-S12.html) |
+| 行政区域 zip | [国土数値情報 N03](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-v3_1.html) 東京都 |
+
+**ファイル名は変更不要です。** ダウンロードしたままの名前で構いません。
+どのファイルがどの情報源かは、名前ではなく中身（CSVのヘッダ、統計表の列ID、
+zip の中のファイル名）で判別します。同じ S12 の zip が配布元では
+`S12-25_GML.zip`、ブラウザ経由では `S1225_GML.zip` になることがあるためです。
 
 ### 1コマンドで投入する
 
 5つのファイルを同じフォルダに置いて:
 
 ```bash
-make load-local DIR=~/Downloads
+kaigyou-etl load-local <フォルダ>
 ```
+
+Windows (PowerShell) の場合:
+
+```powershell
+.venv\Scripts\kaigyou-etl load-local .\download
+```
+
+`make` が使える環境なら `make load-local DIR=./download` でも同じです。
 
 4情報源の取り込み → サンプルデータの削除 → スコア基準の再計算 →
 メッシュスコアの再計算 → 取得状況の表示、までを順に実行します。
-所要時間は約3〜4分（取り込み20秒、スコア計算3分）。
+所要時間は約4分（取り込み25秒、スコア計算3分半）。
 
-ファイル名が上表と違う場合は個別に指定できます:
+### まず判別結果だけ確認する
 
 ```bash
-make load-local DIR=~/Downloads MESH=tblT001141H13.txt STATIONS=S12-24_GML.zip
+kaigyou-etl load-local <フォルダ> --dry-run
 ```
+
+```
+download の中身:
+  [OK  ] 歯科診療所                  031_dental_facility_info_20260601.csv
+  [OK  ] 人口メッシュ（最新年）            tblT001141H13.txt
+  [OK  ] 人口メッシュ（基準年）            tblT000847H13.txt
+  [OK  ] 駅別乗降客数                 S1225_GML.zip
+  [OK  ] 行政区域                   N0320240101_13_GML.zip
+```
+
+判別できないファイルや、足りないデータはここで報告されます。
+足りないまま進めたい場合は `--partial` を付けてください
+（そのデータに依存するスコアは「算出不可」になります）。
 
 ### 個別に実行する場合
 
 ```bash
-kaigyou-etl run mhlw_dental_clinics   --input ~/Downloads/031_dental_facility_info_20260601.csv
-kaigyou-etl run estat_population_mesh --input ~/Downloads/tblT001141H13.txt \
-                                      --baseline ~/Downloads/tblT000847H13.txt
-kaigyou-etl run mlit_stations         --input ~/Downloads/S12-25_GML.zip
-kaigyou-etl run mlit_municipalities   --input ~/Downloads/N03-20240101_13_GML.zip
+kaigyou-etl run mhlw_dental_clinics   --input <歯科CSV>
+kaigyou-etl run estat_population_mesh --input <最新年メッシュ> --baseline <前回メッシュ>
+kaigyou-etl run mlit_stations         --input <S12 zip>
+kaigyou-etl run mlit_municipalities   --input <N03 zip>
 
 kaigyou-etl drop-sample      # 合成データを削除（残すと二重計上になります）
 kaigyou-etl refresh-stats    # スコア基準を実データの分布で再計算
@@ -172,12 +197,12 @@ kaigyou-etl status           # 4/4 になっていることを確認
 ### 確認方法
 
 ```bash
-make status
+kaigyou-etl status
 ```
 
 `公的データを取得できた情報源: 4 / 4` と表示され、
 `⚠ サンプル（合成）データ` の行が出なければ完了です。
-画面上部の警告バナーも消えます。
+ブラウザを再読み込みすると、画面上部の警告バナーが消えます。
 
 `/about` 画面でも同じ内容（情報源ごとの件数・データ時点・取得日時）を確認できます。
 
@@ -186,12 +211,14 @@ make status
 実データを用意せずに画面を触りたいときは、合成データを投入できます。
 
 ```bash
-make sample && make stats && make scores
+kaigyou-etl generate-sample
+kaigyou-etl refresh-stats && kaigyou-etl compute-scores
 ```
 
 このデータは**実データではありません**。情報源名が `【サンプル】` で始まり、
 全画面に警告バナーが常時表示されます（非表示にできません）。
-実データを入れる前に `make drop-sample` で削除してください。
+実データを入れる前に `kaigyou-etl drop-sample` で削除してください
+（`load-local` は自動で削除します）。
 
 ---
 

@@ -4,6 +4,7 @@
     kaigyou-etl list
     kaigyou-etl run <source> [--input FILE] [--offline]
     kaigyou-etl run-all [--offline]
+    kaigyou-etl load-local <dir> [--dry-run]
     kaigyou-etl generate-sample / drop-sample
     kaigyou-etl refresh-stats
     kaigyou-etl compute-scores [--profile NAME]
@@ -104,6 +105,83 @@ def _print_run(result: Any) -> None:
         print(f"    -> {result.error_type}: {result.error_message}")
 
 
+def cmd_load_local(args: argparse.Namespace) -> int:
+    """Load every dataset found in a directory, then rebuild the scores.
+
+    Files are matched on their contents rather than their names: the same S12
+    archive is published as S12-25_GML.zip and arrives as S1225_GML.zip
+    depending on the browser, and guessing wrong would look like a missing
+    download rather than a naming mismatch.
+    """
+    from kaigyou_etl.discover import describe, discover
+    from kaigyou_etl.pipeline import run_source
+
+    directory = Path(args.directory).expanduser()
+    try:
+        found = discover(directory, cfg.sources_config().get("sources") or {})
+    except NotADirectoryError:
+        print(f"error: フォルダが見つかりません: {directory}", file=sys.stderr)
+        return EXIT_ERROR
+
+    print(f"{directory} の中身:")
+    for line in describe(found):
+        print(line)
+    for path in found.unmatched:
+        print(f"  [--  ] 判別できないファイル       {path.name}")
+    for note in found.notes:
+        print(f"  * {note}")
+    print()
+
+    if found.missing:
+        print("次のファイルが見つかりません: " + "、".join(found.missing))
+        print("README の「実データを表示するまで」を参照してください。")
+        if not args.partial:
+            print("見つかった分だけ取り込むには --partial を付けてください。")
+            return EXIT_PARTIAL
+
+    if args.dry_run:
+        print("--dry-run のため、ここで終了します。")
+        return EXIT_OK
+
+    plan = [
+        ("mhlw_dental_clinics", found.clinics, None),
+        ("estat_population_mesh", found.mesh_current, found.mesh_baseline),
+        ("mlit_stations", found.stations, None),
+        ("mlit_municipalities", found.municipalities, None),
+    ]
+    failures = 0
+    for source_id, input_path, baseline in plan:
+        if input_path is None:
+            continue
+        result = run_source(source_id, input_path=input_path, baseline_path=baseline)
+        _print_run(result)
+        failures += 0 if result.ok else 1
+
+    if failures:
+        print(f"\n{failures} 件の取り込みに失敗しました。詳細: kaigyou-etl status")
+        return EXIT_PARTIAL
+
+    # Synthetic rows left alongside real ones would be counted twice.
+    from kaigyou_etl.sample.generate import drop
+    with connect() as conn:
+        removed = drop(conn)
+    if any(removed.values()):
+        print("\n合成（サンプル）データを削除:",
+              ", ".join(f"{k}={v}" for k, v in removed.items() if v))
+
+    from kaigyou_etl.scores import compute_mesh_scores, refresh_stats
+    print("\nスコア基準を再計算しています（数分かかります）...")
+    with connect() as conn:
+        refresh_stats(conn, prefecture_code=args.prefecture)
+    print("メッシュスコアを再計算しています...")
+    with connect() as conn:
+        summary = compute_mesh_scores(conn, prefecture_code=args.prefecture)
+    print(json.dumps(summary, ensure_ascii=False, default=_json_default))
+
+    print()
+    return cmd_status(argparse.Namespace(json=False))
+
+
 def cmd_generate_sample(_args: argparse.Namespace) -> int:
     from kaigyou_etl.acquisition import AcquisitionLog
     from kaigyou_etl.sample.generate import generate
@@ -201,6 +279,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("run-all", help="run every configured source")
     p.add_argument("--offline", action="store_true")
     p.set_defaults(func=cmd_run_all)
+
+    p = sub.add_parser(
+        "load-local",
+        help="load every dataset found in a folder, then rebuild the scores")
+    p.add_argument("directory", help="folder holding the downloaded files")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report which file was matched to which source")
+    p.add_argument("--partial", action="store_true",
+                   help="proceed even when some datasets are missing")
+    p.add_argument("--prefecture", default="13")
+    p.set_defaults(func=cmd_load_local)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")
     p.set_defaults(func=cmd_generate_sample)

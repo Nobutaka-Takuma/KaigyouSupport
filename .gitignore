@@ -12,6 +12,8 @@ dist/
 # subject to the publishers' terms, so they are not committed.
 data/raw/
 data/*.log
+download/
+downloads/
 
 # Local env
 .env

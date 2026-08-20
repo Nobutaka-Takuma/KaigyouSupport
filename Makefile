@@ -24,29 +24,18 @@ migrate:
 fetch:
 	$(PY)/kaigyou-etl run-all
 
-## Load the four public datasets from files you downloaded yourself, then
-## rebuild the scores. This is the normal route: several of the publishers
-## distribute through a click-through form rather than a stable URL.
+## Load every dataset found in a folder, then rebuild the scores.
 ##
 ##   make load-local DIR=~/Downloads
 ##
-## Override any name that differs from the published default, e.g.
-##   make load-local DIR=~/Downloads MESH=tblT001141H13.txt
-CLINICS ?= 031_dental_facility_info_20260601.csv
-MESH    ?= tblT001141H13.txt
-MESH_BASELINE ?= tblT000847H13.txt
-STATIONS ?= S12-25_GML.zip
-BOUNDARIES ?= N03-20240101_13_GML.zip
+## Files are matched on their contents, not their names, so a browser-renamed
+## archive still lands in the right place. Add DRY_RUN=1 to see the matching
+## without loading anything.
+DRY_RUN ?=
 
 load-local:
-	@test -n "$(DIR)" || (echo "usage: make load-local DIR=<downloads directory>"; exit 1)
-	$(PY)/kaigyou-etl run mhlw_dental_clinics   --input "$(DIR)/$(CLINICS)"
-	$(PY)/kaigyou-etl run estat_population_mesh --input "$(DIR)/$(MESH)" \
-	                                            --baseline "$(DIR)/$(MESH_BASELINE)"
-	$(PY)/kaigyou-etl run mlit_stations         --input "$(DIR)/$(STATIONS)"
-	$(PY)/kaigyou-etl run mlit_municipalities   --input "$(DIR)/$(BOUNDARIES)"
-	$(PY)/kaigyou-etl drop-sample
-	$(MAKE) stats scores status
+	@test -n "$(DIR)" || (echo "usage: make load-local DIR=<downloads folder>"; exit 1)
+	$(PY)/kaigyou-etl load-local "$(DIR)" $(if $(DRY_RUN),--dry-run,)
 
 ## Synthetic development data, clearly labelled as such everywhere.
 sample:
