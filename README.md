@@ -103,23 +103,99 @@ export DATABASE_URL=postgresql://kaigyou:kaigyou@127.0.0.1:5432/kaigyou
 # 3. スキーマ適用
 make migrate
 
-# 4. 公的データの取得を試行
-make fetch          # 取得できない情報源があると exit code 2
-make status         # 取得できたもの／できなかったものと理由を表示
+# 4. 実データを投入（下記「実データを表示するまで」を参照）
+make load-local DIR=~/Downloads
 
-# 5. 取得できなかった場合、動作確認用の合成データを投入（任意）
-make sample
-
-# 6. スコア基準の算出とメッシュスコアの計算
-make stats
-make scores
-
-# 7. 起動
+# 5. 起動
 make api            # http://127.0.0.1:8000  （API ドキュメント /docs）
 make web            # http://127.0.0.1:5173
 ```
 
-### 背景地図タイル
+---
+
+## 実データを表示するまで
+
+> **データベースの中身はリポジトリに含まれません。**
+> `git clone` した直後のデータベースは空です。画面に
+> 「公的データ未取得」「サンプルデータ表示中」と出ている場合は、
+> このリポジトリに実データが入っていないのではなく、
+> **お使いのデータベースにまだ投入していない**状態です。
+> `data/raw/` も `.gitignore` 済みです（各提供元の利用規約に従うため）。
+
+### 必要なファイルをダウンロードする（4情報源・5ファイル）
+
+歯科診療所と人口メッシュはフォーム経由の配布です。S12・N03 は直リンクがあり
+`kaigyou-etl run <source>` で自動取得も試せますが、手元にダウンロードしたものを
+渡すのが確実です。
+
+| ファイル | 入手先 |
+|---|---|
+| `031_dental_facility_info_YYYYMMDD.csv` | 厚労省 [医療機能情報提供制度](https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2400/initialize) の歯科施設情報 |
+| `tblT001141H13.txt`（2020年） | [e-Stat 統計GIS](https://www.e-stat.go.jp/gis/statmap-search?type=1) 国勢調査 500mメッシュ 東京都 |
+| `tblT000847H13.txt`（2015年） | 同上（人口増減率の基準に使用） |
+| `S12-25_GML.zip` | [国土数値情報 S12](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-S12.html) 駅別乗降客数 |
+| `N03-20240101_13_GML.zip` | [国土数値情報 N03](https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-N03-v3_1.html) 行政区域 東京都 |
+
+### 1コマンドで投入する
+
+5つのファイルを同じフォルダに置いて:
+
+```bash
+make load-local DIR=~/Downloads
+```
+
+4情報源の取り込み → サンプルデータの削除 → スコア基準の再計算 →
+メッシュスコアの再計算 → 取得状況の表示、までを順に実行します。
+所要時間は約3〜4分（取り込み20秒、スコア計算3分）。
+
+ファイル名が上表と違う場合は個別に指定できます:
+
+```bash
+make load-local DIR=~/Downloads MESH=tblT001141H13.txt STATIONS=S12-24_GML.zip
+```
+
+### 個別に実行する場合
+
+```bash
+kaigyou-etl run mhlw_dental_clinics   --input ~/Downloads/031_dental_facility_info_20260601.csv
+kaigyou-etl run estat_population_mesh --input ~/Downloads/tblT001141H13.txt \
+                                      --baseline ~/Downloads/tblT000847H13.txt
+kaigyou-etl run mlit_stations         --input ~/Downloads/S12-25_GML.zip
+kaigyou-etl run mlit_municipalities   --input ~/Downloads/N03-20240101_13_GML.zip
+
+kaigyou-etl drop-sample      # 合成データを削除（残すと二重計上になります）
+kaigyou-etl refresh-stats    # スコア基準を実データの分布で再計算
+kaigyou-etl compute-scores   # ランキング・ヒートマップ用スコアを再計算
+kaigyou-etl status           # 4/4 になっていることを確認
+```
+
+### 確認方法
+
+```bash
+make status
+```
+
+`公的データを取得できた情報源: 4 / 4` と表示され、
+`⚠ サンプル（合成）データ` の行が出なければ完了です。
+画面上部の警告バナーも消えます。
+
+`/about` 画面でも同じ内容（情報源ごとの件数・データ時点・取得日時）を確認できます。
+
+### 動作確認だけしたい場合
+
+実データを用意せずに画面を触りたいときは、合成データを投入できます。
+
+```bash
+make sample && make stats && make scores
+```
+
+このデータは**実データではありません**。情報源名が `【サンプル】` で始まり、
+全画面に警告バナーが常時表示されます（非表示にできません）。
+実データを入れる前に `make drop-sample` で削除してください。
+
+---
+
+## 背景地図タイル
 
 地図タイルは同梱していません。`web/.env` に以下のいずれかを設定してください
 （未設定でも、自前のデータレイヤーのみで地図は動作します）。
@@ -135,47 +211,9 @@ VITE_RASTER_ATTRIBUTION=© OpenStreetMap contributors
 
 ---
 
-## 実データの取り込み
+## データソースの詳細
 
-### 手動ダウンロードしたファイルを使う（推奨）
-
-いくつかの情報源はフォーム経由の配布で、安定した直リンクがありません。
-その場合は手元にダウンロードしたファイルを渡してください。
-
-```bash
-# 歯科診療所（実績あり）。全47都道府県を含むファイルをそのまま投入できます
-kaigyou-etl run mhlw_dental_clinics --input 031_dental_facility_info_20260601.csv
-
-# 東京都だけに絞る場合
-kaigyou-etl run mhlw_dental_clinics --input <file>.csv --prefecture 13
-
-# 人口メッシュ（実績あり）。--baseline に前回調査を渡すと人口増減率を算出します
-kaigyou-etl run estat_population_mesh \
-    --input    tblT001141H13.txt \
-    --baseline tblT000847H13.txt
-
-# 駅（実績あり）。全国ファイルをそのまま投入できます
-kaigyou-etl run mlit_stations --input S12-25_GML.zip
-
-# 行政区域（実績あり）
-kaigyou-etl run mlit_municipalities --input N03-20240101_13_GML.zip
-```
-
-`--offline` を付けると、ネットワークに一切アクセスしません。
-
-### 自動ダウンロード
-
-`config/sources.yaml` に `url` が設定されている情報源は自動取得できます。
-
-```bash
-kaigyou-etl run mlit_stations
-kaigyou-etl run-all
-```
-
-歯科診療所は配布ページがフォーム経由のため `url` を空にしてあります
-（誤ったURLを設定すると、設定漏れが「サーバ障害」に見えてしまうため）。
-
-### どのファイルが必要か
+各情報源の癖と、それに対してアダプタが何をしているか。
 
 **歯科医院（取り込み実績あり）**
 厚労省「医療機能情報提供制度」の歯科施設情報 CSV
@@ -240,14 +278,19 @@ e-Stat 統計GIS の国勢調査メッシュ統計（`tblTxxxxxxHnn.txt`、Shift
 > N03 は `.cpg` で文字コードを UTF-8 と宣言しています（旧レイヤーは
 > Shift-JIS）。この宣言を読んで復号します。
 
-### 取り込み後
+### 自動ダウンロード
+
+`config/sources.yaml` に `url` が設定されている情報源（S12・N03）は
+自動取得も試せます。歯科診療所と人口メッシュはフォーム経由の配布のため
+`url` を空にしてあります（誤ったURLを設定すると、設定漏れが
+「サーバ障害」に見えてしまうため）。
 
 ```bash
-kaigyou-etl drop-sample     # 合成データを削除
-kaigyou-etl refresh-stats   # スコア基準を実データの分布で再計算
-kaigyou-etl compute-scores  # ランキング・ヒートマップ用スコアを再計算
-kaigyou-etl status
+kaigyou-etl run mlit_stations   # url が設定されていれば取得を試みる
+kaigyou-etl run-all             # 取得できない情報源があると exit code 2
 ```
+
+`--offline` を付けると、ネットワークに一切アクセスしません。
 
 ### 配布形式が変わったら
 

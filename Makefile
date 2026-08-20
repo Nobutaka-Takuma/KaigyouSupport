@@ -6,7 +6,7 @@ export DATABASE_URL
 
 PY := .venv/bin
 
-.PHONY: setup db migrate fetch sample stats scores status api web test clean
+.PHONY: setup db migrate fetch load-local sample drop-sample stats scores status api web test clean
 
 setup:
 	python3 -m venv .venv
@@ -24,9 +24,36 @@ migrate:
 fetch:
 	$(PY)/kaigyou-etl run-all
 
+## Load the four public datasets from files you downloaded yourself, then
+## rebuild the scores. This is the normal route: several of the publishers
+## distribute through a click-through form rather than a stable URL.
+##
+##   make load-local DIR=~/Downloads
+##
+## Override any name that differs from the published default, e.g.
+##   make load-local DIR=~/Downloads MESH=tblT001141H13.txt
+CLINICS ?= 031_dental_facility_info_20260601.csv
+MESH    ?= tblT001141H13.txt
+MESH_BASELINE ?= tblT000847H13.txt
+STATIONS ?= S12-25_GML.zip
+BOUNDARIES ?= N03-20240101_13_GML.zip
+
+load-local:
+	@test -n "$(DIR)" || (echo "usage: make load-local DIR=<downloads directory>"; exit 1)
+	$(PY)/kaigyou-etl run mhlw_dental_clinics   --input "$(DIR)/$(CLINICS)"
+	$(PY)/kaigyou-etl run estat_population_mesh --input "$(DIR)/$(MESH)" \
+	                                            --baseline "$(DIR)/$(MESH_BASELINE)"
+	$(PY)/kaigyou-etl run mlit_stations         --input "$(DIR)/$(STATIONS)"
+	$(PY)/kaigyou-etl run mlit_municipalities   --input "$(DIR)/$(BOUNDARIES)"
+	$(PY)/kaigyou-etl drop-sample
+	$(MAKE) stats scores status
+
 ## Synthetic development data, clearly labelled as such everywhere.
 sample:
 	$(PY)/kaigyou-etl generate-sample
+
+drop-sample:
+	$(PY)/kaigyou-etl drop-sample
 
 stats:
 	$(PY)/kaigyou-etl refresh-stats
