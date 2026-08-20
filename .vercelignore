@@ -8,7 +8,9 @@ db/
 .venv/
 node_modules/
 web/node_modules/
-web/dist/
+# web/dist is NOT ignored: the build writes it, and the API serves it
+# when the platform hands every request to the function instead of
+# serving the static output itself.
 **/__pycache__/
 **/*.egg-info/
 .pytest_cache/

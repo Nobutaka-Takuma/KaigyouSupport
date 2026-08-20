@@ -208,6 +208,7 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | 同上。`[tool.vercel] entrypoint` を足しても直らない | `server/pyproject.toml` に書いている／モジュールパスが違う | Vercel が読むのは**リポジトリ直下**の `pyproject.toml` です。また `server` はパッケージではないので `server.kaigyou_api.main:app` は import できません。`api/index.py` を直せばこの設定自体が不要です |
 | `/api/*` が全部 404 | `vercel.json` に `/api/(.*)` の rewrite がある | Vercel の FastAPI 対応は `/api/*` をアプリに直接ルーティングします。rewrite があると**転送先のパス**（`/api/index`）でルーティングされ、全部 404 になります。この rewrite は置かないでください |
 | `500: FUNCTION_INVOCATION_FAILED` | 関数が**起動前に**落ちている。多くは依存関係が入っていない | `/api/health` を開くと、起動失敗なら 503 と一緒に原因のモジュール名が出ます。ビルド設定で `installCommand` を上書きすると `pip install -r requirements.txt` が走らなくなるので注意 |
+| トップページが `{"detail":"Not Found"}` | 画面（静的ファイル）が配信されず、全リクエストが API に届いている | 現在は API 自身が画面を返します。`/api/health` の `web_client_bundled` が `false` なら `web/dist` が同梱されていません |
 | `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |
 | `/api/health` が `database_pooled: false` | Vercel で Direct connection (5432) を使っている | Transaction pooler (6543) の接続文字列に変更して再デプロイ |
 | `prepared statement "_pg3_0" does not exist` | プーラ経由なのにプリペアドステートメントが有効 | 通常は自動判定されます。判定が外れる接続文字列なら `KAIGYOU_DB_PREPARE=off` を設定 |

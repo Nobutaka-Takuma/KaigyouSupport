@@ -302,3 +302,68 @@ def test_the_bundle_carries_the_source_the_entry_point_expects():
     assert "server" in included, (
         "server/ would not reach the function, and it is not installed either"
     )
+
+
+# --------------------------------------------------------- serving the SPA
+@pytest.fixture
+def client_with_web(tmp_path, monkeypatch):
+    """An app whose bundle contains a built web client."""
+    import importlib
+    import sys
+
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>app</title>", encoding="utf-8")
+    (dist / "assets" / "main.js").write_text("console.log(1)", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("not yours", encoding="utf-8")
+
+    monkeypatch.setenv("KAIGYOU_WEB_DIST", str(dist))
+    for module in [m for m in sys.modules if m.startswith("kaigyou_api")]:
+        del sys.modules[module]
+    main = importlib.import_module("kaigyou_api.main")
+
+    from fastapi.testclient import TestClient
+    yield TestClient(main.app, raise_server_exceptions=False)
+
+    for module in [m for m in sys.modules if m.startswith("kaigyou_api")]:
+        del sys.modules[module]
+    importlib.import_module("kaigyou_api.main")
+
+
+def test_the_root_serves_the_web_client(client_with_web):
+    """Vercel hands every request to the app, "/" included.
+
+    Before this, the front page answered {"detail":"Not Found"} -- the API is
+    correct to have nothing at the root, but that is not what the reader wants.
+    """
+    response = client_with_web.get("/")
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text
+
+
+def test_client_side_routes_get_the_page_not_a_404(client_with_web):
+    """/ranking is a route inside the SPA; the server has never heard of it."""
+    assert "<!doctype html>" in client_with_web.get("/ranking").text
+
+
+def test_real_assets_are_served_as_themselves(client_with_web):
+    response = client_with_web.get("/assets/main.js")
+    assert response.status_code == 200
+    assert response.text == "console.log(1)"
+
+
+def test_a_mistyped_api_path_gets_json_not_the_web_page(client_with_web):
+    """Answering an API typo with HTML hides the mistake from whoever made it."""
+    response = client_with_web.get("/api/nope")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert "/api/nope" in response.json()["detail"]
+
+
+def test_the_catch_all_cannot_be_walked_out_of(client_with_web):
+    response = client_with_web.get("/../../secret.txt")
+    assert "not yours" not in response.text
+
+
+def test_health_reports_whether_the_client_was_bundled(client_with_web):
+    assert client_with_web.get("/api/health").json()["web_client_bundled"] is True

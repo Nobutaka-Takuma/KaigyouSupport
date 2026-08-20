@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import FastAPI, Request
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 log = logging.getLogger("kaigyou.api")
 
@@ -110,6 +112,7 @@ def health() -> dict[str, object]:
         "status": "ok" if ROUTER_IMPORT_ERROR is None else "degraded",
         "routers_loaded": ROUTER_IMPORT_ERROR is None,
         "router_error": ROUTER_IMPORT_ERROR,
+        "web_client_bundled": WEB_DIST.is_dir(),
         "config_found": config_found,
         "config_dir": str(config_dir) if config_dir else None,
         "database_url_set": configured,
@@ -117,3 +120,42 @@ def health() -> dict[str, object]:
         # slots. Reported so it can be seen without opening a connection.
         "database_pooled": is_pooled(dsn()) if configured else None,
     }
+
+
+# --------------------------------------------------------------- web client
+def web_dist() -> Path:
+    """Where the built web client lives, if it was shipped alongside the API."""
+    from kaigyou_core import config as cfg
+
+    override = os.getenv("KAIGYOU_WEB_DIST")
+    return Path(override) if override else cfg.repo_root() / "web" / "dist"
+
+
+WEB_DIST = web_dist()
+
+# Serving the front end from the API is a fallback, not the plan: a CDN does it
+# better. But whether the platform serves the static output or hands every
+# request to this application is the platform's decision, and on Vercel a
+# FastAPI app that is detected as the project's backend receives the lot --
+# including "/", which then answered {"detail":"Not Found"} because the API has
+# nothing at the root.
+#
+# Registered last, so every real route above wins, and only when the build
+# actually reached us. When the platform does serve the static output, none of
+# this is ever reached.
+if WEB_DIST.is_dir():
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def web_client(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            # A wrong API path must not be answered with the web page.
+            raise HTTPException(status_code=404, detail=f"no such endpoint: /{full_path}")
+
+        root = WEB_DIST.resolve()
+        asset = (root / full_path).resolve()
+        # `is_relative_to` keeps ../../etc/passwd out of the response.
+        if full_path and asset.is_file() and asset.is_relative_to(root):
+            return FileResponse(asset)
+        # Anything else is a client-side route: the SPA sorts it out.
+        return FileResponse(root / "index.html")
+
