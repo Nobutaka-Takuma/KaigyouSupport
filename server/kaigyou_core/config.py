@@ -16,11 +16,40 @@ _LOCK = threading.Lock()
 _CACHE: dict[Path, tuple[float, dict[str, Any]]] = {}
 
 
+#: The file whose presence identifies the project root.
+_MARKER = Path("config") / "sources.yaml"
+
+
+def _search_upwards(start: Path) -> Path | None:
+    for candidate in [start, *start.parents]:
+        if (candidate / _MARKER).is_file():
+            return candidate
+    return None
+
+
 def repo_root() -> Path:
+    """Locate the project root, i.e. the directory holding ``config/``.
+
+    Walking up beats a fixed number of ``parents`` hops: with a non-editable
+    install the package sits in site-packages, three levels up from which is
+    somewhere inside the virtualenv. Every config read then raises
+    FileNotFoundError and the API answers 500 to requests that never touched
+    the database -- a confusing failure for what is really a setup problem.
+    """
     env = os.getenv("KAIGYOU_ROOT")
     if env:
         return Path(env).resolve()
-    # server/kaigyou_core/config.py -> repo root
+
+    # Installed from a checkout: server/kaigyou_core/config.py -> repo root.
+    from_package = _search_upwards(Path(__file__).resolve().parent)
+    if from_package is not None:
+        return from_package
+
+    # Installed into site-packages but run from inside the checkout.
+    from_cwd = _search_upwards(Path.cwd().resolve())
+    if from_cwd is not None:
+        return from_cwd
+
     return Path(__file__).resolve().parents[2]
 
 
@@ -33,9 +62,15 @@ def data_dir() -> Path:
     return d
 
 
+class ConfigNotFound(FileNotFoundError):
+    """A configuration file could not be located, with somewhere to look."""
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load a YAML file, re-reading it only when it has changed on disk."""
     path = path.resolve()
+    if not path.is_file():
+        raise ConfigNotFound(f"設定ファイルが見つかりません: {path}")
     mtime = path.stat().st_mtime
     with _LOCK:
         cached = _CACHE.get(path)

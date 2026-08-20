@@ -206,6 +206,35 @@ kaigyou-etl status
 
 `/about` 画面でも同じ内容（情報源ごとの件数・データ時点・取得日時）を確認できます。
 
+### うまく表示されないとき
+
+```bash
+kaigyou-etl doctor
+```
+
+設定ファイル・DB接続・PostGIS・マイグレーション・投入件数・スコアを順に確認し、
+最初に問題のある箇所と対処コマンドを表示します。
+
+```
+[OK  ] リポジトリの場所   /path/to/KaigyouSupport
+[OK  ] データソース定義   config/sources.yaml
+[NG  ] データベース接続   OperationalError: connection failed: ...
+         → PostgreSQL が起動しているか、DATABASE_URL が正しいか確認してください。
+```
+
+画面に「APIエラー」と出る場合、そこに表示される内容がそのまま原因です。
+よくあるもの:
+
+| 表示 | 原因 | 対処 |
+|---|---|---|
+| `ConfigNotFound: 設定ファイルが見つかりません` | リポジトリ外から API を起動している | リポジトリ直下から起動するか `KAIGYOU_ROOT` を設定 |
+| `OperationalError: connection failed` | DB未起動、または `DATABASE_URL` が違う | API を起動するシェルでも `DATABASE_URL` を設定 |
+| `UndefinedColumn` / `UndefinedTable` | マイグレーション未適用 | `kaigyou-etl migrate` |
+
+> **API サーバを起動するシェルでも `DATABASE_URL` が必要です。**
+> ETL を実行したシェルと別のウィンドウで API を起動している場合、
+> 環境変数が引き継がれていないことがあります。
+
 ### 動作確認だけしたい場合
 
 実データを用意せずに画面を触りたいときは、合成データを投入できます。

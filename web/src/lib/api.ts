@@ -17,7 +17,12 @@ import type {
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** What the server suggests doing about it, when it says. */
+    readonly hint?: string,
+  ) {
     super(message);
   }
 }
@@ -32,12 +37,15 @@ async function get<T>(path: string, params: Record<string, unknown> = {}): Promi
   const res = await fetch(url.toString());
   if (!res.ok) {
     let detail = res.statusText;
+    let hint: string | undefined;
     try {
-      detail = (await res.json()).detail ?? detail;
+      const body = await res.json();
+      detail = body.detail ?? detail;
+      hint = body.hint;
     } catch {
       /* keep statusText */
     }
-    throw new ApiError(detail, res.status);
+    throw new ApiError(detail, res.status, hint);
   }
   return res.json() as Promise<T>;
 }

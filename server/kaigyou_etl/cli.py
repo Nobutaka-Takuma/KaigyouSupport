@@ -9,6 +9,7 @@
     kaigyou-etl refresh-stats
     kaigyou-etl compute-scores [--profile NAME]
     kaigyou-etl status [--json]
+    kaigyou-etl doctor
 
 The API server never invokes any of these; loading data is an operator
 action.
@@ -223,6 +224,15 @@ def cmd_compute_scores(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    from kaigyou_etl.doctor import render, run
+
+    report = run()
+    for line in render(report):
+        print(line)
+    return EXIT_ERROR if report.failed else EXIT_OK
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     with connect() as conn:
         status = data_status(conn)
@@ -307,6 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", default=None)
     p.add_argument("--prefecture", default="13")
     p.set_defaults(func=cmd_compute_scores)
+
+    p = sub.add_parser(
+        "doctor", help="check config, database, migrations and loaded data")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("status", help="report what was and was not obtained")
     p.add_argument("--json", action="store_true")

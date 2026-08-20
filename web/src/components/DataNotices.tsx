@@ -7,25 +7,28 @@
  */
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
 import type { DataStatus, Provenance } from "../lib/types";
 import { date } from "../lib/format";
 
 export function GlobalNotices() {
   const [status, setStatus] = useState<DataStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ApiError | Error | null>(null);
 
   useEffect(() => {
-    api
-      .dataStatus()
-      .then(setStatus)
-      .catch((e) => setError(e.message));
+    api.dataStatus().then(setStatus).catch(setError);
   }, []);
 
   if (error) {
+    // Show what the server said. "Internal Server Error" on its own sends the
+    // reader looking in the wrong place -- a missing config file and an
+    // unreachable database look identical from here otherwise.
+    const hint = error instanceof ApiError ? error.hint : undefined;
     return (
       <div className="notice notice--error">
-        APIに接続できません（{error}）。データ取得状況を確認できません。
+        <strong>APIエラー</strong>
+        <span>{error.message}</span>
+        <span>{hint ?? "APIサーバのコンソールに詳細が出力されています。"}</span>
       </div>
     );
   }
