@@ -1,14 +1,24 @@
-# Runtime dependencies of the API only -- this is what Vercel installs into the
-# serverless function.
+# What Vercel installs into the serverless function.
 #
-# The ETL's dependencies (httpx for downloads, pyshp for shapefiles) are
-# deliberately absent: acquisition runs on a workstation against the database,
-# never inside a request. Keeping them out keeps the function small and means a
-# publisher's file format cannot break the deployed API.
+# Keep this the only requirements file in the repository. Vercel's Python
+# builder prefers one sitting next to the entry point (api/requirements.txt)
+# over this one, so a second file silently replaces this list -- and a list
+# without the line at the bottom produces a function that cannot import its
+# own code, which surfaces only as FUNCTION_INVOCATION_FAILED.
 fastapi>=0.115
 psycopg[binary]>=3.2
 pydantic>=2.9
 PyYAML>=6.0
 
-# The project's own packages (kaigyou_core, kaigyou_api).
+# The project's own packages: kaigyou_core and kaigyou_api. Without this the
+# function has no application to serve. The path is relative to the repository
+# root, which is where Vercel runs pip.
 ./server
+
+# Deliberately absent:
+#   uvicorn      -- Vercel invokes the ASGI app directly; there is no server to run.
+#   psycopg_pool -- connections are pooled by Supabase (PgBouncer), not in-process.
+#                   A pool inside a function that handles one request at a time
+#                   would hold connections open for nothing.
+#   httpx, pyshp -- acquisition only. The ETL runs on a workstation; a publisher's
+#                   file format cannot break the deployed API.
