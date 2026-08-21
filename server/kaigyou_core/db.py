@@ -83,6 +83,26 @@ def connection_hint(url: str, message: str) -> str | None:
             "(3) プロジェクトが一時停止中、の3つです。"
         )
 
+    # Rejected on the password, having got as far as being rejected. The
+    # password itself is usually fine and the shell mangled it on the way in:
+    # PowerShell expands $ inside a double-quoted string, so a generated
+    # password containing one arrives at psycopg with a piece missing (and
+    # "$$" is an automatic variable, which substitutes something else
+    # entirely). @ : / ? # have their own meaning inside a URL and need
+    # percent-encoding. Both produce this one message and nothing else.
+    if "password authentication failed" in lowered:
+        return (
+            "パスワードが違うと言われています。多くはシェルが接続文字列を"
+            "書き換えているだけです。PowerShell では**シングルクォート**を"
+            "使ってください（\"...\" だと $ が変数として展開されます）:\n"
+            "  $env:DATABASE_URL='postgresql://postgres.<ref>:<password>"
+            "@aws-N-<region>.pooler.supabase.com:5432/postgres'\n"
+            "パスワードに @ : / ? # が含まれる場合は %40 %3A %2F %3F %23 に"
+            "置き換えてください。判断がつかないときは Supabase の "
+            "Settings → Database → Reset database password で記号の少ない"
+            "パスワードに変えるのが確実です。"
+        )
+
     if ".supabase.co" not in url or "pooler.supabase.com" in url:
         return None
     if any(word in lowered for word in

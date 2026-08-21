@@ -158,6 +158,11 @@ def test_migrate_repairs_the_routing_function_if_pgrouting_arrives_later():
     """
     from kaigyou_etl.migrate import migrate
 
+    try:
+        connect().__enter__().close()
+    except psycopg.OperationalError:
+        pytest.skip("no database")
+
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM pg_extension WHERE extname = 'pgrouting'")

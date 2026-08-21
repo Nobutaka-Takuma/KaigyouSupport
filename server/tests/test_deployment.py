@@ -218,8 +218,9 @@ def test_a_local_database_is_left_alone():
 ])
 def test_getting_far_enough_to_be_rejected_means_the_host_was_fine(message):
     """Being told no is proof the address resolved -- do not blame the address."""
-    assert db.connection_hint(
-        "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres", message) is None
+    hint = db.connection_hint(
+        "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres", message)
+    assert hint is None or "IPv6" not in hint
 
 
 # ------------------------------------------- staying alive to be diagnosed
@@ -501,9 +502,11 @@ def test_the_pooler_rejecting_the_username_is_explained(message):
 
 
 def test_a_rejected_password_is_not_blamed_on_the_project_id():
-    assert db.connection_hint(
+    """A wrong password and a wrong project ref need opposite fixes."""
+    hint = db.connection_hint(
         "postgresql://postgres.abc:pw@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres",
-        'password authentication failed for user "postgres.abc"') is None
+        'password authentication failed for user "postgres.abc"')
+    assert hint is not None and "プロジェクトID" not in hint
 
 
 # ------------------------------------------------------------- CLI wiring
@@ -603,3 +606,37 @@ def test_a_render_failure_is_caught_and_shown():
     source = boundary.read_text(encoding="utf-8")
     assert "getDerivedStateFromError" in source
     assert "error.message" in source
+
+
+# ---------------------------------------------- the shell mangles the DSN
+@pytest.mark.parametrize("url", [
+    "postgresql://postgres.abc:pw@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
+    "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres",
+])
+def test_a_rejected_password_points_at_the_shell_first(url):
+    """The password is usually right and the quoting is wrong.
+
+    PowerShell expands $ inside "..." -- and $$ is an automatic variable, not
+    two dollars -- so a generated Supabase password arrives with a piece
+    missing. The server can only answer "password authentication failed",
+    which sends people to reset a password that was never the problem.
+    """
+    hint = db.connection_hint(url, 'FATAL: password authentication failed for user "postgres"')
+    assert hint is not None
+    assert "シングルクォート" in hint
+    assert "%40" in hint, "the URL-encoding case has to be named too"
+
+
+def test_the_ipv6_hint_still_wins_when_the_host_was_never_reached():
+    """A password hint must not displace the one about an unreachable host."""
+    hint = db.connection_hint(
+        "postgresql://postgres:pw@db.abc.supabase.co:5432/postgres",
+        "connection failed: getaddrinfo failed")
+    assert hint is not None and "IPv6" in hint
+
+
+def test_the_package_can_be_run_as_a_module():
+    """`python -m kaigyou_etl` is what people type when the script is not on PATH."""
+    entry = REPO_ROOT / "server" / "kaigyou_etl" / "__main__.py"
+    assert entry.is_file(), "python -m kaigyou_etl would say the package cannot be executed"
+    assert "cli" in entry.read_text(encoding="utf-8")
