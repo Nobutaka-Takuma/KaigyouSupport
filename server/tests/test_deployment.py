@@ -7,6 +7,8 @@ names its exception is a debugging aid locally and a disclosure publicly.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kaigyou_api import main as api_main
@@ -559,3 +561,45 @@ def test_load_local_refuses_before_the_schema_is_migrated(tmp_path, monkeypatch,
     assert code == cli.EXIT_ERROR
     assert "009_walk_network.sql" in out
     assert "kaigyou-etl migrate" in out
+
+
+# ------------------------------------------------- a blank page says nothing
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_the_page_carries_a_notice_until_the_bundle_runs():
+    """index.html must say something before JavaScript arrives.
+
+    A deploy that serves the page while the bundle 404s renders a white
+    rectangle with the right <title>. That has happened twice here, and both
+    times the only way to tell it apart from a working page was the developer
+    console. The notice makes the failure legible: if it is still on screen,
+    the JavaScript never ran.
+    """
+    html = (REPO_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'id="boot"' in html
+    assert "JavaScript" in html
+    # Inline, because a failure that takes out the bundle usually takes the
+    # stylesheet with it.
+    assert 'id="boot" style=' in html
+
+
+def test_the_notice_is_removed_once_the_application_mounts():
+    main = (REPO_ROOT / "web" / "src" / "main.tsx").read_text(encoding="utf-8")
+    assert 'getElementById("boot")' in main
+    assert ".remove()" in main
+
+
+def test_a_render_failure_is_caught_and_shown():
+    """React unmounts the whole tree on an uncaught render error.
+
+    Without a boundary the result is indistinguishable from the bundle never
+    loading: an empty body. The two have different causes and different fixes,
+    so they must not look the same.
+    """
+    main = (REPO_ROOT / "web" / "src" / "main.tsx").read_text(encoding="utf-8")
+    assert "ErrorBoundary" in main
+    boundary = (REPO_ROOT / "web" / "src" / "components" / "ErrorBoundary.tsx")
+    source = boundary.read_text(encoding="utf-8")
+    assert "getDerivedStateFromError" in source
+    assert "error.message" in source

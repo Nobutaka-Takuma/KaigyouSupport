@@ -247,9 +247,12 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | `/api/*` が全部 404 | `vercel.json` に `/api/(.*)` の rewrite がある | Vercel の FastAPI 対応は `/api/*` をアプリに直接ルーティングします。rewrite があると**転送先のパス**（`/api/index`）でルーティングされ、全部 404 になります。この rewrite は置かないでください |
 | `500: FUNCTION_INVOCATION_FAILED` | 関数が**起動前に**落ちている。多くは依存関係が入っていない | `/api/health` を開くと、起動失敗なら 503 と一緒に原因のモジュール名が出ます。ビルド設定で `installCommand` を上書きすると `pip install -r requirements.txt` が走らなくなるので注意 |
 | pgRouting を後から有効化した | 有効化前に `migrate` 済みでも問題ありません | もう一度 `kaigyou-etl migrate` を実行すれば、経路探索の関数が作られます（適用済みでも修復します） |
+| ローカルで「徒歩圏」を選ぶとエラー／円のまま。`load-local` に「交差点で分割しています」が出ない | ローカルの PostgreSQL に pgRouting が入っていない（Supabase で有効化しても**ローカルには効きません**） | `kaigyou-etl doctor` を実行してください。pgRouting の行が「未インストール」なら Stack Builder 等で pgRouting を追加し、`create extension pgrouting;` → `kaigyou-etl migrate` → `load-local` の順にやり直します |
+| 「徒歩圏」を選ぶと 500 になる | 経路探索の SQL が失敗している | `kaigyou-etl doctor` の「徒歩圏の算出」行に PostgreSQL のエラーがそのまま出ます。画面の 500 は原因を伝えないので、まずこちらを見てください |
 | 「徒歩圏」を選んでも円のまま | 街路ネットワーク未投入、または pgRouting 未有効 | Supabase の SQL Editor で `create extension if not exists pgrouting;` を実行し、OSM 道路データを `load-local` で投入 |
 | ランキングが空で「メッシュスコアが未計算です」 | そのプロファイルのスコアが無い | `kaigyou-etl compute-scores --all-profiles` |
 | データを追加した直後だけ API がエラー | Supabase にマイグレーションが未適用 | `DATABASE_URL` を Supabase にして `kaigyou-etl migrate` → `load-local`。3.5 節を参照 |
+| 画面に「読み込んでいます…」が残る | JavaScript の読み込みに失敗している（バンドルが 404、または HTML が返っている） | ブラウザの Network タブで `/assets/index-*.js` のステータスと Content-Type を確認してください。404 ならビルド出力が配信されていません |
 | 画面が真っ白（APIは動いている） | `vercel.json` の rewrite が `/assets/*.js` まで `/index.html` に転送している | **rewrite を置かないでください。** ブラウザのコンソールに `Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"` が出ます。SPA のフォールバックは API 側が行います |
 | トップページが `{"detail":"Not Found"}` | 画面（静的ファイル）が配信されず、全リクエストが API に届いている | 現在は API 自身が画面を返します。`/api/health` の `web_client_bundled` が `false` なら `web/dist` が同梱されていません |
 | `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |

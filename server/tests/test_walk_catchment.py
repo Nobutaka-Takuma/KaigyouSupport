@@ -179,3 +179,50 @@ def test_migrate_repairs_the_routing_function_if_pgrouting_arrives_later():
             # And exactly one kg_analyze_point: replaying must not leave two.
             cur.execute("SELECT count(*) AS n FROM pg_proc WHERE proname = 'kg_analyze_point'")
             assert cur.fetchone()["n"] == 1
+
+
+def test_doctor_names_the_error_instead_of_leaving_it_a_500(network):
+    """A broken walking query must be a named failure, not "Internal Server Error".
+
+    Everything about the walking catchment is optional and falls back to a
+    circle, which is right for a visitor and unhelpful for whoever has to fix
+    it: the browser shows the same generic 500 whatever went wrong underneath.
+    `doctor` runs the query itself and prints what PostgreSQL said.
+    """
+    from kaigyou_etl import doctor
+
+    signature = ("double precision,double precision,double precision,"
+                 "double precision,double precision")
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"ALTER FUNCTION kg_walk_catchment({signature}) "
+                        "RENAME TO kg_walk_catchment__saved")
+            cur.execute("""
+                CREATE FUNCTION kg_walk_catchment(
+                    p_lat double precision, p_lng double precision,
+                    p_distance_m double precision,
+                    p_buffer_m double precision DEFAULT 40,
+                    p_snap_m double precision DEFAULT 300)
+                RETURNS geometry LANGUAGE plpgsql STABLE AS
+                $$ BEGIN RAISE EXCEPTION 'pgr_drivingdistance does not exist'; END $$
+            """)
+        conn.commit()
+        try:
+            report = doctor.Report()
+            doctor._check_walk_network(report, conn)
+            # The connection has to survive a failed statement, or every check
+            # after this one reports the same aborted transaction instead of
+            # its own result.
+            doctor._check_scores(report, conn)
+        finally:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP FUNCTION kg_walk_catchment({signature})")
+                cur.execute(f"ALTER FUNCTION kg_walk_catchment__saved({signature}) "
+                            "RENAME TO kg_walk_catchment")
+            conn.commit()
+
+    failed = [c for c in report.checks if c.status == doctor.FAIL]
+    assert failed, "a query that raises must not be reported as healthy"
+    assert "pgr_drivingdistance does not exist" in failed[0].detail
+    assert not [c for c in report.checks
+                if c.status == doctor.FAIL and "current transaction is aborted" in c.detail]

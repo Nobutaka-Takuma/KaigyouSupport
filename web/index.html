@@ -9,6 +9,19 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Shown until the application mounts, and removed by main.tsx when it
+         does. A blank white page says nothing; twice now a deploy has served
+         index.html while the JavaScript failed to load, and the only visible
+         difference from a working page was the absence of everything. -->
+    <div id="boot" style="font-family: system-ui, sans-serif; padding: 2rem;
+                          color: #334155; line-height: 1.7;">
+      読み込んでいます…
+      <p style="font-size: 0.9rem; color: #64748b;">
+        この表示が残る場合、JavaScript の読み込みに失敗しています。<br />
+        Ctrl+Shift+R で再読み込みし、それでも変わらなければ開発者ツール（F12）の
+        Console と Network を確認してください。
+      </p>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

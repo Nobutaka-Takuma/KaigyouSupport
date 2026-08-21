@@ -514,3 +514,16 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 @media (max-width: 400px) {
   .toolbar__radii span { display: none; }
 }
+
+/* 描画に失敗したときの画面。真っ白よりは、読めるエラーのほうがましである。 */
+.boot-error { padding: 2rem; max-width: 48rem; }
+.boot-error pre {
+  background: #f1f5f9;
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

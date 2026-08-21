@@ -235,6 +235,91 @@ def _check_scores(report: Report, conn: Any) -> None:
         report.add("メッシュスコア", OK, f"{scores['n']:,} メッシュ")
 
 
+def _check_walk_network(report: Report, conn: Any) -> None:
+    """Whether a walking catchment can be produced, and what is missing if not.
+
+    Four things have to line up -- the extension, the loaded streets, the noded
+    graph and the routing function -- and when one of them is absent the app
+    quietly falls back to a circle. Quietly is right for a user and wrong for
+    an operator, who otherwise has to work out from the shape of a polygon
+    which of the four it was.
+
+    The last step actually runs the query, at a point taken from the network so
+    the walking branch is the one exercised. A message like "function
+    pgr_drivingdistance does not exist" belongs here, in a command with a name,
+    rather than in a 500 whose text is "Internal Server Error".
+    """
+    from kaigyou_core.db import fetch_one, table_exists
+
+    if not table_exists(conn, "walk_network"):
+        return  # 009 not applied; the migration check has already said so.
+
+    edges = (fetch_one(conn, "SELECT count(*) AS n FROM walk_network") or {})["n"]
+    ext = fetch_one(conn, "SELECT extversion AS v FROM pg_extension "
+                          "WHERE extname = 'pgrouting'")
+    if ext is None:
+        report.add(
+            "pgRouting", WARN,
+            f"未インストール（街路 {edges:,} 本を取り込み済みだが徒歩圏は算出できない）",
+            "PostgreSQL に pgRouting を追加し、対象DBで CREATE EXTENSION pgrouting; "
+            "を実行してから kaigyou-etl migrate と load-local をやり直してください。"
+            "商圏は円のまま使えます。")
+        return
+    report.add("pgRouting", OK, ext["v"])
+
+    if edges == 0:
+        report.add("街路ネットワーク", WARN, "未取得（徒歩圏は円にフォールバック）",
+                   "OpenStreetMap の道路 shapefile を download/ に置いて "
+                   "kaigyou-etl load-local を実行してください。")
+        return
+
+    if not table_exists(conn, "walk_network_noded"):
+        report.add("街路トポロジ", WARN, f"未構築（街路 {edges:,} 本）",
+                   "kaigyou-etl load-local を再実行してください"
+                   "（pgr_nodeNetwork が使えないと構築は飛ばされます）。")
+        return
+
+    noded = (fetch_one(conn, "SELECT count(*) AS n FROM walk_network_noded") or {})["n"]
+    routable = (fetch_one(conn, "SELECT count(*) AS n FROM walk_network_noded "
+                                "WHERE source IS NOT NULL AND target IS NOT NULL")
+                or {})["n"]
+    if not routable:
+        report.add("街路トポロジ", FAIL,
+                   f"分割後 {noded:,} 本のどれにも source/target がない",
+                   "kaigyou-etl load-local を再実行してください"
+                   "（pgr_createTopology が完了していません）。")
+        return
+    report.add("街路トポロジ", OK, f"街路 {edges:,} 本 / 分割後 {noded:,} 本")
+
+    # The real thing, at a point that definitely has streets around it.
+    point = fetch_one(conn, "SELECT ST_Y(the_geom) AS lat, ST_X(the_geom) AS lng "
+                            "FROM walk_network_noded_vertices_pgr LIMIT 1")
+    if not point:
+        return
+    mesh = fetch_one(conn, "SELECT mesh_size_m AS m FROM population_mesh LIMIT 1")
+    try:
+        row = fetch_one(
+            conn,
+            "SELECT catchment_kind AS kind, catchment_area_km2 AS km2 "
+            "FROM kg_analyze_point(%s, %s, 500, 'dental_clinic', %s, 'walk')",
+            (point["lat"], point["lng"], (mesh or {}).get("m") or 500),
+        ) or {}
+    except Exception as exc:  # noqa: BLE001 - this is the message worth having
+        conn.rollback()  # a failed statement poisons the rest of the checks
+        report.add("徒歩圏の算出", FAIL, f"{type(exc).__name__}: {exc}",
+                   "この行をそのまま報告してください。商圏の形を「円」にすれば"
+                   "分析は続けられます。")
+        return
+
+    if row.get("kind") != "walk":
+        report.add("徒歩圏の算出", WARN,
+                   "街路の上の地点でも円になった（到達可能な街路が見つからない）",
+                   "pgr_nodeNetwork のトレランス（sources.yaml の "
+                   "topology_tolerance_deg）を見直してください。")
+        return
+    report.add("徒歩圏の算出", OK, f"半径500m で {row['km2']:.2f} km²")
+
+
 def _check_api_surface(report: Report, conn: Any) -> None:
     """Exercise the query behind the endpoint the UI calls first."""
     from kaigyou_core.status import data_status
@@ -271,6 +356,7 @@ def run() -> Report:
             return report
         _check_data(report, conn)
         _check_scores(report, conn)
+        _check_walk_network(report, conn)
         _check_api_surface(report, conn)
     return report
 
