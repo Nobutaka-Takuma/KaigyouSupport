@@ -86,6 +86,7 @@ export const api = {
     lng: number;
     radius: number;
     profile?: string;
+    catchment?: "circle" | "walk";
   }) => get<CandidateAnalysis>("/candidate-analysis", params),
 
   rankings: (params: {

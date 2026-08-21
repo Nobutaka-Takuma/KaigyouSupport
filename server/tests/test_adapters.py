@@ -573,3 +573,50 @@ def test_industries_missing_from_the_file_are_reported_not_fatal(tmp_path):
         "industry_columns": {"nonexistent": ["T001147900", "T001147901"]}}).validate(
             BUSINESS_FIXTURE)
     assert facts["industries_not_in_file"] == ["nonexistent"]
+
+
+# ------------------------------------------------ OSM 徒歩ネットワーク
+WALK_FIXTURE = FIXTURES / "osm_roads_river.shp.zip"
+
+
+def walk_adapter(tmp_path, overrides=None):
+    return build("osm_walk_network", tmp_path, {"bbox": None, **(overrides or {})})
+
+
+def test_roads_pedestrians_may_not_use_are_excluded(tmp_path):
+    """Motorways are in the extract and are not walkable in Japan.
+
+    Routing through one would invent a catchment nobody can reach on foot.
+    """
+    facts = walk_adapter(tmp_path).validate(WALK_FIXTURE)
+    assert "motorway" in facts["classes_not_walkable"]
+    assert facts["walkable_features"] == facts["feature_count"] - 1
+
+    classes = {r["road_class"] for r in walk_adapter(tmp_path).transform(WALK_FIXTURE)}
+    assert classes == {"residential"}
+
+
+def test_a_release_that_renames_its_classes_fails_loudly(tmp_path):
+    """Silently loading nothing would look like a network with no streets."""
+    with pytest.raises(AcquisitionError) as exc:
+        walk_adapter(tmp_path, {"walkable_classes": ["no_such_class"]}).validate(WALK_FIXTURE)
+    assert "no feature matched" in str(exc.value)
+
+
+def test_refuses_to_load_without_knowing_what_is_walkable(tmp_path):
+    with pytest.raises(AcquisitionError) as exc:
+        walk_adapter(tmp_path, {"walkable_classes": []}).validate(WALK_FIXTURE)
+    assert "walkable_classes" in str(exc.value)
+
+
+def test_the_bbox_clips_the_network(tmp_path):
+    """A Kanto extract is several times larger than the area being analysed."""
+    far_away = {"bbox": [130.0, 33.0, 131.0, 34.0]}
+    with pytest.raises(AcquisitionError):
+        walk_adapter(tmp_path, far_away).validate(WALK_FIXTURE)
+
+
+def test_every_edge_is_a_simple_linestring(tmp_path):
+    """pgRouting needs one source and one target per row."""
+    for record in walk_adapter(tmp_path).transform(WALK_FIXTURE):
+        assert record["geom_wkt"].startswith("LINESTRING(")

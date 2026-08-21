@@ -68,19 +68,96 @@ def available_mesh_sizes(conn: psycopg.Connection) -> list[int]:
         return [r["mesh_size_m"] for r in cur.fetchall()]
 
 
-def analyze_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
-                  facility_category: str = DEFAULT_CATEGORY,
-                  mesh_size_m: int = DEFAULT_MESH_SIZE_M) -> dict[str, Any]:
-    """Raw catchment metrics for one point. No scoring applied."""
+#: Trade-area shapes. ``circle`` is straight-line distance; ``walk`` follows the
+#: street network, which is a different and usually much smaller area wherever a
+#: river, a railway or a trunk road gets in the way. Asking for ``walk`` where no
+#: network is loaded yields a circle -- the answer says which was used.
+CATCHMENT_MODES = ("circle", "walk")
+DEFAULT_CATCHMENT = "circle"
+
+
+def supports_catchment_mode(conn: psycopg.Connection) -> bool:
+    """Whether kg_analyze_point takes a catchment argument yet.
+
+    Code reaches a deployment before the migration does -- a push builds in
+    seconds, migrations are run by hand afterwards. Calling the six-argument
+    form against the five-argument one in that window fails the whole request,
+    so the shape of the function is checked rather than assumed. One indexed
+    catalog lookup; the alternative is a 500 on every analysis until someone
+    runs a command.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM kg_analyze_point(%s, %s, %s, %s, %s)",
-            (lat, lng, radius_m, facility_category, mesh_size_m),
+            "SELECT count(*) AS n FROM pg_proc "
+            "WHERE proname = 'kg_analyze_point' AND pronargs >= 6"
         )
+        return cur.fetchone()["n"] > 0
+
+
+def analyze_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
+                  facility_category: str = DEFAULT_CATEGORY,
+                  mesh_size_m: int = DEFAULT_MESH_SIZE_M,
+                  catchment: str = DEFAULT_CATCHMENT) -> dict[str, Any]:
+    """Raw catchment metrics for one point. No scoring applied."""
+    with conn.cursor() as cur:
+        if supports_catchment_mode(conn):
+            cur.execute(
+                "SELECT * FROM kg_analyze_point(%s, %s, %s, %s, %s, %s)",
+                (lat, lng, radius_m, facility_category, mesh_size_m, catchment),
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM kg_analyze_point(%s, %s, %s, %s, %s)",
+                (lat, lng, radius_m, facility_category, mesh_size_m),
+            )
         row = cur.fetchone() or {}
     metrics = {_RENAME.get(k, k): v for k, v in row.items()}
     metrics["radius_m"] = radius_m
     return metrics
+
+
+def catchment_geojson(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
+                      catchment: str = DEFAULT_CATCHMENT,
+                      precision: int = 6) -> dict[str, Any] | None:
+    """The trade-area polygon itself, for the map to draw.
+
+    The map used to draw its own circle from the radius. That was fine while
+    every catchment was a circle; drawing one over a walking analysis would show
+    a shape the numbers did not come from.
+    """
+    with conn.cursor() as cur:
+        # Same deploy window: kg_catchment arrives with the same migration.
+        cur.execute("SELECT to_regproc('kg_catchment') AS fn")
+        if cur.fetchone()["fn"] is None:
+            return None
+        cur.execute(
+            "SELECT ST_AsGeoJSON(geom, %s) AS geojson, kind "
+            "FROM kg_catchment(%s, %s, %s, %s)",
+            (precision, lat, lng, radius_m, catchment),
+        )
+        row = cur.fetchone()
+    if not row or not row["geojson"]:
+        return None
+    import json
+
+    return {"geometry": json.loads(row["geojson"]), "kind": row["kind"]}
+
+
+def walk_network_status(conn: psycopg.Connection) -> dict[str, Any]:
+    """Whether walking catchments can be produced here, and why not if not."""
+    from kaigyou_core.db import table_exists
+
+    if not table_exists(conn, "walk_network"):
+        return {"available": False, "reason": "not_migrated"}
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
+        if cur.fetchone()["fn"] is None:
+            return {"available": False, "reason": "pgrouting_unavailable"}
+        cur.execute("SELECT count(*) AS n FROM walk_network")
+        edges = cur.fetchone()["n"]
+    if not edges:
+        return {"available": False, "reason": "network_not_loaded"}
+    return {"available": True, "edges": edges}
 
 
 def facility_counts(conn: psycopg.Connection, lat: float, lng: float,

@@ -14,12 +14,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn, get_model
 from kaigyou_core import provenance
 from kaigyou_core.analysis import (
+    DEFAULT_CATCHMENT,
     DEFAULT_CATEGORY,
     DEFAULT_MESH_SIZE_M,
     analyze_point,
+    catchment_geojson,
     facility_counts,
     load_distributions,
     resolve_mesh_size,
+    walk_network_status,
 )
 from kaigyou_core.scoring import ScoringModel, scope_key
 
@@ -80,8 +83,8 @@ def _dataset_warnings(prov: dict[str, Any]) -> list[str]:
 
 def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
              model: ScoringModel, category: str, mesh_size_m: int,
-             prefecture_code: str) -> dict[str, Any]:
-    metrics = analyze_point(conn, lat, lng, radius_m, category, mesh_size_m)
+             prefecture_code: str, catchment: str = DEFAULT_CATCHMENT) -> dict[str, Any]:
+    metrics = analyze_point(conn, lat, lng, radius_m, category, mesh_size_m, catchment)
     scope = scope_key(mesh_size_m, radius_m, prefecture_code)
     distributions = load_distributions(conn, scope)
     scores = model.score(metrics, distributions)
@@ -136,6 +139,10 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         "elderly": _round(metrics.get("age_65_plus")),
         "households": _round(metrics.get("households")),
         "population_growth": metrics.get("population_growth"),
+        # Which shape these numbers came from. A population figure is not
+        # interpretable without it: the same point can differ threefold.
+        "catchment_kind": metrics.get("catchment_kind"),
+        "catchment_area_km2": _round(metrics.get("catchment_area_km2"), 3),
         # Daytime side. None when the economic census is not loaded, which the
         # scoring layer treats as "unknown", not as "nobody works here".
         "workers": _round(metrics.get("workers")),
@@ -173,12 +180,27 @@ def candidate_analysis(
     category: str = Query(DEFAULT_CATEGORY),
     mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
     prefecture_code: str = Query("13"),
+    catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$",
+                           description="商圏の形。circle=直線距離の円 / walk=街路網に沿った徒歩圏"),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
-    result = _analyze(conn, lat, lng, radius, model, category, mesh_size_m, prefecture_code)
+    result = _analyze(conn, lat, lng, radius, model, category, mesh_size_m,
+                      prefecture_code, catchment)
     result["mesh_size_m"] = mesh_size_m
+    # The shape itself, so the map draws what the numbers were measured in
+    # rather than a circle of its own.
+    result["catchment"] = catchment_geojson(conn, lat, lng, radius, catchment)
+    if catchment == "walk" and result.get("catchment_kind") != "walk":
+        status = walk_network_status(conn)
+        result["warnings"].insert(0, {
+            "not_migrated": "徒歩圏の算出に必要なテーブルがありません（kaigyou-etl migrate）。",
+            "pgrouting_unavailable": "このデータベースでは pgRouting が使えないため、徒歩圏を算出できません。",
+            "network_not_loaded": "街路ネットワーク（OpenStreetMap）が未取得のため、徒歩圏を算出できません。",
+        }.get(status.get("reason", ""),
+              "この地点の周辺に街路データがないため、徒歩圏を算出できませんでした。")
+        + "円（直線距離）で算出しています。")
 
     if all_radii:
         by_radius = {}

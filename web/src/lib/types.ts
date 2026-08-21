@@ -64,6 +64,11 @@ export interface CandidateAnalysis {
   elderly: number | null;
   households: number | null;
   population_growth: number | null;
+  /** どの形の商圏で測った数値か。円と徒歩圏では3倍違うこともあるため必須の文脈。 */
+  catchment_kind: "circle" | "walk" | null;
+  catchment_area_km2: number | null;
+  /** 実際に使われた商圏ポリゴン。地図はこれを描く（自前で円を描かない）。 */
+  catchment: { geometry: GeoJSON.Geometry; kind: "circle" | "walk" } | null;
   workers: number | null;
   establishments: number | null;
   dental_clinics: number | null;

@@ -16,7 +16,7 @@ import { MAX_CANDIDATES, useCandidates } from "../lib/candidates";
 import { distance, num } from "../lib/format";
 import type { CandidateAnalysis, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
-import { AccessTable, PopulationTable, ScorePanel } from "../components/ScorePanel";
+import { AccessTable, CatchmentNote, PopulationTable, ScorePanel } from "../components/ScorePanel";
 
 const TOKYO_CENTER: [number, number] = [139.7671, 35.6812];
 
@@ -31,6 +31,7 @@ const EMPTY_RESPONSE = {
 };
 
 type MeshMetric = "population" | "workers" | "overall_score";
+type Catchment = "circle" | "walk";
 
 interface LayerState {
   municipalities: boolean;
@@ -48,6 +49,7 @@ export function MapPage() {
   const [profile, setProfile] = useState<string>("");
   const [radius, setRadius] = useState(1000);
   const [meshMetric, setMeshMetric] = useState<MeshMetric>("overall_score");
+  const [catchment, setCatchment] = useState<Catchment>("circle");
   const [layers, setLayers] = useState<LayerState>({
     municipalities: true,
     meshes: true,
@@ -331,10 +333,21 @@ export function MapPage() {
       source.setData(EMPTY_FC as never);
       return;
     }
+    // The polygon the API measured in, not one drawn here from the radius.
+    // While every catchment was a circle the two agreed; a walking catchment
+    // is a different shape, and drawing a circle over it would show a trade
+    // area the numbers did not come from. Until the response arrives, the
+    // circle is the honest placeholder -- it is what `circle` mode returns.
+    const shape =
+      analysis?.catchment?.geometry &&
+      analysis.location.lat === point.lat &&
+      analysis.location.lng === point.lng
+        ? { type: "Feature" as const, geometry: analysis.catchment.geometry, properties: {} }
+        : circlePolygon(point.lng, point.lat, radius);
     source.setData({
       type: "FeatureCollection",
       features: [
-        circlePolygon(point.lng, point.lat, radius),
+        shape,
         {
           type: "Feature",
           geometry: { type: "Point", coordinates: [point.lng, point.lat] },
@@ -342,7 +355,7 @@ export function MapPage() {
         },
       ],
     } as never);
-  }, [ready, point, radius]);
+  }, [ready, point, radius, analysis]);
 
   // ---------------------------------------------------------------- analysis
   useEffect(() => {
@@ -356,14 +369,15 @@ export function MapPage() {
     setAnalysing(true);
     setError(null);
     api
-      .candidateAnalysis({ lat: point.lat, lng: point.lng, radius, profile: profile || undefined })
+      .candidateAnalysis({ lat: point.lat, lng: point.lng, radius,
+                           profile: profile || undefined, catchment })
       .then((res) => !cancelled && setAnalysis(res))
       .catch((e: ApiError) => !cancelled && setError(e.message))
       .finally(() => !cancelled && setAnalysing(false));
     return () => {
       cancelled = true;
     };
-  }, [point, radius, profile]);
+  }, [point, radius, profile, catchment]);
 
   // Deep link from the ranking table: /?lat=..&lng=..
   useEffect(() => {
@@ -430,6 +444,14 @@ export function MapPage() {
             </button>
           ))}
         </div>
+
+        <label className="toolbar__foldable">
+          商圏の形
+          <select value={catchment} onChange={(e) => setCatchment(e.target.value as Catchment)}>
+            <option value="circle">円（直線距離）</option>
+            <option value="walk">徒歩圏（街路網）</option>
+          </select>
+        </label>
 
         <label className="toolbar__foldable">
           メッシュ表示
@@ -578,6 +600,7 @@ export function MapPage() {
               <ScorePanel analysis={analysis} />
 
               <h3>人口・競合</h3>
+              <CatchmentNote analysis={analysis} />
               <PopulationTable analysis={analysis} />
 
               <h3>アクセス・その他</h3>

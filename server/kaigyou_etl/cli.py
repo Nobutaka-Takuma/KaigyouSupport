@@ -148,6 +148,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
         ("mhlw_dental_clinics", found.clinics, None),
         ("estat_population_mesh", found.mesh_current, found.mesh_baseline),
         ("estat_business_mesh", found.mesh_business, None),
+        ("osm_walk_network", found.walk_network, None),
         ("mlit_stations", found.stations, None),
         ("mlit_municipalities", found.municipalities, None),
     ]
@@ -179,7 +180,6 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     # them in a dropdown, and a profile with no scores renders an empty ranking
     # and a note telling the reader to run a command. The trade-area sweep is
     # shared between them, so the extra profiles cost little.
-    from kaigyou_core import config as cfg
     names = list(cfg.scoring_config().get("profiles") or {})
     print(f"メッシュスコアを再計算しています（プロファイル {len(names)} 件）...")
     with connect() as conn:
@@ -224,8 +224,6 @@ def cmd_refresh_stats(args: argparse.Namespace) -> int:
 
 def cmd_compute_scores(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import compute_mesh_scores
-
-    from kaigyou_core import config as cfg
 
     names = (list(cfg.scoring_config().get("profiles") or {})
              if getattr(args, "all_profiles", False) else None)

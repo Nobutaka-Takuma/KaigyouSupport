@@ -31,6 +31,7 @@ class Discovery:
     mesh_current: Path | None = None
     mesh_baseline: Path | None = None
     mesh_business: Path | None = None
+    walk_network: Path | None = None
     stations: Path | None = None
     municipalities: Path | None = None
     unmatched: list[Path] = field(default_factory=list)
@@ -52,7 +53,12 @@ class Discovery:
     @property
     def optional_missing(self) -> list[str]:
         """Datasets that improve the analysis but are not required for it."""
-        return [] if self.mesh_business else ["経済センサス メッシュ（事業所・従業者数）"]
+        out = []
+        if not self.mesh_business:
+            out.append("経済センサス メッシュ（事業所・従業者数）")
+        if not self.walk_network:
+            out.append("OpenStreetMap 道路（徒歩圏の算出に使用）")
+        return out
 
     def as_dict(self) -> dict[str, str | None]:
         return {
@@ -60,6 +66,7 @@ class Discovery:
             "mesh_current": str(self.mesh_current) if self.mesh_current else None,
             "mesh_baseline": str(self.mesh_baseline) if self.mesh_baseline else None,
             "mesh_business": str(self.mesh_business) if self.mesh_business else None,
+            "walk_network": str(self.walk_network) if self.walk_network else None,
             "stations": str(self.stations) if self.stations else None,
             "municipalities": str(self.municipalities) if self.municipalities else None,
         }
@@ -116,7 +123,9 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
                        if p.is_file() and p.suffix.lower() in DATA_SUFFIXES):
         if path.suffix.lower() == ".zip":
             members = " ".join(_zip_members(path))
-            if "numberofpassengers" in members or "s12-" in members:
+            if "gis_osm_roads" in members:
+                _assign(found, "walk_network", path)
+            elif "numberofpassengers" in members or "s12-" in members:
                 _assign(found, "stations", path)
             elif "n03-" in members or "n03" in path.name.lower():
                 _assign(found, "municipalities", path)
@@ -156,6 +165,11 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
         found.notes.append(
             "メッシュファイルが基準年のものだけです。最新年のファイルも置いてください。"
         )
+    if found.walk_network is None:
+        found.notes.append(
+            "OpenStreetMap の道路データがないため、商圏は円（直線距離）のみになります。"
+            "徒歩圏（街路網に沿った距離）は選べません。"
+        )
     if found.mesh_business is None:
         found.notes.append(
             "経済センサスのメッシュファイルがないため、従業者数（昼の需要）は"
@@ -192,6 +206,7 @@ def describe(found: Discovery) -> Iterable[str]:
         "mesh_current": "人口メッシュ（最新年）",
         "mesh_baseline": "人口メッシュ（基準年）",
         "mesh_business": "事業所・従業者メッシュ",
+        "walk_network": "街路ネットワーク（OSM）",
         "stations": "駅別乗降客数",
         "municipalities": "行政区域",
     }

@@ -16,6 +16,7 @@ TABLE_LABELS = {
     "mesh_business": "事業所・従業者メッシュ",
     "stations": "駅",
     "municipalities": "行政区域",
+    "walk_network": "街路ネットワーク（OSM）",
 }
 
 

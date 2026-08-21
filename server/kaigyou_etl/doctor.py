@@ -155,20 +155,25 @@ def _check_migrations(report: Report, conn: Any) -> bool:
     return True
 
 
+#: (table, label, required). Not every dataset is needed for the app to work.
+#: The street network only adds a second shape of trade area; without it the
+#: analysis runs on circles exactly as it always has, so reporting its absence
+#: as a failure would send someone hunting for a problem that is not one.
 TABLES = (
-    ("facilities", "歯科医院"),
-    ("population_mesh", "人口メッシュ"),
-    ("mesh_business", "事業所・従業者メッシュ"),
-    ("stations", "駅"),
-    ("municipalities", "行政区域"),
+    ("facilities", "歯科医院", True),
+    ("population_mesh", "人口メッシュ", True),
+    ("mesh_business", "事業所・従業者メッシュ", True),
+    ("walk_network", "街路ネットワーク", False),
+    ("stations", "駅", True),
+    ("municipalities", "行政区域", True),
 )
 
 
 def _check_data(report: Report, conn: Any) -> None:
     from kaigyou_core.db import fetch_one
 
-    empty = []
-    for table, label in TABLES:
+    empty, optional_empty = [], []
+    for table, label, required in TABLES:
         try:
             row = fetch_one(
                 conn,
@@ -185,14 +190,21 @@ def _check_data(report: Report, conn: Any) -> None:
             report.add(f"{label}テーブル", FAIL, f"{type(exc).__name__}: {exc}")
             continue
         if row["n"] == 0:
-            empty.append(label)
-            report.add(f"{label}テーブル", WARN, "0件")
+            (empty if required else optional_empty).append(label)
+            report.add(f"{label}テーブル", WARN,
+                       "0件" if required else "0件（任意。無い場合は円の商圏のみ）")
         else:
             note = f"{row['n']:,}件"
             if row["sample"]:
                 note += f"（うち合成データ {row['sample']:,}件）"
             report.add(f"{label}テーブル", OK, note)
 
+    if optional_empty:
+        report.add(
+            "任意データ", WARN, f"未取得: {', '.join(optional_empty)}",
+            "無くても分析は動きます。徒歩圏の商圏を使うなら "
+            "OpenStreetMap の道路データを download フォルダに置いてください。",
+        )
     if empty:
         report.add(
             "実データの投入", FAIL, f"空のテーブル: {', '.join(empty)}",

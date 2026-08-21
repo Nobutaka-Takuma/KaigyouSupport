@@ -21,9 +21,11 @@ ADAPTER_TABLES = {
     "estat_business_mesh": "mesh_business",
     "mlit_stations": "stations",
     "mlit_municipalities": "municipalities",
+    "osm_walk_network": "walk_network",
 }
 
-_TABLES = ("facilities", "population_mesh", "mesh_business", "stations", "municipalities")
+_TABLES = ("facilities", "population_mesh", "mesh_business", "stations",
+           "municipalities", "walk_network")
 
 _TABLE_LABELS = {
     "facilities": "歯科医院",
@@ -31,6 +33,7 @@ _TABLE_LABELS = {
     "mesh_business": "事業所・従業者メッシュ",
     "stations": "駅",
     "municipalities": "行政区域",
+    "walk_network": "街路ネットワーク",
 }
 
 

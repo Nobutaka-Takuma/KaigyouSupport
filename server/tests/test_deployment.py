@@ -421,6 +421,8 @@ def without_mesh_business():
     root = Path(__file__).resolve().parents[2]
     old_fn = (root / "db" / "migrations" / "005_functions.sql").read_text(encoding="utf-8")
     new_fn = (root / "db" / "migrations" / "008_daytime_workers.sql").read_text(encoding="utf-8")
+    catchment_fn = (root / "db" / "migrations" / "011_catchment_mode.sql").read_text(
+        encoding="utf-8")
 
     try:
         with connect() as probe:
@@ -431,8 +433,16 @@ def without_mesh_business():
 
     with connect(autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE mesh_business RENAME TO mesh_business_hidden_test")
+        # Both signatures: the five-argument original and the six-argument one
+        # that takes a catchment mode. Leaving the newer one in place would let
+        # the code find it and call into a body that reads the hidden table --
+        # which is not the state a database behind the code is ever in.
         cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
                     "double precision,double precision,double precision,text,integer)")
+        cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
+                    "double precision,double precision,double precision,text,integer,text)")
+        cur.execute("DROP FUNCTION IF EXISTS kg_catchment("
+                    "double precision,double precision,double precision,text)")
         cur.execute(old_fn)
     try:
         yield
@@ -440,6 +450,7 @@ def without_mesh_business():
         with connect(autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("ALTER TABLE mesh_business_hidden_test RENAME TO mesh_business")
             cur.execute(new_fn)
+            cur.execute(catchment_fn)
 
 
 def test_the_api_survives_a_table_that_is_not_migrated_yet(without_mesh_business):
@@ -491,3 +502,36 @@ def test_a_rejected_password_is_not_blamed_on_the_project_id():
     assert db.connection_hint(
         "postgresql://postgres.abc:pw@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres",
         'password authentication failed for user "postgres.abc"') is None
+
+
+# ------------------------------------------------------------- CLI wiring
+def test_no_command_re_imports_a_module_level_name():
+    """A local `import x as cfg` makes the name local for the whole function.
+
+    `cmd_load_local` uses `cfg` near the top and, for one commit, imported it
+    again further down -- so every run died with UnboundLocalError before
+    reading a single file. It typechecks, it passes every unit test that does
+    not invoke the command, and it breaks the one entry point people use.
+    """
+    import ast
+    from pathlib import Path
+
+    module = Path(__file__).resolve().parents[1] / "kaigyou_etl" / "cli.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+
+    top_level = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            top_level |= {a.asname or a.name.split(".")[0] for a in node.names}
+
+    offenders = []
+    for func in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+        for inner in ast.walk(func):
+            if isinstance(inner, (ast.Import, ast.ImportFrom)) and inner is not func:
+                names = {a.asname or a.name.split(".")[0] for a in inner.names}
+                clash = names & top_level
+                if clash:
+                    offenders.append(f"{func.name}: {sorted(clash)}")
+    assert not offenders, (
+        "these functions re-import a name already imported at module level, "
+        f"which shadows it for the entire function: {offenders}")

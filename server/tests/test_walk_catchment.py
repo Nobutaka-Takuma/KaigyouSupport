@@ -1,0 +1,147 @@
+"""Trade areas measured along the street network.
+
+The point of the whole feature: a circle crosses a river, a walk does not.
+These run against a real PostGIS + pgRouting database, loading a synthetic
+street grid split by a river with one bridge. Skipped where either is absent,
+because the answer then is "circles only" and that is tested separately.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+psycopg = pytest.importorskip("psycopg")
+
+from kaigyou_core import config as cfg
+from kaigyou_core.analysis import analyze_point, catchment_geojson, walk_network_status
+from kaigyou_core.db import connect, table_exists
+from kaigyou_etl.adapters import AdapterContext, get_adapter
+from kaigyou_etl.adapters.osm_walk_network import build_topology
+
+FIXTURE = Path(__file__).parent / "fixtures" / "osm_roads_river.shp.zip"
+
+# The fixture grid: a river between these longitudes, crossed only at BRIDGE_LAT.
+RIVER_WEST, RIVER_EAST = 139.7655, 139.7677
+BRIDGE_LAT = 35.6797
+#: South-west of the bridge, well away from it, on the west bank.
+POINT = (35.6779, 139.7622)
+
+SOURCE_ID = "__walk_test__"
+
+
+@pytest.fixture(scope="module")
+def network():
+    """Load the fixture network into its own source id, and take it out after."""
+    try:
+        with connect() as probe:
+            if not table_exists(probe, "walk_network"):
+                pytest.skip("walk_network not migrated here")
+            with probe.cursor() as cur:
+                cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
+                if cur.fetchone()["fn"] is None:
+                    pytest.skip("pgrouting not available here")
+    except psycopg.OperationalError:
+        pytest.skip("no database")
+
+    sources = cfg.sources_config()
+    spec = dict(sources["sources"]["osm_walk_network"])
+    spec["bbox"] = None
+    ctx = AdapterContext(source_id=SOURCE_ID, spec=spec, defaults={},
+                         raw_dir=Path("data/raw/walk_test"), input_path=None, offline=True)
+    adapter = get_adapter("osm_walk_network")(ctx)
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO data_sources (id, name, publisher, dataset_kind)
+                   VALUES (%s, 'test walk network', 'test', 'sample')
+                   ON CONFLICT (id) DO NOTHING""", (SOURCE_ID,))
+        conn.commit()
+        adapter.load(conn, adapter.transform(FIXTURE))
+        summary = build_topology(conn)
+    yield summary
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM data_sources WHERE id = %s", (SOURCE_ID,))
+        conn.commit()
+
+
+def test_the_network_is_one_connected_graph(network):
+    """Noding is the step that is easy to leave out, and fatal when you do.
+
+    Without pgr_nodeNetwork the streets only join where they happen to share an
+    endpoint, so a grid that visibly meets at every corner becomes a graph of
+    fragments and every catchment comes out far too small.
+    """
+    assert network["topology"] == "built"
+    assert network["noded_edges"] > network["nodes"] / 2
+    assert network["largest_component_share"] == 1.0
+
+
+def test_a_walk_does_not_cross_a_river_the_circle_crosses(network):
+    """The whole reason for the feature."""
+    lat, lng = POINT
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH circle AS (SELECT geom g FROM kg_catchment(%s, %s, 500, 'circle')),
+                 walk   AS (SELECT geom g FROM kg_catchment(%s, %s, 500, 'walk'))
+            SELECT ST_XMax(circle.g) AS circle_east, ST_XMax(walk.g) AS walk_east,
+                   ST_Area(circle.g::geography) AS circle_m2,
+                   ST_Area(walk.g::geography)   AS walk_m2
+            FROM circle, walk
+            """, (lat, lng, lat, lng))
+        row = cur.fetchone()
+
+    assert row["circle_east"] > RIVER_EAST, "the circle should reach the far bank"
+    assert row["walk_east"] < RIVER_EAST, "the walk should stop at the river"
+    assert row["walk_m2"] < row["circle_m2"] / 2
+
+
+def test_a_long_enough_walk_reaches_the_far_bank_over_the_bridge(network):
+    """Not simply clipped at the river: the detour exists and is used."""
+    lat, lng = POINT
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT ST_XMax(geom) AS east FROM kg_catchment(%s, %s, 1500, 'walk')",
+                    (lat, lng))
+        assert cur.fetchone()["east"] > RIVER_EAST
+
+
+def test_the_numbers_come_from_the_shape_that_is_reported(network):
+    lat, lng = POINT
+    with connect() as conn:
+        circle = analyze_point(conn, lat, lng, 500, mesh_size_m=500, catchment="circle")
+        walk = analyze_point(conn, lat, lng, 500, mesh_size_m=500, catchment="walk")
+
+    assert circle["catchment_kind"] == "circle"
+    assert walk["catchment_kind"] == "walk"
+    assert walk["catchment_area_km2"] < circle["catchment_area_km2"]
+    # A smaller catchment cannot contain more people.
+    assert (walk["population"] or 0) <= (circle["population"] or 0)
+
+
+def test_asking_for_a_walk_where_there_is_no_network_gives_a_circle(network):
+    """Falling back is fine; pretending it did not is not.
+
+    Somewhere far from the fixture grid there is no walkable street, so the
+    answer is a circle -- and it says so, which is what lets the API warn.
+    """
+    with connect() as conn:
+        metrics = analyze_point(conn, 35.40, 139.20, 500, mesh_size_m=500, catchment="walk")
+    assert metrics["catchment_kind"] == "circle"
+
+
+def test_the_drawn_polygon_is_the_one_that_was_measured(network):
+    lat, lng = POINT
+    with connect() as conn:
+        shape = catchment_geojson(conn, lat, lng, 500, "walk")
+        metrics = analyze_point(conn, lat, lng, 500, mesh_size_m=500, catchment="walk")
+    assert shape is not None
+    assert shape["kind"] == metrics["catchment_kind"] == "walk"
+    assert shape["geometry"]["type"] in ("Polygon", "MultiPolygon")
+
+
+def test_status_reports_the_network_as_available(network):
+    with connect() as conn:
+        assert walk_network_status(conn)["available"] is True

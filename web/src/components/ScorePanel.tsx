@@ -64,6 +64,19 @@ export function ScorePanel({ analysis }: { analysis: CandidateAnalysis }) {
   );
 }
 
+export function CatchmentNote({ analysis }: { analysis: CandidateAnalysis }) {
+  /** Which shape the figures were measured in. Without it they are ambiguous. */
+  if (!analysis.catchment_kind) return null;
+  const walk = analysis.catchment_kind === "walk";
+  return (
+    <p className="muted small catchment-note">
+      商圏の形: <strong>{walk ? "徒歩圏（街路網に沿った距離）" : "円（直線距離）"}</strong>
+      {analysis.catchment_area_km2 != null && ` ／ 面積 ${analysis.catchment_area_km2} km²`}
+      {walk && "。川・線路・幹線道路による分断を反映しています。"}
+    </p>
+  );
+}
+
 export function PopulationTable({ analysis }: { analysis: CandidateAnalysis }) {
   const radii = analysis.by_radius ? Object.keys(analysis.by_radius) : [];
   if (radii.length === 0) return null;

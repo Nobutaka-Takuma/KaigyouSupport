@@ -238,3 +238,53 @@ sources:
     # It is not a municipality, and letting it through would label meshes with
     # an area name that does not exist.
     exclude_code_suffixes: ["000"]
+
+  osm_walk_network:
+    adapter: osm_walk_network
+    name: "OpenStreetMap 道路データ（徒歩ネットワーク）"
+    publisher: "OpenStreetMap contributors / Geofabrik GmbH"
+    dataset_kind: official
+    homepage_url: "https://download.geofabrik.de/asia/japan.html"
+    # ODbL. Attribution is a licence condition, not a courtesy: the app shows
+    # this wherever a walking catchment is used.
+    license: "Open Database License (ODbL) 1.0 / (c) OpenStreetMap contributors"
+    terms_url: "https://www.openstreetmap.org/copyright"
+    notes: "Geofabrik の .shp.zip（例 kanto-latest-free.shp.zip）に含まれる道路レイヤ gis_osm_roads を使用。"
+    #   kaigyou-etl run osm_walk_network --input kanto-latest-free.shp.zip
+    url: null
+    # Geofabrik ships this layer as UTF-8, unlike the Japanese government data.
+    encoding: utf-8
+    source_date: null
+    # Several layers share the archive; this picks the roads one.
+    shapefile_member: "gis_osm_roads"
+    columns:
+      road_class: ["fclass", "highway", "type"]
+      osm_id:     ["osm_id", "id"]
+      name:       ["name"]
+    # Which OSM highway classes a person may walk along. Motorways and trunk
+    # roads are absent on purpose: pedestrians are prohibited on them in Japan,
+    # so routing through one would invent a catchment nobody can reach.
+    walkable_classes:
+      - footway
+      - path
+      - pedestrian
+      - steps
+      - living_street
+      - residential
+      - service
+      - unclassified
+      - track
+      - cycleway
+      - tertiary
+      - tertiary_link
+      - secondary
+      - secondary_link
+      - primary
+      - primary_link
+    # Clip to the area being analysed. A Kanto extract is several times larger
+    # than Tokyo, and every edge outside it slows every search.
+    # (min_lng, min_lat, max_lng, max_lat) -- Tokyo mainland.
+    bbox: [138.90, 35.45, 139.95, 35.90]
+    # Endpoint-matching tolerance in degrees for pgr_createTopology.
+    # 0.00001 deg is about 1.1 m at this latitude.
+    topology_tolerance_deg: 0.00001
