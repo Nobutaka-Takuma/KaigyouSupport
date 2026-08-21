@@ -12,6 +12,7 @@ import type {
   DataStatus,
   GeoJSONResponse,
   Meta,
+  PrefectureList,
   RankingResponse,
 } from "./types";
 
@@ -53,6 +54,7 @@ async function get<T>(path: string, params: Record<string, unknown> = {}): Promi
 
 export const api = {
   meta: () => get<Meta>("/meta"),
+  prefectures: () => get<PrefectureList>("/prefectures"),
   dataStatus: () => get<DataStatus>("/data-status"),
 
   clinics: (params: {
@@ -87,6 +89,7 @@ export const api = {
     radius: number;
     profile?: string;
     catchment?: "circle" | "walk";
+    prefecture_code?: string;
   }) => get<CandidateAnalysis>("/candidate-analysis", params),
 
   rankings: (params: {
@@ -96,6 +99,7 @@ export const api = {
     radius?: number;
     min_population?: number;
     area?: string;
+    prefecture_code?: string;
   }) => get<RankingResponse>("/rankings", params),
 
   compare: (params: {
@@ -103,5 +107,6 @@ export const api = {
     labels?: string;
     radius: number;
     profile?: string;
+    prefecture_code?: string;
   }) => get<CompareResponse>("/compare", params),
 };

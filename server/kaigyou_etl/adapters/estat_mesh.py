@@ -253,7 +253,13 @@ class EStatMeshAdapter(EStatTableReader, SourceAdapter):
                 | {"source_id": self.source_id}
                 for rec in records]
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM population_mesh WHERE source_id = %s", (self.source_id,))
+            # Only this prefecture's rows. One file is one prefecture, and the
+            # source id is shared by all of them, so an unqualified delete
+            # would make loading Shizuoka the act of removing Tokyo -- silently,
+            # and reported as a successful load.
+            cur.execute(
+                "DELETE FROM population_mesh WHERE source_id = %s AND prefecture_code = %s",
+                (self.source_id, self.ctx.prefecture_code))
             return self.insert_many(
                 cur,
                 """
@@ -269,7 +275,7 @@ class EStatMeshAdapter(EStatTableReader, SourceAdapter):
                         %(households)s, %(population_growth)s, '{}'::jsonb,
                         %(source_date)s, now()
                     )
-                    ON CONFLICT (source_id, mesh_code) DO UPDATE SET
+                    ON CONFLICT (source_id, mesh_code, prefecture_code) DO UPDATE SET
                         population = EXCLUDED.population,
                         age_0_14 = EXCLUDED.age_0_14,
                         age_15_64 = EXCLUDED.age_15_64,

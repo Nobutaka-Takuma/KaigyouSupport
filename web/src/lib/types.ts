@@ -66,6 +66,8 @@ export interface CandidateAnalysis {
   population_growth: number | null;
   /** どの形の商圏で測った数値か。円と徒歩圏では3倍違うこともあるため必須の文脈。 */
   catchment_kind: "circle" | "walk" | null;
+  /** どの都道府県の正規化で出したスコアか。県をまたぐ比較はできない。 */
+  prefecture_code?: string;
   catchment_area_km2: number | null;
   /** 実際に使われた商圏ポリゴン。地図はこれを描く（自前で円を描かない）。 */
   catchment: { geometry: GeoJSON.Geometry; kind: "circle" | "walk" } | null;
@@ -143,6 +145,7 @@ export interface RankingResponse {
   items: RankingItem[];
   total: number;
   mesh_size_m: number | null;
+  prefecture_code?: string;
   warnings?: string[];
   limit: number;
   offset: number;
@@ -233,4 +236,22 @@ export interface ClinicDetail {
   attributes: Record<string, string>;
   source_date: string | null;
   source_name: string;
+}
+
+/** 読み込み済みの都道府県。何が分析できるかはDBの中身で決まる。 */
+export interface Prefecture {
+  code: string;
+  name: string;
+  mesh_count: number;
+  population: number;
+  /** [minLng, minLat, maxLng, maxLat] */
+  bbox: [number, number, number, number];
+  /** 人口重心。東京都の外接矩形の中心は小笠原の沖合になるため。 */
+  center: [number, number];
+}
+
+export interface PrefectureList {
+  prefectures: Prefecture[];
+  default: string;
+  note: string;
 }

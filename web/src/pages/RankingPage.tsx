@@ -11,6 +11,7 @@ import { distance, num, percent, score, scoreColor } from "../lib/format";
 import type { Meta, RankingResponse } from "../lib/types";
 import { Disclaimer, ProvenanceList, ProvisionalBadge } from "../components/DataNotices";
 import { useCandidates, MAX_CANDIDATES } from "../lib/candidates";
+import { usePrefecture } from "../lib/prefecture";
 
 const PAGE_SIZE = 50;
 
@@ -30,6 +31,8 @@ export function RankingPage() {
   const [loading, setLoading] = useState(true);
 
   const { points, add } = useCandidates();
+  const { list: prefectures, code: prefecture, current: prefectureInfo,
+          select: selectPrefecture } = usePrefecture();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -49,6 +52,7 @@ export function RankingPage() {
         profile: profile || undefined,
         min_population: minPopulation || undefined,
         area: area || undefined,
+        prefecture_code: prefecture ?? undefined,
       })
       .then((res) => !cancelled && (setData(res), setError(null)))
       .catch((e) => !cancelled && setError(e.message))
@@ -56,12 +60,12 @@ export function RankingPage() {
     return () => {
       cancelled = true;
     };
-  }, [profile, offset, minPopulation, area]);
+  }, [profile, offset, minPopulation, area, prefecture]);
 
   return (
     <div className="page">
       <header className="page__head">
-        <h1>東京都 開業候補地ランキング</h1>
+        <h1>{prefectureInfo?.name ?? ""} 開業候補地ランキング</h1>
         <p className="muted">
           {data?.mesh_size_m ? `${meshLabel(data.mesh_size_m)}メッシュ` : "メッシュ"}
           単位で、候補地点分析と同じエンジン・同じ重みでスコアを算出しています。
@@ -71,6 +75,24 @@ export function RankingPage() {
       </header>
 
       <div className="filters">
+        {prefectures.length > 1 && (
+          <label>
+            都道府県
+            <select
+              value={prefecture ?? ""}
+              onChange={(e) => {
+                selectPrefecture(e.target.value);
+                setOffset(0);
+                setArea("");
+              }}
+            >
+              {prefectures.map((p) => (
+                <option key={p.code} value={p.code}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+
         <label>
           プロファイル
           <select

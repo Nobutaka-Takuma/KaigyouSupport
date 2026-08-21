@@ -13,6 +13,7 @@ import { api, ApiError } from "../lib/api";
 import { basemapStyle, hasBasemap } from "../lib/basemap";
 import { circlePolygon, EMPTY_FC } from "../lib/geo";
 import { MAX_CANDIDATES, useCandidates } from "../lib/candidates";
+import { usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
 import type { CandidateAnalysis, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
@@ -50,6 +51,8 @@ export function MapPage() {
   const [radius, setRadius] = useState(1000);
   const [meshMetric, setMeshMetric] = useState<MeshMetric>("overall_score");
   const [catchment, setCatchment] = useState<Catchment>("circle");
+  const { list: prefectures, code: prefecture, current: prefectureInfo,
+          select: selectPrefecture } = usePrefecture();
   const [layers, setLayers] = useState<LayerState>({
     municipalities: true,
     meshes: true,
@@ -223,8 +226,10 @@ export function MapPage() {
     try {
       const [muni, mesh, clinics, stations] = await Promise.all([
         // Most of the boundary payload is Izu and Ogasawara coastline, a
-        // thousand kilometres from anything the user is looking at.
-        api.municipalities({ prefecture_code: "13", bbox }),
+        // thousand kilometres from anything the user is looking at. The bbox
+        // already excludes it; the prefecture keeps a neighbouring one from
+        // being drawn as though it were in scope.
+        api.municipalities({ prefecture_code: prefecture ?? undefined, bbox }),
         zoom >= MIN_ZOOM.meshes
           ? api.meshes({ bbox, profile: profile || undefined, limit: 4000 })
           : Promise.resolve(EMPTY_RESPONSE),
@@ -249,7 +254,7 @@ export function MapPage() {
         setLayerError(e instanceof Error ? e.message : String(e));
       }
     }
-  }, [profile]);
+  }, [profile, prefecture]);
 
   useEffect(() => {
     if (!ready || !mapRef.current) return;
@@ -370,14 +375,28 @@ export function MapPage() {
     setError(null);
     api
       .candidateAnalysis({ lat: point.lat, lng: point.lng, radius,
-                           profile: profile || undefined, catchment })
+                           profile: profile || undefined, catchment,
+                           prefecture_code: prefecture ?? undefined })
       .then((res) => !cancelled && setAnalysis(res))
       .catch((e: ApiError) => !cancelled && setError(e.message))
       .finally(() => !cancelled && setAnalysing(false));
     return () => {
       cancelled = true;
     };
-  }, [point, radius, profile, catchment]);
+  }, [point, radius, profile, catchment, prefecture]);
+
+  // Frame the prefecture that is selected. Not on first paint when a deep
+  // link is carrying its own coordinates, and never over a point the reader
+  // has already clicked -- moving the map out from under an open analysis
+  // would be the app arguing with them.
+  const framed = useRef<string | null>(null);
+  useEffect(() => {
+    if (!ready || !prefectureInfo) return;
+    if (framed.current === prefectureInfo.code) return;
+    framed.current = prefectureInfo.code;
+    if (point || searchParams.get("lat")) return;
+    mapRef.current?.flyTo({ center: prefectureInfo.center, zoom: 11 });
+  }, [ready, prefectureInfo, point, searchParams]);
 
   // Deep link from the ranking table: /?lat=..&lng=..
   useEffect(() => {
@@ -444,6 +463,18 @@ export function MapPage() {
             </button>
           ))}
         </div>
+
+        {prefectures.length > 1 && (
+          <label>
+            都道府県
+            <select value={prefecture ?? ""}
+                    onChange={(e) => selectPrefecture(e.target.value)}>
+              {prefectures.map((p) => (
+                <option key={p.code} value={p.code}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <label className="toolbar__foldable">
           商圏の形

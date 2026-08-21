@@ -30,6 +30,78 @@ _RENAME = {
 }
 
 
+#: Shown when a prefecture has meshes but no boundaries loaded to name it.
+#: Only the codes this project has actually been used with are listed; an
+#: unknown one is reported by its code rather than guessed at.
+_PREFECTURE_NAMES = {"13": "東京都", "22": "静岡県"}
+
+
+def loaded_prefectures(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Which prefectures have population meshes, and where to look at them.
+
+    The app was written for Tokyo and had 13 written into it in a dozen places.
+    That is the wrong shape as soon as there are two: what is analysable is a
+    property of the database, not of the source code, and the reader should be
+    offered what has been loaded rather than what someone assumed.
+
+    The extent comes from the meshes themselves, so the map can frame a
+    prefecture it has never heard of. The name comes from the boundary layer
+    when it is loaded, because that is the published spelling.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT m.prefecture_code AS code,
+                   count(*)::int     AS mesh_count,
+                   sum(COALESCE(m.population, 0))::bigint AS population,
+                   ST_YMin(ST_Extent(m.geom)::geometry) AS min_lat,
+                   ST_XMin(ST_Extent(m.geom)::geometry) AS min_lng,
+                   ST_YMax(ST_Extent(m.geom)::geometry) AS max_lat,
+                   ST_XMax(ST_Extent(m.geom)::geometry) AS max_lng,
+                   -- Weighted by population, not the middle of the extent.
+                   -- Tokyo reaches to Ogasawara, 1,000km south: the centre of
+                   -- its bounding box is open ocean, and a map opened there
+                   -- shows nothing at all.
+                   sum(ST_X(m.centroid) * COALESCE(m.population, 0))
+                       / NULLIF(sum(COALESCE(m.population, 0)), 0) AS focus_lng,
+                   sum(ST_Y(m.centroid) * COALESCE(m.population, 0))
+                       / NULLIF(sum(COALESCE(m.population, 0)), 0) AS focus_lat,
+                   (SELECT mu.prefecture_name FROM municipalities mu
+                     WHERE mu.prefecture_code = m.prefecture_code
+                       AND mu.prefecture_name IS NOT NULL LIMIT 1) AS name
+            FROM population_mesh m
+            WHERE m.prefecture_code IS NOT NULL
+            GROUP BY m.prefecture_code
+            ORDER BY sum(COALESCE(m.population, 0)) DESC
+        """)
+        rows = cur.fetchall()
+
+    return [{
+        "code": row["code"],
+        "name": row["name"] or _PREFECTURE_NAMES.get(row["code"], f"{row['code']}"),
+        "mesh_count": row["mesh_count"],
+        "population": row["population"],
+        "bbox": [row["min_lng"], row["min_lat"], row["max_lng"], row["max_lat"]],
+        "center": ([row["focus_lng"], row["focus_lat"]]
+                   if row["focus_lng"] is not None
+                   else [(row["min_lng"] + row["max_lng"]) / 2,
+                         (row["min_lat"] + row["max_lat"]) / 2]),
+    } for row in rows]
+
+
+def default_prefecture(conn: psycopg.Connection, requested: str | None = None) -> str:
+    """The prefecture to analyse when the caller did not name one.
+
+    An explicit request always wins, including one for a prefecture with no
+    data -- answering a different question than the one asked would be worse
+    than answering "nothing here". Otherwise: whichever has the most people
+    loaded, so a database holding only Shizuoka opens on Shizuoka.
+    """
+    if requested:
+        return requested
+    found = loaded_prefectures(conn)
+    return found[0]["code"] if found else "13"
+
+
 def resolve_mesh_size(conn: psycopg.Connection, requested: int | None = None,
                       prefecture_code: str | None = None) -> int | None:
     """The mesh resolution to analyse at.

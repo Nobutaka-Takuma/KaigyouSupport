@@ -186,7 +186,10 @@ class EStatBusinessMeshAdapter(EStatTableReader, SourceAdapter):
             for rec in records
         ]
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM mesh_business WHERE source_id = %s", (self.source_id,))
+            # This prefecture only: see the note in estat_mesh.load.
+            cur.execute(
+                "DELETE FROM mesh_business WHERE source_id = %s AND prefecture_code = %s",
+                (self.source_id, self.ctx.prefecture_code))
             return self.insert_many(
                 cur,
                 """
@@ -202,7 +205,7 @@ class EStatBusinessMeshAdapter(EStatTableReader, SourceAdapter):
                         %(industry_workers)s, %(industry_establishments)s,
                         %(source_date)s, now()
                     )
-                    ON CONFLICT (source_id, mesh_code) DO UPDATE SET
+                    ON CONFLICT (source_id, mesh_code, prefecture_code) DO UPDATE SET
                         workers = EXCLUDED.workers,
                         establishments = EXCLUDED.establishments,
                         industry_workers = EXCLUDED.industry_workers,

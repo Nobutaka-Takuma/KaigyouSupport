@@ -66,7 +66,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.source,
         input_path=Path(args.input) if args.input else None,
         offline=args.offline,
+        # Both meanings, because --prefecture answers both questions: which
+        # rows to keep from a nationwide file, and which prefecture a
+        # single-prefecture file is *of* (the e-Stat mesh tables say so only in
+        # their file name).
         prefecture_filter=args.prefecture,
+        prefecture_code=args.prefecture,
         baseline_path=Path(args.baseline) if args.baseline else None,
     )
     _print_run(result)
@@ -186,7 +191,8 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     for source_id, input_path, baseline in plan:
         if input_path is None:
             continue
-        result = run_source(source_id, input_path=input_path, baseline_path=baseline)
+        result = run_source(source_id, input_path=input_path, baseline_path=baseline,
+                            prefecture_code=args.prefecture)
         _print_run(result)
         failures += 0 if result.ok else 1
 

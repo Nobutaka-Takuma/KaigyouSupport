@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import default_prefecture, loaded_prefectures
 from kaigyou_core.scoring import ScoringModel
 from kaigyou_core.status import data_status
 
@@ -64,3 +65,21 @@ def data_status_endpoint(conn: psycopg.Connection = Depends(get_conn)) -> dict[s
             "表示されている数値は実データに基づくものではありません。"
         )
     return status
+
+
+@router.get("/prefectures", summary="分析できる都道府県（読み込み済みのもの）")
+def prefectures(conn: psycopg.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """What is in the database, not what the code was written for.
+
+    The app began as a Tokyo tool with "13" written into it in a dozen places.
+    Which prefectures can be analysed is a property of what has been loaded,
+    so the client asks rather than assumes -- and gets somewhere to point the
+    map, since a prefecture it has never heard of still has an extent.
+    """
+    found = loaded_prefectures(conn)
+    return {
+        "prefectures": found,
+        "default": default_prefecture(conn),
+        "note": ("スコアは都道府県ごとに正規化しています。"
+                 "異なる都道府県のスコアを直接比べることはできません。"),
+    }

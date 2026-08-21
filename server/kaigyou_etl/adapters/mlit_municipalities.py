@@ -125,8 +125,21 @@ class MLITMunicipalitiesAdapter(SourceAdapter):
 
     def load(self, conn: psycopg.Connection, records: Iterable[dict[str, Any]]) -> int:
         rows = [rec | {"source_id": self.source_id} for rec in records]
+        # N03 is published one prefecture per archive, so the replace has to be
+        # narrowed to the prefectures this file actually carries -- otherwise
+        # loading Shizuoka deletes the Tokyo boundaries that the ranking uses
+        # for its area labels. Taken from the rows rather than from the run's
+        # prefecture, because the code in N03_007 is the authority here.
+        incoming = sorted({r["prefecture_code"] for r in rows if r.get("prefecture_code")})
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM municipalities WHERE source_id = %s", (self.source_id,))
+            if incoming:
+                cur.execute(
+                    "DELETE FROM municipalities "
+                    "WHERE source_id = %s AND prefecture_code = ANY(%s)",
+                    (self.source_id, incoming))
+            else:
+                cur.execute("DELETE FROM municipalities WHERE source_id = %s",
+                            (self.source_id,))
             return self.insert_many(
                 cur,
                 """

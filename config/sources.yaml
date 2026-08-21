@@ -19,7 +19,11 @@
 # ---------------------------------------------------------------------------
 
 defaults:
-  prefecture_code: "13"          # 13 = 東京都. Change or extend to widen coverage.
+  # Fallback only. Which prefecture a run is loading is given per run --
+  # `load-local <dir> --prefecture 22` -- because the e-Stat mesh files carry
+  # no prefecture of their own: tblT001141H22.txt says Shizuoka in its name and
+  # nowhere in its contents. Without the flag every file would be tagged 13.
+  prefecture_code: "13"          # 13 = 東京都
   timeout_seconds: 120
   user_agent: "KaigyouSupport-ETL/0.1 (+https://github.com/Nobutaka-Takuma/KaigyouSupport)"
 

@@ -19,6 +19,7 @@ from kaigyou_core.analysis import (
     DEFAULT_MESH_SIZE_M,
     analyze_point,
     catchment_geojson,
+    default_prefecture,
     facility_counts,
     load_distributions,
     resolve_mesh_size,
@@ -179,16 +180,21 @@ def candidate_analysis(
     all_radii: bool = Query(True, description="設定済みの全半径について人口・競合も返す"),
     category: str = Query(DEFAULT_CATEGORY),
     mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
-    prefecture_code: str = Query("13"),
+    prefecture_code: str | None = Query(
+        None, description="省略時は読み込み済みデータから自動判定（人口が最大の都道府県）"),
     catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$",
                            description="商圏の形。circle=直線距離の円 / walk=街路網に沿った徒歩圏"),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    prefecture_code = default_prefecture(conn, prefecture_code)
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     result = _analyze(conn, lat, lng, radius, model, category, mesh_size_m,
                       prefecture_code, catchment)
     result["mesh_size_m"] = mesh_size_m
+    # Which prefecture's normalisation these scores came from. Without it the
+    # reader cannot tell that a 70 in Shizuoka is not a 70 in Tokyo.
+    result["prefecture_code"] = prefecture_code
     # The shape itself, so the map draws what the numbers were measured in
     # rather than a circle of its own.
     result["catchment"] = catchment_geojson(conn, lat, lng, radius, catchment)
@@ -238,20 +244,28 @@ def rankings(
     radius: int | None = Query(None, description="省略時は設定の mesh_scoring_radius_m"),
     min_population: int = Query(0, ge=0),
     area: str | None = Query(None, description="エリア名の部分一致で絞り込み"),
+    prefecture_code: str | None = Query(
+        None, description="省略時は読み込み済みデータから自動判定（人口が最大の都道府県）"),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
     radius_m = radius or model.mesh_scoring_radius_m
+    # Scores from two prefectures are normalised against their own populations,
+    # so a combined table would rank a Shizuoka mesh against a Tokyo one on
+    # scales that were never comparable. One prefecture at a time, always.
+    prefecture_code = default_prefecture(conn, prefecture_code)
     where = ["ms.profile = %s", "ms.radius_m = %s", "ms.overall_score IS NOT NULL",
-             "COALESCE(ms.population, 0) >= %s"]
-    params: list[Any] = [model.profile_name, radius_m, min_population]
+             "COALESCE(ms.population, 0) >= %s", "pm.prefecture_code = %s"]
+    params: list[Any] = [model.profile_name, radius_m, min_population, prefecture_code]
     if area:
         where.append("ms.area_label ILIKE %s")
         params.append(f"%{area}%")
 
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT count(*) AS n FROM mesh_scores ms WHERE {' AND '.join(where)}", params
+            f"""SELECT count(*) AS n FROM mesh_scores ms
+                JOIN population_mesh pm ON pm.id = ms.mesh_id
+                WHERE {' AND '.join(where)}""", params
         )
         total = cur.fetchone()["n"]
 
@@ -293,7 +307,8 @@ def rankings(
     return {
         "items": items,
         "total": total,
-        "mesh_size_m": resolve_mesh_size(conn),
+        "mesh_size_m": resolve_mesh_size(conn, prefecture_code=prefecture_code),
+        "prefecture_code": prefecture_code,
         "warnings": _dataset_warnings(ranking_prov),
         "limit": limit,
         "offset": offset,
@@ -313,10 +328,12 @@ def compare(
     labels: str | None = Query(None, description="地点名をセミコロン区切りで"),
     category: str = Query(DEFAULT_CATEGORY),
     mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
-    prefecture_code: str = Query("13"),
+    prefecture_code: str | None = Query(
+        None, description="省略時は読み込み済みデータから自動判定（人口が最大の都道府県）"),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    prefecture_code = default_prefecture(conn, prefecture_code)
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     parsed: list[tuple[float, float]] = []
     for chunk in points.split(";"):

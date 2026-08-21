@@ -49,12 +49,19 @@ class AdapterContext:
     offline: bool = False
     #: Restrict a multi-prefecture source to one prefecture code. None loads all.
     prefecture_filter: str | None = None
+    #: Which prefecture *this run* is loading, overriding the configured
+    #: default. The e-Stat mesh files carry no prefecture of their own -- it is
+    #: in the file name (tblT001141H22 is Shizuoka) and nowhere in the data --
+    #: so without this every file loaded would be tagged 13 and the second
+    #: prefecture would overwrite the first.
+    prefecture_override: str | None = None
     #: Prior-period artefact, for sources that derive a change rate from two rounds.
     baseline_path: Path | None = None
 
     @property
     def prefecture_code(self) -> str:
-        return str(self.spec.get("prefecture_code")
+        return str(self.prefecture_override
+                   or self.spec.get("prefecture_code")
                    or self.defaults.get("prefecture_code") or "13")
 
     @property
