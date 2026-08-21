@@ -20,10 +20,16 @@ TABLE_LABELS = {
 
 
 def for_tables(conn: psycopg.Connection, tables: Iterable[str]) -> dict[str, Any]:
+    from kaigyou_core.db import table_exists
+
     tables = list(tables)
     entries: list[dict[str, Any]] = []
     with conn.cursor() as cur:
         for table in tables:
+            # Not migrated yet is the same story as loaded-but-empty: the
+            # dataset is unavailable, and the caller lists it as such.
+            if not table_exists(conn, table):
+                continue
             cur.execute(
                 f"""
                 SELECT ds.id, ds.name, ds.publisher, ds.dataset_kind, ds.license,

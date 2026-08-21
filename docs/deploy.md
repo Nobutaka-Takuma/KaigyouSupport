@@ -155,6 +155,30 @@ Vercel は FastAPI アプリを認識して全リクエストをそのアプリ�
 
 ---
 
+## 3.5 データを追加・更新したとき
+
+新しい情報源を足した回（列やテーブルが増えた回）は、**Supabase 側にも同じ変更を適用**
+してからでないと、その部分の API が動きません。手元と同じ2コマンドです。
+
+```powershell
+$env:DATABASE_URL = 'postgresql://postgres.<プロジェクトID>:<パスワード>@aws-N-<region>.pooler.supabase.com:5432/postgres?sslmode=require'
+
+.\.venv\Scripts\kaigyou-etl migrate        # スキーマの差分を適用
+.\.venv\Scripts\kaigyou-etl load-local download   # 新しいファイルを含めて投入
+```
+
+`migrate` は未適用のものだけを流します。何度実行しても安全です。
+
+**順序について。** GitHub に push すると Vercel は数十秒でデプロイしますが、
+`migrate` は手元から実行するので必ず後になります。その間コードは
+「まだ存在しないテーブル」を知っている状態になります。
+この時間帯でも API 全体が落ちないよう、未作成のテーブルは
+「未取得のデータセット」として扱う作りにしてあります
+（`server/kaigyou_core/db.py` の `table_exists`）。
+とはいえ**その情報は表示されない**ので、`migrate` は早めに実行してください。
+
+---
+
 ## 4. 動いているか確かめる
 
 デプロイ後のURLに対して：
@@ -211,6 +235,7 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | 同上。`[tool.vercel] entrypoint` を足しても直らない | `server/pyproject.toml` に書いている／モジュールパスが違う | Vercel が読むのは**リポジトリ直下**の `pyproject.toml` です。また `server` はパッケージではないので `server.kaigyou_api.main:app` は import できません。`api/index.py` を直せばこの設定自体が不要です |
 | `/api/*` が全部 404 | `vercel.json` に `/api/(.*)` の rewrite がある | Vercel の FastAPI 対応は `/api/*` をアプリに直接ルーティングします。rewrite があると**転送先のパス**（`/api/index`）でルーティングされ、全部 404 になります。この rewrite は置かないでください |
 | `500: FUNCTION_INVOCATION_FAILED` | 関数が**起動前に**落ちている。多くは依存関係が入っていない | `/api/health` を開くと、起動失敗なら 503 と一緒に原因のモジュール名が出ます。ビルド設定で `installCommand` を上書きすると `pip install -r requirements.txt` が走らなくなるので注意 |
+| データを追加した直後だけ API がエラー | Supabase にマイグレーションが未適用 | `DATABASE_URL` を Supabase にして `kaigyou-etl migrate` → `load-local`。3.5 節を参照 |
 | 画面が真っ白（APIは動いている） | `vercel.json` の rewrite が `/assets/*.js` まで `/index.html` に転送している | **rewrite を置かないでください。** ブラウザのコンソールに `Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"` が出ます。SPA のフォールバックは API 側が行います |
 | トップページが `{"detail":"Not Found"}` | 画面（静的ファイル）が配信されず、全リクエストが API に届いている | 現在は API 自身が画面を返します。`/api/health` の `web_client_bundled` が `false` なら `web/dist` が同梱されていません |
 | `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |

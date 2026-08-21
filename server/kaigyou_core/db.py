@@ -101,6 +101,21 @@ def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
         conn.close()
 
 
+def table_exists(conn: psycopg.Connection, table: str) -> bool:
+    """Whether a table has been created yet.
+
+    Deployments apply code and migrations at different moments -- a push builds
+    within seconds, a migration is run by hand afterwards -- so there is always
+    a window where the code knows about a table the database does not have.
+    Reads that can happen during that window ask first, and report the dataset
+    as unavailable, which the app already knows how to display. Answering "not
+    loaded" beats answering 500 to every request until someone runs a command.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s) AS t", (f"public.{table}",))
+        return cur.fetchone()["t"] is not None
+
+
 def fetch_all(conn: psycopg.Connection, sql: str, params: Any = None) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(sql, params)

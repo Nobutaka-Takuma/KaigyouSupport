@@ -35,9 +35,13 @@ _TABLE_LABELS = {
 
 
 def _row_counts(conn: psycopg.Connection) -> dict[str, dict[str, int]]:
+    from kaigyou_core.db import table_exists
+
     counts: dict[str, dict[str, int]] = {}
     with conn.cursor() as cur:
         for table in _TABLES:
+            if not table_exists(conn, table):
+                continue
             cur.execute(f"SELECT source_id, count(*) AS n FROM {table} GROUP BY source_id")
             for row in cur.fetchall():
                 counts.setdefault(row["source_id"], {})[table] = row["n"]

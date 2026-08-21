@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, Query
 
 from kaigyou_api.deps import feature_collection, get_conn, parse_bbox
 from kaigyou_core import provenance
+from kaigyou_core.db import table_exists
 
 router = APIRouter()
 
@@ -181,11 +182,17 @@ def meshes(
     # Workers live in their own table with their own mesh set, so this is a
     # LEFT JOIN on the code: a mesh with residents and no businesses keeps a
     # null here rather than a zero it never reported.
-    join = """
-        LEFT JOIN mesh_business b
-               ON b.mesh_code = m.mesh_code AND b.mesh_size_m = m.mesh_size_m
-    """
-    select = ", b.workers, b.establishments"
+    #
+    # Only when the table is there. A deployment applies code before someone
+    # runs the migration, and joining a table that does not exist yet would
+    # turn the whole map into a 500 during that window.
+    join, select = "", ""
+    if table_exists(conn, "mesh_business"):
+        join = """
+            LEFT JOIN mesh_business b
+                   ON b.mesh_code = m.mesh_code AND b.mesh_size_m = m.mesh_size_m
+        """
+        select = ", b.workers, b.establishments"
     if profile:
         join += """
             LEFT JOIN mesh_scores ms

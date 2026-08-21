@@ -402,3 +402,68 @@ def test_no_rewrite_can_swallow_an_asset_request():
             f"rewrite {rewrite['source']!r} -> {rewrite['destination']!r} also "
             "matches asset requests, which serves them the page instead"
         )
+
+
+# --------------------------------------- code deployed ahead of migrations
+@pytest.fixture
+def without_mesh_business():
+    """The window between a push and someone running the migration.
+
+    A deploy builds in seconds; migrations are run by hand afterwards. In
+    between, the code knows about a table the database has not got. Skipped
+    unless a database is reachable.
+    """
+    from pathlib import Path
+
+    psycopg = pytest.importorskip("psycopg")
+    from kaigyou_core.db import connect, table_exists
+
+    root = Path(__file__).resolve().parents[2]
+    old_fn = (root / "db" / "migrations" / "005_functions.sql").read_text(encoding="utf-8")
+    new_fn = (root / "db" / "migrations" / "008_daytime_workers.sql").read_text(encoding="utf-8")
+
+    try:
+        with connect() as probe:
+            if not table_exists(probe, "mesh_business"):
+                pytest.skip("mesh_business not migrated here")
+    except psycopg.OperationalError:
+        pytest.skip("no database")
+
+    with connect(autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE mesh_business RENAME TO mesh_business_hidden_test")
+        cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
+                    "double precision,double precision,double precision,text,integer)")
+        cur.execute(old_fn)
+    try:
+        yield
+    finally:
+        with connect(autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("ALTER TABLE mesh_business_hidden_test RENAME TO mesh_business")
+            cur.execute(new_fn)
+
+
+def test_the_api_survives_a_table_that_is_not_migrated_yet(without_mesh_business):
+    """Every endpoint answers; the dataset is reported unavailable, not fatal.
+
+    Adding mesh_business and pushing took the deployed site down until the
+    migration was run, because provenance, data-status and the mesh layer all
+    read a table that was not there yet. Reporting "not loaded" is the same
+    answer the app already gives for a dataset nobody has downloaded.
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    for path in ["/api/health", "/api/meta", "/api/data-status",
+                 "/api/meshes?bbox=139.75,35.65,139.78,35.68&limit=5&profile=default",
+                 "/api/clinics?bbox=139.75,35.65,139.78,35.68&limit=3",
+                 "/api/candidate-analysis?lat=35.66&lng=139.76&radius_m=1000",
+                 "/api/rankings?limit=3"]:
+        assert client.get(path).status_code == 200, path
+
+    analysis = client.get(
+        "/api/candidate-analysis?lat=35.66&lng=139.76&radius_m=1000").json()
+    # Unknown, not zero -- an office district must not be scored as empty.
+    assert analysis["workers"] is None
+    assert analysis["scores"]["demand"] is not None
