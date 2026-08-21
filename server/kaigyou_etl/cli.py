@@ -175,9 +175,16 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     print("\nスコア基準を再計算しています（数分かかります）...")
     with connect() as conn:
         refresh_stats(conn, prefecture_code=args.prefecture)
-    print("メッシュスコアを再計算しています...")
+    # Every configured profile, not just the active one: the UI offers all of
+    # them in a dropdown, and a profile with no scores renders an empty ranking
+    # and a note telling the reader to run a command. The trade-area sweep is
+    # shared between them, so the extra profiles cost little.
+    from kaigyou_core import config as cfg
+    names = list(cfg.scoring_config().get("profiles") or {})
+    print(f"メッシュスコアを再計算しています（プロファイル {len(names)} 件）...")
     with connect() as conn:
-        summary = compute_mesh_scores(conn, prefecture_code=args.prefecture)
+        summary = compute_mesh_scores(conn, profiles=names,
+                                      prefecture_code=args.prefecture)
     print(json.dumps(summary, ensure_ascii=False, default=_json_default))
 
     print()
@@ -218,8 +225,12 @@ def cmd_refresh_stats(args: argparse.Namespace) -> int:
 def cmd_compute_scores(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import compute_mesh_scores
 
+    from kaigyou_core import config as cfg
+
+    names = (list(cfg.scoring_config().get("profiles") or {})
+             if getattr(args, "all_profiles", False) else None)
     with connect() as conn:
-        summary = compute_mesh_scores(conn, profile=args.profile,
+        summary = compute_mesh_scores(conn, profile=args.profile, profiles=names,
                                       prefecture_code=args.prefecture)
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
     return EXIT_OK
@@ -316,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("compute-scores", help="score every mesh (ranking + heat map)")
     p.add_argument("--profile", default=None)
+    p.add_argument("--all-profiles", action="store_true",
+                   help="設定済みのプロファイルすべてを計算する（商圏集計は共有されるため追加分は軽い）")
     p.add_argument("--prefecture", default="13")
     p.set_defaults(func=cmd_compute_scores)
 

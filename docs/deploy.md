@@ -168,6 +168,17 @@ $env:DATABASE_URL = 'postgresql://postgres.<プロジェクトID>:<パスワー�
 ```
 
 `migrate` は未適用のものだけを流します。何度実行しても安全です。
+`load-local` は最後に**設定済みの全プロファイル**のスコアを計算します。
+
+スコアだけ計算し直したいとき（`config/scoring.yaml` の重みを変えた場合など）は:
+
+```powershell
+.\.venv\Scripts\kaigyou-etl refresh-stats
+.\.venv\Scripts\kaigyou-etl compute-scores --all-profiles
+```
+
+`--all-profiles` を付けないと**有効なプロファイル1つ分**しか計算されず、
+他のプロファイルを選んだときにランキングが空になります。
 
 **順序について。** GitHub に push すると Vercel は数十秒でデプロイしますが、
 `migrate` は手元から実行するので必ず後になります。その間コードは
@@ -235,6 +246,7 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | 同上。`[tool.vercel] entrypoint` を足しても直らない | `server/pyproject.toml` に書いている／モジュールパスが違う | Vercel が読むのは**リポジトリ直下**の `pyproject.toml` です。また `server` はパッケージではないので `server.kaigyou_api.main:app` は import できません。`api/index.py` を直せばこの設定自体が不要です |
 | `/api/*` が全部 404 | `vercel.json` に `/api/(.*)` の rewrite がある | Vercel の FastAPI 対応は `/api/*` をアプリに直接ルーティングします。rewrite があると**転送先のパス**（`/api/index`）でルーティングされ、全部 404 になります。この rewrite は置かないでください |
 | `500: FUNCTION_INVOCATION_FAILED` | 関数が**起動前に**落ちている。多くは依存関係が入っていない | `/api/health` を開くと、起動失敗なら 503 と一緒に原因のモジュール名が出ます。ビルド設定で `installCommand` を上書きすると `pip install -r requirements.txt` が走らなくなるので注意 |
+| ランキングが空で「メッシュスコアが未計算です」 | そのプロファイルのスコアが無い | `kaigyou-etl compute-scores --all-profiles` |
 | データを追加した直後だけ API がエラー | Supabase にマイグレーションが未適用 | `DATABASE_URL` を Supabase にして `kaigyou-etl migrate` → `load-local`。3.5 節を参照 |
 | 画面が真っ白（APIは動いている） | `vercel.json` の rewrite が `/assets/*.js` まで `/index.html` に転送している | **rewrite を置かないでください。** ブラウザのコンソールに `Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"` が出ます。SPA のフォールバックは API 側が行います |
 | トップページが `{"detail":"Not Found"}` | 画面（静的ファイル）が配信されず、全リクエストが API に届いている | 現在は API 自身が画面を返します。`/api/health` の `web_client_bundled` が `false` なら `web/dist` が同梱されていません |

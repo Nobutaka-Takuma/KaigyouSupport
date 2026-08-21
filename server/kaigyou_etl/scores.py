@@ -13,7 +13,7 @@ Two batch jobs, run after every load:
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import psycopg
 
@@ -87,15 +87,26 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
 
 
 def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
+                        profiles: Sequence[str] | None = None,
                         radius_m: int | None = None,
                         mesh_size_m: int | None = None,
                         prefecture_code: str = "13",
                         facility_category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
+    """Score every mesh, under one profile or several.
+
+    The expensive part -- sweeping a trade area around all 5,449 mesh centres
+    in PostGIS -- does not depend on the profile at all. Only the arithmetic
+    afterwards does. So scoring a second profile costs almost nothing as long
+    as the sweep is shared, which is why `profiles` exists: the UI offers every
+    configured profile, so every configured profile should have numbers.
+    """
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to score")
-    model = ScoringModel(cfg.scoring_config(), profile)
-    radius = radius_m or model.mesh_scoring_radius_m
+    config = cfg.scoring_config()
+    models = ([ScoringModel(config, name) for name in profiles] if profiles
+              else [ScoringModel(config, profile)])
+    radius = radius_m or models[0].mesh_scoring_radius_m
     scope = scope_key(mesh_size_m, radius, prefecture_code)
 
     with conn.cursor() as cur:
@@ -117,14 +128,19 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     labels = (_boundary_area_labels(conn, mesh_size_m, prefecture_code) if use_boundaries
               else _derive_area_labels(conn, mesh_size_m, prefecture_code))
 
+    # One statement, then one batch per profile: 5,449 rows at a round trip each
+    # is fine against localhost and minutes of waiting against a hosted database.
+    scored_profiles = []
     with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM mesh_scores WHERE profile = %s AND radius_m = %s",
-            (model.profile_name, radius),
-        )
-        for row in rows:
-            scored = model.score(row, distributions)
+        for model in models:
             cur.execute(
+                "DELETE FROM mesh_scores WHERE profile = %s AND radius_m = %s",
+                (model.profile_name, radius),
+            )
+            batch = [_score_row(model, row, distributions, radius, labels)
+                     for row in rows]
+            for start in range(0, len(batch), 500):
+                cur.executemany(
                 """
                 INSERT INTO mesh_scores (
                     mesh_id, profile, radius_m, population, age_0_14, age_65_plus,
@@ -145,35 +161,45 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                 ON CONFLICT (mesh_id, profile, radius_m) DO UPDATE SET
                     overall_score = EXCLUDED.overall_score,
                     computed_at = now()
-                """,
-                {
-                    "mesh_id": row["mesh_id"],
-                    "profile": model.profile_name,
-                    "radius_m": radius,
-                    "population": row.get("population"),
-                    "age_0_14": row.get("age_0_14"),
-                    "age_65_plus": row.get("age_65_plus"),
-                    "households": row.get("households"),
-                    "population_growth": row.get("population_growth"),
-                    "facility_count": row.get("facility_count"),
-                    "population_per_facility": row.get("population_per_facility"),
-                    "nearest_facility_distance_m": row.get("nearest_facility_distance_m"),
-                    "nearest_station": row.get("nearest_station"),
-                    "station_distance_m": row.get("station_distance_m"),
-                    "daily_passengers": row.get("daily_passengers"),
-                    "demand": scored["demand"],
-                    "competition": scored["competition"],
-                    "growth": scored["growth"],
-                    "accessibility": scored["accessibility"],
-                    "overall": scored["overall"],
-                    "area_label": labels.get(row["mesh_id"]),
-                },
-            )
+                """, batch[start:start + 500])
+            scored_profiles.append(model.profile_name)
     conn.commit()
-    return {"profile": model.profile_name, "radius_m": radius,
-            "area_label_source": ("municipalities" if use_boundaries
-                                  else "derived_from_facility_addresses"),
-            "mesh_size_m": mesh_size_m, "meshes_scored": len(rows)}
+
+    summary = {"profile": scored_profiles[0], "radius_m": radius,
+               "area_label_source": ("municipalities" if use_boundaries
+                                     else "derived_from_facility_addresses"),
+               "mesh_size_m": mesh_size_m, "meshes_scored": len(rows)}
+    if len(scored_profiles) > 1:
+        summary["profiles"] = scored_profiles
+    return summary
+
+
+def _score_row(model: ScoringModel, row: Mapping[str, Any],
+               distributions: Mapping[str, Any], radius: int,
+               labels: Mapping[int, str | None]) -> dict[str, Any]:
+    scored = model.score(row, distributions)
+    return {
+        "mesh_id": row["mesh_id"],
+        "profile": model.profile_name,
+        "radius_m": radius,
+        "population": row.get("population"),
+        "age_0_14": row.get("age_0_14"),
+        "age_65_plus": row.get("age_65_plus"),
+        "households": row.get("households"),
+        "population_growth": row.get("population_growth"),
+        "facility_count": row.get("facility_count"),
+        "population_per_facility": row.get("population_per_facility"),
+        "nearest_facility_distance_m": row.get("nearest_facility_distance_m"),
+        "nearest_station": row.get("nearest_station"),
+        "station_distance_m": row.get("station_distance_m"),
+        "daily_passengers": row.get("daily_passengers"),
+        "demand": scored["demand"],
+        "competition": scored["competition"],
+        "growth": scored["growth"],
+        "accessibility": scored["accessibility"],
+        "overall": scored["overall"],
+        "area_label": labels.get(row["mesh_id"]),
+    }
 
 
 def _describe(values: list[float]) -> dict[str, Any]:
