@@ -467,3 +467,27 @@ def test_the_api_survives_a_table_that_is_not_migrated_yet(without_mesh_business
     # Unknown, not zero -- an office district must not be scored as empty.
     assert analysis["workers"] is None
     assert analysis["scores"]["demand"] is not None
+
+
+@pytest.mark.parametrize("message", [
+    "connection failed: FATAL:  (ENOTFOUND) tenant/user postgres.abc not found",
+    "connection failed: Tenant or user not found",
+])
+def test_the_pooler_rejecting_the_username_is_explained(message):
+    """Reaching the pooler and being turned away is not a network problem.
+
+    The project ref lives inside the username, so one wrong character -- or the
+    right ref aimed at another region's pooler -- looks identical to a DNS
+    failure from the terminal, and the advice is the opposite.
+    """
+    hint = db.connection_hint(
+        "postgresql://postgres.abc:pw@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres",
+        message)
+    assert hint is not None
+    assert "プロジェクトID" in hint
+
+
+def test_a_rejected_password_is_not_blamed_on_the_project_id():
+    assert db.connection_hint(
+        "postgresql://postgres.abc:pw@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres",
+        'password authentication failed for user "postgres.abc"') is None

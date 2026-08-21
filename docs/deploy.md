@@ -248,6 +248,7 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | ビルドが `Package metadata name 'kaigyou-support' does not match given name 'server'` で落ちる | `requirements.txt` に `./server` のようなローカルパスを書いた | **書かないでください。** Vercel の uv はディレクトリ名からパッケージ名を推測するため必ず不一致になります。`requirements.txt` は PyPI のパッケージだけにし、自前のコードは `vercel.json` の `includeFiles` で同梱します |
 | `/api/health` が `routers_loaded: false` | `server/` が関数に同梱されていない | `vercel.json` の `includeFiles` が `{config,server}/**` になっているか確認 |
 | 投入時に `getaddrinfo failed` / `failed to resolve host db.*.supabase.co` | Direct connection は IPv6 専用。回線が IPv4 のみ | **Session pooler**（`pooler.supabase.com` の 5432）に変更。ユーザ名も `postgres.<プロジェクトID>` に変わります |
+| `tenant/user postgres.xxx not found` / `Tenant or user not found` | プーラには届いているが、ユーザ名のプロジェクトIDが一致しない | ダッシュボードの Session pooler の文字列を**そのままコピー**。綴り違い／リージョン不一致／プロジェクト一時停止のいずれかです |
 | 認証だけ失敗する（ホストは引けている） | PowerShell の `"` でパスワードの `$` が変数展開された | 引用符を `'` に変える |
 | データ投入が異常に遅い | Transaction pooler (6543) 経由で投入している | Session pooler (5432) に変更 |
 

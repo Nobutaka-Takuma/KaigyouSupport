@@ -65,9 +65,26 @@ def connection_hint(url: str, message: str) -> str | None:
     not reach. Authentication errors are excluded, because getting far enough
     to be rejected means the host resolved and the address is not the problem.
     """
+    lowered = message.lower()
+
+    # Supavisor answering "tenant or user not found" means the pooler was
+    # reached and rejected the username. The project ref is embedded in it
+    # (postgres.<ref>), and it has to match both a real project and the region
+    # in the hostname -- so a single wrong character, or the right ref against
+    # the wrong region's pooler, produces exactly this and nothing else.
+    if "tenant" in lowered and "not found" in lowered:
+        return (
+            "プーラには接続できましたが、ユーザ名のプロジェクトIDが見つかりません。"
+            "接続文字列を組み立て直さず、Supabase の Settings → Database → "
+            "Connection string → Session pooler に表示されている文字列を"
+            "そのままコピーしてください。よくある原因は "
+            "(1) postgres.<プロジェクトID> の綴り違い、"
+            "(2) ホスト名のリージョン（aws-N-<region>）がプロジェクトのリージョンと不一致、"
+            "(3) プロジェクトが一時停止中、の3つです。"
+        )
+
     if ".supabase.co" not in url or "pooler.supabase.com" in url:
         return None
-    lowered = message.lower()
     if any(word in lowered for word in
            ("password", "authentication", "role ", "database ", "permission")):
         return None
