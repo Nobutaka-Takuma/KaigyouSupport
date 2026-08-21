@@ -113,6 +113,13 @@ def health() -> dict[str, object]:
         "routers_loaded": ROUTER_IMPORT_ERROR is None,
         "router_error": ROUTER_IMPORT_ERROR,
         "web_client_bundled": WEB_DIST.is_dir(),
+        # The bundle this function is serving. index.html names the files it
+        # needs; if they are not in this list the two came from different
+        # builds, which is the difference between a blank page and a working
+        # one and is otherwise invisible.
+        "web_client_assets": sorted(
+            p.name for p in (WEB_DIST / "assets").glob("*")
+        ) if (WEB_DIST / "assets").is_dir() else [],
         "config_found": config_found,
         "config_dir": str(config_dir) if config_dir else None,
         "database_url_set": configured,
@@ -173,6 +180,18 @@ def health_db() -> dict[str, object]:
 
 
 # --------------------------------------------------------------- web client
+#: Extensions a browser asks for as a *file*, never as a client-side route.
+#: `.html` is absent on purpose: /about.html is a page, not an asset.
+_ASSET_SUFFIXES = frozenset({
+    ".js", ".mjs", ".css", ".map", ".json", ".svg", ".png", ".jpg", ".jpeg",
+    ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".wasm", ".txt",
+})
+
+
+def _looks_like_an_asset(path: str) -> bool:
+    return Path(path).suffix.lower() in _ASSET_SUFFIXES
+
+
 def web_dist() -> Path:
     """Where the built web client lives, if it was shipped alongside the API."""
     from kaigyou_core import config as cfg
@@ -206,6 +225,18 @@ if WEB_DIST.is_dir():
         # `is_relative_to` keeps ../../etc/passwd out of the response.
         if full_path and asset.is_file() and asset.is_relative_to(root):
             return FileResponse(asset)
+        # A missing *asset* is a 404, not the page. Answering /assets/index-
+        # abc123.js with index.html gives the browser HTML where it asked for a
+        # module, which it reports as a MIME type error and which renders as a
+        # blank page -- the failure looks like the application, not like a file
+        # that is not there. It happens whenever index.html and the bundle come
+        # from different builds, and the honest 404 says exactly that.
+        if _looks_like_an_asset(full_path):
+            raise HTTPException(
+                status_code=404,
+                detail=f"asset not found: /{full_path}. index.html と bundle の"
+                       "ビルドが一致していない可能性があります（/api/health の "
+                       "web_client_assets を確認してください）")
         # Anything else is a client-side route: the SPA sorts it out.
         return FileResponse(root / "index.html")
 

@@ -36,7 +36,8 @@ BOUNDARY_FALLBACK_RADIUS_M = 3000
 def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
                   mesh_size_m: int | None = None,
                   prefecture_code: str = "13",
-                  facility_category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
+                  facility_category: str = DEFAULT_CATEGORY,
+                  progress: Any = None) -> dict[str, Any]:
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to compute statistics from")
@@ -45,9 +46,12 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
     summary: dict[str, Any] = {"radii": radii, "mesh_size_m": mesh_size_m, "scopes": {}}
 
     for radius in radii:
+        if progress:
+            progress(f"  半径 {radius}m の分布を集計しています...")
         rows = mesh_catchments(conn, radius, mesh_size_m=mesh_size_m,
                                prefecture_code=prefecture_code,
-                               facility_category=facility_category)
+                               facility_category=facility_category,
+                               progress=progress)
         scope = scope_key(mesh_size_m, radius, prefecture_code)
         written = 0
         for metric in DISTRIBUTION_METRICS:
@@ -91,7 +95,8 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                         radius_m: int | None = None,
                         mesh_size_m: int | None = None,
                         prefecture_code: str = "13",
-                        facility_category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
+                        facility_category: str = DEFAULT_CATEGORY,
+                        progress: Any = None) -> dict[str, Any]:
     """Score every mesh, under one profile or several.
 
     The expensive part -- sweeping a trade area around all 5,449 mesh centres
@@ -119,7 +124,8 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
 
     rows = mesh_catchments(conn, radius, mesh_size_m=mesh_size_m,
                            prefecture_code=prefecture_code,
-                           facility_category=facility_category)
+                           facility_category=facility_category,
+                           progress=progress)
 
     # Area names for the ranking table. Official boundary polygons are the
     # right source; without them, fall back to the municipality recorded on
@@ -133,9 +139,19 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     scored_profiles = []
     with conn.cursor() as cur:
         for model in models:
+            # This prefecture's scores only. Without the join, scoring
+            # Shizuoka deleted Tokyo's ranking -- the same mistake as the
+            # unqualified delete in the mesh loaders, one layer up, and just
+            # as invisible: the command reports success either way.
             cur.execute(
-                "DELETE FROM mesh_scores WHERE profile = %s AND radius_m = %s",
-                (model.profile_name, radius),
+                """
+                DELETE FROM mesh_scores ms
+                USING population_mesh pm
+                WHERE pm.id = ms.mesh_id
+                  AND ms.profile = %s AND ms.radius_m = %s
+                  AND pm.prefecture_code = %s
+                """,
+                (model.profile_name, radius, prefecture_code),
             )
             batch = [_score_row(model, row, distributions, radius, labels)
                      for row in rows]

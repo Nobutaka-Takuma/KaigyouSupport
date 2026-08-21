@@ -252,7 +252,9 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | 「徒歩圏」を選んでも円のまま | 街路ネットワーク未投入、または pgRouting 未有効 | Supabase の SQL Editor で `create extension if not exists pgrouting;` を実行し、OSM 道路データを `load-local` で投入 |
 | ランキングが空で「メッシュスコアが未計算です」 | そのプロファイルのスコアが無い | `kaigyou-etl compute-scores --all-profiles` |
 | データを追加した直後だけ API がエラー | Supabase にマイグレーションが未適用 | `DATABASE_URL` を Supabase にして `kaigyou-etl migrate` → `load-local`。3.5 節を参照 |
-| 画面に「読み込んでいます…」が残る | JavaScript の読み込みに失敗している（バンドルが 404、または HTML が返っている） | ブラウザの Network タブで `/assets/index-*.js` のステータスと Content-Type を確認してください。404 ならビルド出力が配信されていません |
+| 静岡県を入れたら東京都のランキングが消えた | スコアの再計算が県で区切られていなかった（e68829b 以前）| `git pull` して `python -m kaigyou_etl compute-scores --all-profiles --prefecture 13` で東京都ぶんを計算し直してください。以降は県ごとに保持されます |
+| `compute-scores` が `kg_analyze_point` のエラーで落ちる（県が大きい）| 1文が長すぎてホスト側の statement timeout に当たっている | `git pull` で 1,000メッシュずつに分割して実行するようになります。進捗も表示されます |
+| 画面に「読み込んでいます…」が残る | JavaScript の読み込みに失敗している（バンドルが 404、または HTML が返っている） | ブラウザの Network タブで `/assets/index-*.js` のステータスと Content-Type を確認してください。404 ならビルド出力が配信されていません。`/api/health` の `web_client_assets` に index.html が参照しているファイル名が含まれているかも確認してください（含まれていなければ index.html と bundle が別ビルドです）|
 | 画面が真っ白（APIは動いている） | `vercel.json` の rewrite が `/assets/*.js` まで `/index.html` に転送している | **rewrite を置かないでください。** ブラウザのコンソールに `Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"` が出ます。SPA のフォールバックは API 側が行います |
 | トップページが `{"detail":"Not Found"}` | 画面（静的ファイル）が配信されず、全リクエストが API に届いている | 現在は API 自身が画面を返します。`/api/health` の `web_client_bundled` が `false` なら `web/dist` が同梱されていません |
 | `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |

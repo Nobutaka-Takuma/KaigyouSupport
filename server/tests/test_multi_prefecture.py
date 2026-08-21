@@ -128,3 +128,91 @@ def test_the_map_is_pointed_at_people_not_at_the_middle_of_the_extent(db):
             f"the map would open at {lat},{lng}")
         # And the extent really does stretch far enough for that to matter.
         assert max_lng - min_lng > 5, "precondition: the islands are loaded"
+
+
+def _seed_scores(conn, prefecture: str, profile: str, radius: int, n: int = 3) -> int:
+    """Put rows in mesh_scores for a prefecture, as an earlier run would have."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO mesh_scores (mesh_id, profile, radius_m, overall_score)
+            SELECT id, %s, %s, 50
+            FROM population_mesh WHERE prefecture_code = %s LIMIT %s
+            ON CONFLICT DO NOTHING
+        """, (profile, radius, prefecture, n))
+        return cur.rowcount
+
+
+def _score_count(conn, prefecture: str, profile: str, radius: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT count(*) AS n FROM mesh_scores ms
+            JOIN population_mesh pm ON pm.id = ms.mesh_id
+            WHERE pm.prefecture_code = %s AND ms.profile = %s AND ms.radius_m = %s
+        """, (prefecture, profile, radius))
+        return cur.fetchone()["n"]
+
+
+def test_scoring_a_prefecture_leaves_another_prefectures_ranking_alone(db, tmp_path):
+    """The same mistake one layer up: it emptied the Tokyo ranking.
+
+    `DELETE FROM mesh_scores WHERE profile = ... AND radius_m = ...` matches
+    every prefecture, so computing Shizuoka's scores removed Tokyo's and the
+    site answered "メッシュスコアが未計算です" for a prefecture that had been
+    scored ten minutes earlier.
+    """
+    from kaigyou_etl.scores import compute_mesh_scores, refresh_stats
+
+    with connect() as conn:
+        adapter = _adapter(tmp_path, OTHER_PREFECTURE)
+        adapter.load(conn, adapter.transform(MESH_FILE))
+        conn.commit()
+
+        # A radius no run uses, so the rows below are this test's alone and
+        # the cleanup cannot take a real ranking with it.
+        model_radius = 999
+        profile = "default"
+        if not _seed_scores(conn, "13", profile, model_radius):
+            pytest.skip("no Tokyo meshes to protect here")
+        conn.commit()
+        before = _score_count(conn, "13", profile, model_radius)
+
+        refresh_stats(conn, radii=[model_radius], prefecture_code=OTHER_PREFECTURE)
+        compute_mesh_scores(conn, profiles=[profile], radius_m=model_radius,
+                            prefecture_code=OTHER_PREFECTURE)
+        conn.commit()
+
+        try:
+            assert _score_count(conn, OTHER_PREFECTURE, profile, model_radius) > 0
+            assert _score_count(conn, "13", profile, model_radius) == before, (
+                "scoring another prefecture deleted this one's ranking")
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM mesh_scores WHERE radius_m = %s", (model_radius,))
+                cur.execute("DELETE FROM metric_distributions WHERE scope LIKE %s",
+                            (f"%pref{OTHER_PREFECTURE}",))
+                cur.execute("DELETE FROM metric_distributions WHERE scope LIKE %s",
+                            (f"%r{model_radius}%",))
+            conn.commit()
+
+
+def test_batching_the_sweep_does_not_change_its_answer(db, tmp_path):
+    """Batched because a hosted database cancels a statement that runs too long.
+
+    Shizuoka is 18,000 meshes; one statement for the lot took long enough to
+    hit Supabase's timeout, which threw away several minutes of work and left
+    the ranking empty. Paging must not change the result.
+    """
+    from kaigyou_core.analysis import mesh_catchments
+
+    with connect() as conn:
+        adapter = _adapter(tmp_path, OTHER_PREFECTURE)
+        adapter.load(conn, adapter.transform(MESH_FILE))
+        conn.commit()
+
+        whole = mesh_catchments(conn, 500, mesh_size_m=500,
+                                prefecture_code=OTHER_PREFECTURE, batch_size=10_000)
+        paged = mesh_catchments(conn, 500, mesh_size_m=500,
+                                prefecture_code=OTHER_PREFECTURE, batch_size=2)
+        assert len(whole) > 2, "precondition: more rows than one page"
+        assert [r["mesh_id"] for r in whole] == [r["mesh_id"] for r in paged]
+        assert [r["population"] for r in whole] == [r["population"] for r in paged]

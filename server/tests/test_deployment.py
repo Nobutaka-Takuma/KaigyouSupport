@@ -683,3 +683,29 @@ def test_a_failure_is_categorised_without_quoting_it(health_client, monkeypatch,
     assert body["connected"] is False
     assert body["reason"] == reason
     assert "u:p" not in str(body) and "example.invalid" not in str(body)
+
+
+def test_a_missing_asset_is_a_404_not_the_page(client_with_web):
+    """HTML in place of JavaScript renders as a blank page, not as an error.
+
+    The browser reports "Expected a JavaScript-or-Wasm module script but the
+    server responded with a MIME type of text/html" in a console nobody has
+    open, and the page is white. It happens whenever index.html and the bundle
+    come from different builds. A 404 says which file is missing.
+    """
+    response = client_with_web.get("/assets/index-does-not-exist.js")
+    assert response.status_code == 404
+    assert "<!doctype html>" not in response.text.lower()
+    assert "index-does-not-exist.js" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("path", ["/ranking", "/compare", "/some/deep/route"])
+def test_client_side_routes_are_still_the_page(client_with_web, path):
+    """Narrowing the fallback must not break the routes it exists for."""
+    assert "<!doctype html>" in client_with_web.get(path).text
+
+
+def test_health_lists_the_bundle_it_is_serving(client_with_web):
+    """So a stale bundle can be told apart from a broken application."""
+    assets = client_with_web.get("/api/health").json()["web_client_assets"]
+    assert "main.js" in assets

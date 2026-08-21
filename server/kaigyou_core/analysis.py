@@ -265,34 +265,65 @@ def score_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     return {"metrics": metrics, "scores": scores}
 
 
+#: Meshes per statement in the catchment sweep. One statement for the whole
+#: prefecture is the fastest thing to write and the wrong thing to run: a
+#: hosted database applies a statement timeout, and Shizuoka's 18,000 meshes
+#: take long enough to hit it -- which cancels the sweep after several minutes
+#: of work and leaves the caller with nothing. Batched, no single statement
+#: runs long, and the operator sees it advancing.
+CATCHMENT_BATCH = 1000
+
+
 def mesh_catchments(conn: psycopg.Connection, radius_m: int, *,
                     mesh_size_m: int = DEFAULT_MESH_SIZE_M,
                     prefecture_code: str = "13",
-                    facility_category: str = DEFAULT_CATEGORY) -> list[dict[str, Any]]:
-    """Catchment metrics for every mesh centroid.
+                    facility_category: str = DEFAULT_CATEGORY,
+                    batch_size: int = CATCHMENT_BATCH,
+                    progress: Any = None) -> list[dict[str, Any]]:
+    """Catchment metrics for every mesh centroid, in batches.
 
-    Expressed as one set-based query with a LATERAL join so PostGIS does the
-    whole sweep in a single round trip; this is what feeds both the
-    normalisation statistics and the ranking / heat map.
+    A LATERAL join lets PostGIS do the sweep itself rather than one round trip
+    per mesh; keyset paging on the mesh id keeps each statement short. Paging
+    by id rather than OFFSET because OFFSET would re-run the trade-area
+    analysis for every row it then throws away.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT m.id AS mesh_id, m.mesh_code,
-                   ST_Y(m.centroid) AS lat, ST_X(m.centroid) AS lng,
-                   a.*
-            FROM population_mesh m
-            CROSS JOIN LATERAL kg_analyze_point(
-                ST_Y(m.centroid), ST_X(m.centroid), %s, %s, %s
-            ) AS a
-            WHERE m.mesh_size_m = %s
-              AND m.prefecture_code = %s
-              AND COALESCE(m.population, 0) > 0
-            """,
-            (radius_m, facility_category, mesh_size_m, mesh_size_m, prefecture_code),
-        )
-        rows = cur.fetchall()
-    return [{_RENAME.get(k, k): v for k, v in row.items()} for row in rows]
+    say = progress or (lambda _msg: None)
+    out: list[dict[str, Any]] = []
+    after = 0
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id AS mesh_id, m.mesh_code,
+                       ST_Y(m.centroid) AS lat, ST_X(m.centroid) AS lng,
+                       a.*
+                FROM (
+                    SELECT id, mesh_code, centroid
+                    FROM population_mesh
+                    WHERE mesh_size_m = %s
+                      AND prefecture_code = %s
+                      AND COALESCE(population, 0) > 0
+                      AND id > %s
+                    ORDER BY id
+                    LIMIT %s
+                ) m
+                CROSS JOIN LATERAL kg_analyze_point(
+                    ST_Y(m.centroid), ST_X(m.centroid), %s, %s, %s
+                ) AS a
+                ORDER BY m.id
+                """,
+                (mesh_size_m, prefecture_code, after, batch_size,
+                 radius_m, facility_category, mesh_size_m),
+            )
+            rows = cur.fetchall()
+        if not rows:
+            break
+        out.extend({_RENAME.get(k, k): v for k, v in row.items()} for row in rows)
+        after = rows[-1]["mesh_id"]
+        say(f"    商圏を集計中: {len(out):,} メッシュ")
+        if len(rows) < batch_size:
+            break
+    return out
 
 
 def area_label(conn: psycopg.Connection, mesh_id: int) -> str | None:

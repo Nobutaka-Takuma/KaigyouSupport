@@ -211,7 +211,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import compute_mesh_scores, refresh_stats
     print("\nスコア基準を再計算しています（数分かかります）...")
     with connect() as conn:
-        refresh_stats(conn, prefecture_code=args.prefecture)
+        refresh_stats(conn, prefecture_code=args.prefecture, progress=print)
     # Every configured profile, not just the active one: the UI offers all of
     # them in a dropdown, and a profile with no scores renders an empty ranking
     # and a note telling the reader to run a command. The trade-area sweep is
@@ -220,7 +220,8 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     print(f"メッシュスコアを再計算しています（プロファイル {len(names)} 件）...")
     with connect() as conn:
         summary = compute_mesh_scores(conn, profiles=names,
-                                      prefecture_code=args.prefecture)
+                                      prefecture_code=args.prefecture,
+                                      progress=print)
     print(json.dumps(summary, ensure_ascii=False, default=_json_default))
 
     print()
@@ -253,7 +254,7 @@ def cmd_refresh_stats(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import refresh_stats
 
     with connect() as conn:
-        summary = refresh_stats(conn, prefecture_code=args.prefecture)
+        summary = refresh_stats(conn, prefecture_code=args.prefecture, progress=print)
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
     return EXIT_OK
 
@@ -265,7 +266,8 @@ def cmd_compute_scores(args: argparse.Namespace) -> int:
              if getattr(args, "all_profiles", False) else None)
     with connect() as conn:
         summary = compute_mesh_scores(conn, profile=args.profile, profiles=names,
-                                      prefecture_code=args.prefecture)
+                                      prefecture_code=args.prefecture,
+                                      progress=print)
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
     return EXIT_OK
 
