@@ -640,3 +640,46 @@ def test_the_package_can_be_run_as_a_module():
     entry = REPO_ROOT / "server" / "kaigyou_etl" / "__main__.py"
     assert entry.is_file(), "python -m kaigyou_etl would say the package cannot be executed"
     assert "cli" in entry.read_text(encoding="utf-8")
+
+
+# ------------------------------------------------ is the database reachable
+@pytest.fixture
+def health_client():
+    from fastapi.testclient import TestClient
+    return TestClient(api_main.app, raise_server_exceptions=False)
+
+
+def test_the_db_health_check_says_when_the_url_is_missing(health_client, monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    body = health_client.get("/api/health/db").json()
+    assert body == {"connected": False, "reason": "database_url_not_set"}
+
+
+@pytest.mark.parametrize("message, reason", [
+    ('FATAL: password authentication failed for user "postgres"', "authentication"),
+    ("connection failed: getaddrinfo failed", "host_unreachable"),
+    ("Tenant or user not found", "credentials_rejected"),
+    ("connection timeout expired", "timeout"),
+    ("remaining connection slots are reserved", "too_many_connections"),
+    ("something nobody has seen before", "other"),
+])
+def test_a_failure_is_categorised_without_quoting_it(health_client, monkeypatch,
+                                                     message, reason):
+    """A rotated password and a broken migration look identical from the browser.
+
+    The deployment withholds exception text on purpose, which is right and
+    leaves 500s undiagnosable. The category is enough to know where to look and
+    names no host, role or credential.
+    """
+    import psycopg
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@example.invalid:5432/db")
+
+    def refuse(*_args, **_kwargs):
+        raise psycopg.OperationalError(message)
+
+    monkeypatch.setattr(psycopg, "connect", refuse)
+    body = health_client.get("/api/health/db").json()
+    assert body["connected"] is False
+    assert body["reason"] == reason
+    assert "u:p" not in str(body) and "example.invalid" not in str(body)

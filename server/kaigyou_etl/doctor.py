@@ -338,6 +338,48 @@ def _check_api_surface(report: Report, conn: Any) -> None:
         report.add("データ混在", FAIL, conflict["message"],
                    "kaigyou-etl drop-sample を実行してください。")
 
+    _check_the_analysis_itself(report, conn)
+
+
+def _check_the_analysis_itself(report: Report, conn: Any) -> None:
+    """Run the query the map runs, at a point where there is data.
+
+    Every check above this one asks whether something *exists*. That is not
+    the same question as whether it works: a migration can apply cleanly and
+    leave kg_analyze_point raising on every call, and then `doctor` reports no
+    problems while the app answers 500 to the one request it is for. The
+    difference matters most right after a migration, which is exactly when
+    nobody is looking for it.
+
+    Deployed, the API withholds the exception text on purpose, so this may be
+    the only place the operator can see it at all.
+    """
+    from kaigyou_core.analysis import analyze_point
+    from kaigyou_core.db import fetch_one
+
+    point = fetch_one(conn, """
+        SELECT ST_Y(centroid) AS lat, ST_X(centroid) AS lng, mesh_size_m AS m
+        FROM population_mesh
+        WHERE COALESCE(population, 0) > 0
+        LIMIT 1
+    """)
+    if not point:
+        return  # nothing loaded; the data check has already said so
+
+    try:
+        row = analyze_point(conn, point["lat"], point["lng"], 1000,
+                            mesh_size_m=point["m"])
+    except Exception as exc:  # noqa: BLE001 - the message is the whole point
+        conn.rollback()
+        report.add("GET /api/candidate-analysis", FAIL, f"{type(exc).__name__}: {exc}",
+                   "分析の本体クエリが失敗しています。この行をそのまま報告してください。"
+                   "マイグレーション直後なら kaigyou-etl migrate の再実行で直ることがあります。")
+        return
+
+    report.add("GET /api/candidate-analysis", OK,
+               f"半径1km で人口 {row.get('population') or 0:,.0f} 人 / "
+               f"歯科 {row.get('facility_count') or 0} 件")
+
 
 # ----------------------------------------------------------------------- run
 def run() -> Report:

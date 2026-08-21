@@ -122,6 +122,56 @@ def health() -> dict[str, object]:
     }
 
 
+#: What a failed connection is *about*, in terms that give away nothing. The
+#: raw message can name the host, the role and the database; the category
+#: cannot, and it is what decides the next move anyway.
+_CONNECTION_CATEGORIES = (
+    ("authentication", ("password authentication", "authentication failed",
+                        "no password supplied")),
+    ("credentials_rejected", ("tenant or user not found", "role ", "does not exist")),
+    ("host_unreachable", ("getaddrinfo", "name or service not known",
+                          "could not translate", "network is unreachable",
+                          "connection refused")),
+    ("timeout", ("timeout", "timed out")),
+    ("too_many_connections", ("too many clients", "remaining connection slots")),
+)
+
+
+@app.get("/health/db", tags=["meta"])
+@app.get("/api/health/db", tags=["meta"])
+def health_db() -> dict[str, object]:
+    """Whether the database actually answers, said out loud on a public URL.
+
+    /api/health deliberately does not connect, so it stays truthful when the
+    database is the problem -- but that leaves "every endpoint returns 500"
+    with nowhere to look, because a deployment withholds its exception text on
+    purpose. The commonest cause is the least interesting one: a rotated
+    password that was updated in one place and not the other, which from the
+    browser is indistinguishable from a broken migration.
+
+    So: connect, and report the *category* of the failure. No message, no host,
+    no role, no credentials -- "authentication" is enough to know it is the
+    connection string and not the schema.
+    """
+    from kaigyou_core.db import connect
+
+    if not os.getenv("DATABASE_URL"):
+        return {"connected": False, "reason": "database_url_not_set"}
+    try:
+        with connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 - health must not raise
+        log.exception("health check could not reach the database")
+        lowered = str(exc).lower()
+        reason = next((name for name, needles in _CONNECTION_CATEGORIES
+                       if any(n in lowered for n in needles)), "other")
+        return {"connected": False, "reason": reason,
+                "error_type": type(exc).__name__}
+    return {"connected": True}
+
+
 # --------------------------------------------------------------- web client
 def web_dist() -> Path:
     """Where the built web client lives, if it was shipped alongside the API."""

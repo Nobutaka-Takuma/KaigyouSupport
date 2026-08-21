@@ -258,6 +258,7 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | `/api/health` が `config_found: false` | `config/*.yaml` が関数に同梱されていない | `vercel.json` の `functions."api/index.py".includeFiles` が `config/**` になっているか確認 |
 | `/api/health` が `database_pooled: false` | Vercel で Direct connection (5432) を使っている | Transaction pooler (6543) の接続文字列に変更して再デプロイ |
 | `prepared statement "_pg3_0" does not exist` | プーラ経由なのにプリペアドステートメントが有効 | 通常は自動判定されます。判定が外れる接続文字列なら `KAIGYOU_DB_PREPARE=off` を設定 |
+| API が全部 500、`/api/health` は 200。地図に点が1つも出ない | `DATABASE_URL` が古い（Supabase でパスワードを変更したのに Vercel 側を更新していない、等）| `/api/health/db` を開いてください。`{"connected":false,"reason":"authentication"}` なら接続文字列です。Vercel の Settings → Environment Variables を更新し、**再デプロイ**します（環境変数の変更だけでは反映されません）|
 | API が全部 500、`/api/health` は 200 | `DATABASE_URL` が未設定か誤り | `/api/health` の `database_url_set` を確認。設定後は**再デプロイが必要** |
 | `remaining connection slots are reserved` | Direct connection (5432) を Vercel で使っている | Transaction pooler (6543) に変更 |
 | 地図は出るが灰色一色 | `VITE_RASTER_TILES` 未設定 | 設定して**再デプロイ** |
