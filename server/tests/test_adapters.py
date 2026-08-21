@@ -502,3 +502,74 @@ def test_a_local_input_is_preferred_over_downloading(tmp_path):
     artifact = adapter.download()
     assert artifact.exists()
     assert artifact.read_bytes() == (CLINIC_FILE).read_bytes()
+
+
+# ------------------------------------------- 経済センサス メッシュ（従業者数）
+BUSINESS_FIXTURE = FIXTURES / "estat_business_mesh.txt"
+
+
+def business_adapter(tmp_path, overrides=None):
+    return build("estat_business_mesh", tmp_path, overrides)
+
+
+def test_workers_and_establishments_come_from_the_configured_columns(tmp_path):
+    """The two blocks are indistinguishable by label; only the column id says.
+
+    The published table repeats the same 21 industry names twice -- first
+    counting establishments, then the people in them. Reading the wrong block
+    silently turns 400 shops into 400 workers.
+    """
+    adapter = business_adapter(tmp_path)
+    records = {r["mesh_code"]: r for r in adapter.transform(BUSINESS_FIXTURE)}
+
+    office = records["533946113"]
+    assert office["establishments"] == 400
+    assert office["workers"] == 6000
+    assert office["industry_workers"]["wholesale_retail"] == 1500
+    assert office["industry_establishments"]["wholesale_retail"] == 100
+
+
+def test_the_resolution_comes_from_the_code_not_a_constant(tmp_path):
+    adapter = business_adapter(tmp_path)
+    sizes = {r["mesh_code"]: r["mesh_size_m"] for r in adapter.transform(BUSINESS_FIXTURE)}
+    assert sizes["533946113"] == 500   # 9 digits
+    assert sizes["53394611"] == 1000   # 8 digits
+
+
+def test_validate_reports_the_totals_that_will_load(tmp_path):
+    """Totals cover loadable rows only, so they compare against published ones."""
+    facts = business_adapter(tmp_path).validate(BUSINESS_FIXTURE)
+    assert facts["workers_total"] == 6000 + 900 + 700
+    assert facts["establishments_total"] == 400 + 120 + 50
+    assert facts["invalid_mesh_codes"] == 1        # BAD_CODE
+    assert facts["loadable_rows"] == 3
+
+
+def test_swapped_columns_are_refused_rather_than_loaded(tmp_path):
+    """Establishments read as workers gives under one person per workplace.
+
+    This is the failure the file invites, and it is invisible afterwards: the
+    map still draws, the numbers are just wrong by a factor of fifteen.
+    """
+    swapped = {"columns": {"mesh_code": ["KEY_CODE"],
+                           "establishments": ["T001147022"],   # <- the worker column
+                           "workers": ["T001147001"]}}         # <- the establishment one
+    with pytest.raises(AcquisitionError) as exc:
+        business_adapter(tmp_path, swapped).validate(BUSINESS_FIXTURE)
+    assert "swapped" in str(exc.value)
+
+
+def test_a_column_id_that_is_not_in_the_file_is_named(tmp_path):
+    """A release that renumbers its columns should say so, not load zeroes."""
+    with pytest.raises(AcquisitionError) as exc:
+        business_adapter(tmp_path, {"columns": {
+            "mesh_code": ["KEY_CODE"], "workers": ["T999999999"]}}).validate(BUSINESS_FIXTURE)
+    assert "T999999999" in str(exc.value)
+
+
+def test_industries_missing_from_the_file_are_reported_not_fatal(tmp_path):
+    """Divisions vary between releases; their absence is worth noting only."""
+    facts = business_adapter(tmp_path, {
+        "industry_columns": {"nonexistent": ["T001147900", "T001147901"]}}).validate(
+            BUSINESS_FIXTURE)
+    assert facts["industries_not_in_file"] == ["nonexistent"]

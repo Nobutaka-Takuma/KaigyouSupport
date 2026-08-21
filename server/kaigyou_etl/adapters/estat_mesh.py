@@ -37,8 +37,14 @@ from kaigyou_etl.adapters._util import (
 from kaigyou_etl.adapters.base import SourceAdapter
 
 
-class EStatMeshAdapter(SourceAdapter):
-    target_tables = ("population_mesh",)
+class EStatTableReader:
+    """Reading an e-Stat 統計GIS table, independent of which table it is.
+
+    The bulk download is a zip of one or more CSVs keyed by mesh code, in
+    Shift-JIS, with a label row under the header. Several statistics ship in
+    exactly this shape -- population, workers -- so the reading lives here and
+    the adapters differ only in what the columns mean.
+    """
 
     # ------------------------------------------------------------- artefacts
     def _csv_texts(self, artifact: Path, encoding: str | None = None) -> list[str]:
@@ -64,6 +70,10 @@ class EStatMeshAdapter(SourceAdapter):
         if not rows:
             raise AcquisitionError(ERROR_EMPTY, f"{artifact.name} contains no data rows")
         return headers, rows
+
+
+class EStatMeshAdapter(EStatTableReader, SourceAdapter):
+    target_tables = ("population_mesh",)
 
     # -------------------------------------------------------------- pipeline
     def validate(self, artifact: Path) -> dict[str, Any]:

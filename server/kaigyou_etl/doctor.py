@@ -158,6 +158,7 @@ def _check_migrations(report: Report, conn: Any) -> bool:
 TABLES = (
     ("facilities", "歯科医院"),
     ("population_mesh", "人口メッシュ"),
+    ("mesh_business", "事業所・従業者メッシュ"),
     ("stations", "駅"),
     ("municipalities", "行政区域"),
 )

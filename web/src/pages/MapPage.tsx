@@ -30,7 +30,7 @@ const EMPTY_RESPONSE = {
   truncated: false,
 };
 
-type MeshMetric = "population" | "overall_score";
+type MeshMetric = "population" | "workers" | "overall_score";
 
 interface LayerState {
   municipalities: boolean;
@@ -282,6 +282,19 @@ export function MapPage() {
               0, "#3b4cc0", 25, "#6f8fd6", 50, "#d9d9d9", 75, "#e88b6a", 100, "#b40426",
             ],
           ] as never)
+        : meshMetric === "workers"
+        ? ([
+            // Warm ramp, to read as the daytime counterpart of the blue
+            // residential one. Null (no economic census row for this mesh) is
+            // grey: unknown, not zero.
+            "case",
+            ["==", ["get", "workers"], null],
+            "#e5e7eb",
+            [
+              "interpolate", ["linear"], ["coalesce", ["get", "workers"], 0],
+              0, "#fff7ec", 500, "#fdd49e", 3000, "#fc8d59", 12000, "#d7301f", 40000, "#7f0000",
+            ],
+          ] as never)
         : ([
             "interpolate", ["linear"], ["coalesce", ["get", "population"], 0],
             0, "#f7fbff", 2000, "#c6dbef", 8000, "#6baed6", 20000, "#2171b5", 40000, "#08306b",
@@ -422,7 +435,8 @@ export function MapPage() {
           メッシュ表示
           <select value={meshMetric} onChange={(e) => setMeshMetric(e.target.value as MeshMetric)}>
             <option value="overall_score">候補地スコア</option>
-            <option value="population">人口</option>
+            <option value="population">人口（夜）</option>
+            <option value="workers">従業者数（昼）</option>
           </select>
         </label>
 
@@ -494,7 +508,16 @@ export function MapPage() {
           <div className="map__legend">
             <span className="dot dot--clinic" /> 歯科医院
             <span className="dot dot--station" /> 駅
-            <span className="ramp" /> {meshMetric === "overall_score" ? "スコア低→高" : "人口少→多"}
+            <span
+              className={
+                meshMetric === "overall_score" ? "ramp" : `ramp ramp--${meshMetric}`
+              }
+            />{" "}
+            {meshMetric === "overall_score"
+              ? "スコア低→高"
+              : meshMetric === "workers"
+              ? "従業者少→多"
+              : "人口少→多"}
           </div>
         </div>
 

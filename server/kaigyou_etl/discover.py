@@ -30,6 +30,7 @@ class Discovery:
     clinics: Path | None = None
     mesh_current: Path | None = None
     mesh_baseline: Path | None = None
+    mesh_business: Path | None = None
     stations: Path | None = None
     municipalities: Path | None = None
     unmatched: list[Path] = field(default_factory=list)
@@ -48,11 +49,17 @@ class Discovery:
             out.append("行政区域 N03 zip")
         return out
 
+    @property
+    def optional_missing(self) -> list[str]:
+        """Datasets that improve the analysis but are not required for it."""
+        return [] if self.mesh_business else ["経済センサス メッシュ（事業所・従業者数）"]
+
     def as_dict(self) -> dict[str, str | None]:
         return {
             "clinics": str(self.clinics) if self.clinics else None,
             "mesh_current": str(self.mesh_current) if self.mesh_current else None,
             "mesh_baseline": str(self.mesh_baseline) if self.mesh_baseline else None,
+            "mesh_business": str(self.mesh_business) if self.mesh_business else None,
             "stations": str(self.stations) if self.stations else None,
             "municipalities": str(self.municipalities) if self.municipalities else None,
         }
@@ -92,6 +99,7 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
 
     clinic_spec = sources.get("mhlw_dental_clinics", {})
     mesh_spec = sources.get("estat_population_mesh", {})
+    business_spec = sources.get("estat_business_mesh", {})
     baseline_spec = (mesh_spec.get("growth_baseline") or {})
 
     clinic_keys = set(_candidates(clinic_spec, "facility_id")) | set(
@@ -102,6 +110,7 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
         str(v).strip().lower()
         for v in ((baseline_spec.get("columns") or {}).get("population") or [])
     }
+    mesh_business_keys = set(_candidates(business_spec, "workers"))
 
     for path in sorted(p for p in directory.iterdir()
                        if p.is_file() and p.suffix.lower() in DATA_SUFFIXES):
@@ -123,10 +132,15 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
         if header & mesh_code_keys:
             # Both census rounds share KEY_CODE; the statistics table id in the
             # column names is what separates them.
+            # All the mesh tables share KEY_CODE; the statistics table id in
+            # the column names is what separates population from workers, and
+            # this census round from the previous one.
             if header & mesh_current_keys:
                 _assign(found, "mesh_current", path)
             elif header & mesh_baseline_keys:
                 _assign(found, "mesh_baseline", path)
+            elif header & mesh_business_keys:
+                _assign(found, "mesh_business", path)
             else:
                 found.unmatched.append(path)
                 found.notes.append(
@@ -141,6 +155,11 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
     if found.mesh_current is None and found.mesh_baseline is not None:
         found.notes.append(
             "メッシュファイルが基準年のものだけです。最新年のファイルも置いてください。"
+        )
+    if found.mesh_business is None:
+        found.notes.append(
+            "経済センサスのメッシュファイルがないため、従業者数（昼の需要）は"
+            "算出されません。夜間人口のみの評価になります。"
         )
     if found.mesh_current is not None and found.mesh_baseline is None:
         found.notes.append(
@@ -172,6 +191,7 @@ def describe(found: Discovery) -> Iterable[str]:
         "clinics": "歯科診療所",
         "mesh_current": "人口メッシュ（最新年）",
         "mesh_baseline": "人口メッシュ（基準年）",
+        "mesh_business": "事業所・従業者メッシュ",
         "stations": "駅別乗降客数",
         "municipalities": "行政区域",
     }

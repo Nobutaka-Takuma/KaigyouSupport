@@ -18,15 +18,17 @@ from kaigyou_core import config as cfg
 ADAPTER_TABLES = {
     "mhlw_clinics": "facilities",
     "estat_mesh": "population_mesh",
+    "estat_business_mesh": "mesh_business",
     "mlit_stations": "stations",
     "mlit_municipalities": "municipalities",
 }
 
-_TABLES = ("facilities", "population_mesh", "stations", "municipalities")
+_TABLES = ("facilities", "population_mesh", "mesh_business", "stations", "municipalities")
 
 _TABLE_LABELS = {
     "facilities": "歯科医院",
     "population_mesh": "人口メッシュ",
+    "mesh_business": "事業所・従業者メッシュ",
     "stations": "駅",
     "municipalities": "行政区域",
 }

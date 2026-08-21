@@ -126,6 +126,42 @@ sources:
         mesh_code:  ["KEY_CODE"]
         population: ["T000847001", "人口総数"]
 
+  estat_business_mesh:
+    adapter: estat_business_mesh
+    name: "経済センサス 500mメッシュ 事業所数・従業者数"
+    publisher: "総務省統計局・経済産業省 / e-Stat 統計GIS"
+    dataset_kind: official
+    homepage_url: "https://www.e-stat.go.jp/gis/statmap-search?type=1"
+    license: "政府統計の総合窓口（e-Stat）利用規約 / CC BY 4.0 相当"
+    # Same 統計GIS form as the population mesh, same file shape:
+    #
+    #   kaigyou-etl run estat_business_mesh --input tblT001147H13.txt
+    #
+    url: null
+    encoding: cp932
+    # CHECK THIS against the e-Stat download page you used. It is displayed to
+    # the reader as the survey date, so a wrong value here is a wrong claim on
+    # screen -- and the file itself carries no year.
+    source_date: 2021-06-01
+    # The table publishes the same 21 industry labels twice: establishments
+    # first, then the people working in them. Nothing in the file distinguishes
+    # them, so the column ids do. `validate` rejects a load where workers per
+    # establishment falls below one, which is what a swap looks like.
+    columns:
+      mesh_code:      ["KEY_CODE", "MESH_ID", "メッシュコード"]
+      establishments: ["T001147001"]          # Ａ～Ｓ全産業 事業所数
+      workers:        ["T001147022"]          # Ａ～Ｓ全産業 従業者数
+    # Divisions worth keeping per mesh. Not all 21: these are the ones that say
+    # something about who is on the street during the day. Stored as jsonb, not
+    # scored -- the MVP scores on the all-industry total only.
+    industry_columns:
+      secondary:          ["T001147003", "T001147024"]   # Ｃ～Ｅ 第2次産業
+      tertiary:           ["T001147007", "T001147028"]   # Ｆ～Ｓ 第3次産業
+      wholesale_retail:   ["T001147011", "T001147032"]   # Ｉ 卸売業，小売業
+      accommodation_food: ["T001147015", "T001147036"]   # Ｍ 宿泊業，飲食サービス業
+      education:          ["T001147017", "T001147038"]   # Ｏ 教育，学習支援業
+      health_welfare:     ["T001147018", "T001147039"]   # Ｐ 医療，福祉
+
   mlit_stations:
     adapter: mlit_stations
     name: "国土数値情報 駅別乗降客数（S12）"

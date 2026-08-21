@@ -73,8 +73,11 @@ export function PopulationTable({ analysis }: { analysis: CandidateAnalysis }) {
     ["15〜64歳", (r) => num(analysis.by_radius![r].working_age)],
     ["65歳以上", (r) => num(analysis.by_radius![r].elderly)],
     ["世帯数", (r) => num(analysis.by_radius![r].households)],
+    ["従業者数（昼）", (r) => num(analysis.by_radius![r].workers)],
+    ["事業所数", (r) => num(analysis.by_radius![r].establishments)],
     ["歯科医院数", (r) => num(analysis.by_radius![r].dental_clinics)],
     ["人口/歯科医院", (r) => num(analysis.by_radius![r].population_per_clinic)],
+    ["従業者/歯科医院", (r) => num(analysis.by_radius![r].workers_per_clinic)],
   ];
 
   return (

@@ -20,6 +20,7 @@ const ROWS: Row[] = [
   { label: "15〜64歳", value: (i, d) => num(d.locations[i].working_age), raw: (i, d) => d.locations[i].working_age, highlight: "high" },
   { label: "65歳以上", value: (i, d) => num(d.locations[i].elderly), raw: (i, d) => d.locations[i].elderly, highlight: "high" },
   { label: "世帯数", value: (i, d) => num(d.locations[i].households), raw: (i, d) => d.locations[i].households, highlight: "high" },
+  { label: "従業者数（昼）", value: (i, d) => num(d.locations[i].workers), raw: (i, d) => d.locations[i].workers, highlight: "high" },
   { label: "歯科医院数", value: (i, d) => num(d.locations[i].dental_clinics), raw: (i, d) => d.locations[i].dental_clinics, highlight: "low" },
   { label: "人口/歯科医院", value: (i, d) => num(d.locations[i].population_per_clinic), raw: (i, d) => d.locations[i].population_per_clinic, highlight: "high" },
   { label: "最寄歯科距離", value: (i, d) => distance(d.locations[i].nearest_clinic.distance_m), raw: (i, d) => d.locations[i].nearest_clinic.distance_m, highlight: "high" },

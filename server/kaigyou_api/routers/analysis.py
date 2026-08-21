@@ -25,7 +25,7 @@ from kaigyou_core.scoring import ScoringModel, scope_key
 
 router = APIRouter()
 
-ANALYSIS_TABLES = ["population_mesh", "facilities", "stations"]
+ANALYSIS_TABLES = ["population_mesh", "mesh_business", "facilities", "stations"]
 
 
 # Which score components each dataset feeds. Used to say precisely what is
@@ -34,6 +34,7 @@ ANALYSIS_TABLES = ["population_mesh", "facilities", "stations"]
 # meaningful even while the station data is still a placeholder.
 _DATASET_COMPONENTS = {
     "population_mesh": ("需要", "成長", "競合"),
+    "mesh_business": ("需要",),
     "facilities": ("競合",),
     "stations": ("アクセス",),
 }
@@ -97,19 +98,34 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         warnings.append("駅データが未取得のため、アクセス指標を算出できません。")
 
     # The census counts where people live, not where they are during business
-    # hours. In office and entertainment districts the two differ by an order
-    # of magnitude, and the population-per-clinic ratio understates demand
-    # badly there. Say so on the affected sites rather than in the footnotes.
+    # hours. In office and entertainment districts the two differ by an order of
+    # magnitude and the population-per-clinic ratio understates demand badly.
+    #
+    # What to say about that depends on whether the economic census is loaded.
+    # Warning that daytime demand is invisible, when it is sitting in the
+    # response, would be worse than saying nothing -- so the two cases are
+    # separated rather than the old text being left to go stale.
     population = metrics.get("population")
+    workers = metrics.get("workers")
     facility_count = metrics.get("facility_count") or 0
-    if population is not None and facility_count > 0:
-        per_clinic = population / facility_count
-        if per_clinic < 800 and facility_count >= 5:
+    resident_light = (population is not None and facility_count >= 5
+                      and population / facility_count < 800)
+
+    if workers is None:
+        if resident_light:
             warnings.append(
                 "人口は国勢調査の常住人口（夜間人口）です。この地点は歯科医院数に対して"
                 "常住人口が極端に少なく、オフィス街・繁華街の可能性があります。"
                 "昼間人口は含まれていないため、競合・需要スコアは実態を過小評価します。"
             )
+    elif population and workers / population >= 3:
+        warnings.append(
+            f"この地点は常住人口 {population:,.0f} 人に対して従業者 {workers:,.0f} 人"
+            f"（約{workers / population:.0f}倍）の就業地です。"
+            "需要スコアには従業者数を織り込んでいますが、"
+            "従業者数は昼間人口そのものではありません"
+            "（通学者・来街者は含まれません）。"
+        )
 
     return {
         "location": {"lat": lat, "lng": lng},
@@ -120,8 +136,13 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         "elderly": _round(metrics.get("age_65_plus")),
         "households": _round(metrics.get("households")),
         "population_growth": metrics.get("population_growth"),
+        # Daytime side. None when the economic census is not loaded, which the
+        # scoring layer treats as "unknown", not as "nobody works here".
+        "workers": _round(metrics.get("workers")),
+        "establishments": _round(metrics.get("establishments")),
         "dental_clinics": metrics.get("facility_count"),
         "population_per_clinic": _round(metrics.get("population_per_facility")),
+        "workers_per_clinic": _round(metrics.get("workers_per_facility")),
         "nearest_clinic": {
             "name": metrics.get("nearest_facility_name"),
             "distance_m": _round(metrics.get("nearest_facility_distance_m"), 1),
@@ -169,8 +190,13 @@ def candidate_analysis(
                 "working_age": _round(metrics.get("age_15_64")),
                 "elderly": _round(metrics.get("age_65_plus")),
                 "households": _round(metrics.get("households")),
+                # Daytime side. Null, not zero, when the economic census has not
+                # been loaded -- the UI shows a dash rather than an empty street.
+                "workers": _round(metrics.get("workers")),
+                "establishments": _round(metrics.get("establishments")),
                 "dental_clinics": metrics.get("facility_count"),
                 "population_per_clinic": _round(metrics.get("population_per_facility")),
+                "workers_per_clinic": _round(metrics.get("workers_per_facility")),
             }
         result["by_radius"] = by_radius
         result["clinic_counts"] = facility_counts(conn, lat, lng, model.radii, category)

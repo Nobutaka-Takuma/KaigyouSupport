@@ -25,6 +25,12 @@ DISTRIBUTION_METRICS = (
     "age_65_plus",
     "households",
     "population_per_facility",
+    # Daytime side: people at their place of work, and the workplaces
+    # themselves. Not 昼間人口 -- that also counts students and everyone else
+    # who travels in -- but the part of it published per mesh.
+    "workers",
+    "establishments",
+    "workers_per_facility",
 )
 
 
@@ -178,11 +184,15 @@ class ScoringModel:
                distributions: Mapping[str, Distribution]) -> ComponentScore:
         weights = self.profile.get("demand_weights", {})
         parts: dict[str, float | None] = {}
-        for metric in ("population", "age_0_14", "age_65_plus", "households"):
-            if metric in weights:
+        # Driven by the weights, not by a list in here: adding an input to a
+        # profile is a configuration change, which is the whole point of the
+        # weights living in a file. Growth is the exception -- it is a rate, so
+        # it is placed on its own configured scale rather than a percentile.
+        for metric in weights:
+            if metric == "population_growth":
+                parts[metric] = self._growth_value(m.get(metric))
+            elif metric in DISTRIBUTION_METRICS:
                 parts[metric] = self.normalize(metric, m.get(metric), distributions)
-        if "population_growth" in weights:
-            parts["population_growth"] = self._growth_value(m.get("population_growth"))
         missing = [k for k, v in parts.items() if v is None]
         value = _weighted(parts, weights, self.min_weight_coverage)
         note = None

@@ -178,16 +178,23 @@ def meshes(
         where.append(f"m.geom && {_BBOX_SQL}")
         params.extend(box)
 
-    join, select = "", ""
+    # Workers live in their own table with their own mesh set, so this is a
+    # LEFT JOIN on the code: a mesh with residents and no businesses keeps a
+    # null here rather than a zero it never reported.
+    join = """
+        LEFT JOIN mesh_business b
+               ON b.mesh_code = m.mesh_code AND b.mesh_size_m = m.mesh_size_m
+    """
+    select = ", b.workers, b.establishments"
     if profile:
-        join = """
+        join += """
             LEFT JOIN mesh_scores ms
                    ON ms.mesh_id = m.id AND ms.profile = %s
                   AND (%s::int IS NULL OR ms.radius_m = %s)
         """
-        select = (", ms.overall_score, ms.demand_score, ms.competition_score,"
-                  " ms.growth_score, ms.accessibility_score, ms.facility_count,"
-                  " ms.population_per_facility, ms.area_label")
+        select += (", ms.overall_score, ms.demand_score, ms.competition_score,"
+                   " ms.growth_score, ms.accessibility_score, ms.facility_count,"
+                   " ms.population_per_facility, ms.area_label")
         params = [profile, radius_m, radius_m] + params
 
     params.append(limit)
@@ -209,7 +216,7 @@ def meshes(
     return feature_collection(
         _features(rows),
         mesh_size_m=mesh_size_m,
-        provenance=provenance.for_tables(conn, ["population_mesh"]),
+        provenance=provenance.for_tables(conn, ["population_mesh", "mesh_business"]),
         truncated=len(rows) >= limit,
     )
 

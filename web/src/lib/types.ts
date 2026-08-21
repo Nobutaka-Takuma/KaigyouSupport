@@ -46,8 +46,12 @@ export interface RadiusMetrics {
   working_age: number | null;
   elderly: number | null;
   households: number | null;
+  /** 従業者数（経済センサス）。昼間人口そのものではなく、その最大の構成要素。 */
+  workers: number | null;
+  establishments: number | null;
   dental_clinics: number | null;
   population_per_clinic: number | null;
+  workers_per_clinic: number | null;
 }
 
 export interface CandidateAnalysis {
@@ -60,8 +64,11 @@ export interface CandidateAnalysis {
   elderly: number | null;
   households: number | null;
   population_growth: number | null;
+  workers: number | null;
+  establishments: number | null;
   dental_clinics: number | null;
   population_per_clinic: number | null;
+  workers_per_clinic: number | null;
   nearest_clinic: { name: string | null; distance_m: number | null };
   nearest_station: {
     name: string | null;

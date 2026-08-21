@@ -208,9 +208,18 @@ a { color: var(--accent); }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot--clinic { background: #b91c1c; }
 .dot--station { background: #0f766e; }
+/* One class per metric, because a legend that does not match the map is worse
+   than no legend: the reader trusts it and misreads the colours. Each gradient
+   is the same ramp the layer paints with. */
 .ramp {
   width: 70px; height: 9px; display: inline-block; border-radius: 2px;
   background: linear-gradient(90deg, #3b4cc0, #6f8fd6, #d9d9d9, #e88b6a, #b40426);
+}
+.ramp--population {
+  background: linear-gradient(90deg, #f7fbff, #c6dbef, #6baed6, #2171b5, #08306b);
+}
+.ramp--workers {
+  background: linear-gradient(90deg, #fff7ec, #fdd49e, #fc8d59, #d7301f, #7f0000);
 }
 
 .panel {

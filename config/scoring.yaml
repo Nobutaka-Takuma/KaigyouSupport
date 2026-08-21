@@ -38,12 +38,19 @@ profiles:
 
     # --- Demand ------------------------------------------------------------
     # Each component is normalised independently, then weighted.
+    # `workers` is 従業者数 from the economic census -- people at their place of
+    # work. It is deliberately not added to `population`: a commuter is one
+    # person who may visit a dentist near work or near home, not two people, so
+    # summing them would double-count. Giving it its own weight says how much a
+    # daytime head is worth relative to a resident one, which is the actual
+    # question, and leaves it adjustable without touching code.
     demand_weights:
-      population: 0.35
-      age_0_14: 0.15
-      age_65_plus: 0.15
-      households: 0.20
-      population_growth: 0.15
+      population: 0.28
+      workers: 0.20
+      age_0_14: 0.12
+      age_65_plus: 0.12
+      households: 0.16
+      population_growth: 0.12
 
     # --- Competition -------------------------------------------------------
     # Base metric: catchment population per facility. Higher = fewer clinics
@@ -95,10 +102,50 @@ profiles:
       accessibility: 0.10
     demand_weights:
       population: 0.20
-      age_0_14: 0.40
+      workers: 0.05        # children do not commute to offices
+      age_0_14: 0.38
       age_65_plus: 0.05
-      households: 0.20
+      households: 0.17
       population_growth: 0.15
+    competition:
+      metric: population_per_facility
+      zero_facility_score: 95
+      zero_population_score: 0
+      cap: 20000
+    growth:
+      metric: population_growth
+      low: -0.08
+      high: 0.12
+    accessibility:
+      weights:
+        station_distance: 0.6
+        daily_passengers: 0.4
+      distance_best_m: 200
+      distance_worst_m: 2000
+      passengers_scale: log10
+      passengers_min: 1000
+      passengers_max: 500000
+
+  # The opposite hypothesis to `pediatric`, and the reason the worker data was
+  # loaded: a practice aimed at office workers, where the catchment fills up on
+  # weekday lunchtimes and empties at night. Nothing here is calibrated either
+  # -- it is a second opinion, not a better one.
+  office:
+    label: "オフィス街型（暫定モデル）"
+    description: "従業者数を重視した仮説重み。昼間人口の代理として経済センサスの従業者数を使用。"
+    overall_weights:
+      demand: 0.40
+      competition: 0.30
+      growth: 0.10
+      accessibility: 0.20
+    demand_weights:
+      population: 0.10
+      workers: 0.45
+      age_0_14: 0.02
+      age_65_plus: 0.03
+      households: 0.05
+      population_growth: 0.10
+      establishments: 0.25
     competition:
       metric: population_per_facility
       zero_facility_score: 95

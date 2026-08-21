@@ -182,3 +182,55 @@ def test_a_degenerate_distribution_is_not_used():
     flat = {"population": Distribution(metric="population", p05=5.0, p95=5.0,
                                        sample_count=100)}
     assert model().normalize("population", 5.0, flat) is None
+
+
+# ------------------------------------------------- daytime (worker) demand
+def _model(demand_weights):
+    from kaigyou_core.scoring import ScoringModel
+
+    return ScoringModel({
+        "active_profile": "p",
+        "normalization": {"method": "minmax_p05_p95", "min_weight_coverage": 0.5},
+        "profiles": {"p": {"label": "t", "overall_weights": {"demand": 1.0},
+                           "demand_weights": demand_weights}},
+    }, "p")
+
+
+def _dists(*metrics, p05=100, p95=50000):
+    """Reuses `dist` above: a Distribution without a sample count is unusable,
+    which is correct behaviour and makes for a confusing test failure."""
+    return {m: dist(m, p05, p95) for m in metrics}
+
+
+def test_workers_raise_demand_where_residents_are_few():
+    """The point of loading the economic census.
+
+    Two mirrored trade areas, one an office district. Before workers were an
+    input the second scored as though nobody was there at all.
+    """
+    model = _model({"population": 0.5, "workers": 0.5})
+    dists = _dists("population", "workers")
+
+    residential = model.demand({"population": 25000, "workers": 500}, dists)
+    office = model.demand({"population": 500, "workers": 25000}, dists)
+    assert office.value is not None and office.value > 20
+    assert office.value == pytest.approx(residential.value)
+
+
+def test_demand_survives_the_economic_census_being_absent():
+    """Workers null means "unknown", never "nobody works here"."""
+    model = _model({"population": 0.7, "workers": 0.3})
+    dists = _dists("population", "workers")
+
+    without = model.demand({"population": 25000}, dists)
+    assert without.value is not None          # 0.7 of the weight is still present
+    assert "workers" in without.missing
+    assert without.value == model.demand({"population": 25000, "workers": None},
+                                         dists).value
+
+
+def test_a_profile_can_add_an_input_without_touching_code():
+    """The demand loop follows the configured weights, not a list in the code."""
+    model = _model({"establishments": 1.0})
+    assert model.demand({"establishments": 1000},
+                        _dists("establishments", p05=10, p95=1000)).value == 100
