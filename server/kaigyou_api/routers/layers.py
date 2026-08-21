@@ -171,10 +171,14 @@ def meshes(
     profile is named -- the precomputed score for the heat map."""
     from kaigyou_core.analysis import resolve_mesh_size
 
-    mesh_size_m = resolve_mesh_size(conn, mesh_size_m)
+    box = parse_bbox(bbox)
+    # From the viewport, not from the whole database. Two prefectures can be
+    # published at different resolutions, and one answer for the lot draws one
+    # of them and leaves the other blank as you pan into it.
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, bbox=box) or \
+        resolve_mesh_size(conn, mesh_size_m)
     where = ["m.mesh_size_m = %s"]
     params: list[Any] = [mesh_size_m]
-    box = parse_bbox(bbox)
     if box:
         where.append(f"m.geom && {_BBOX_SQL}")
         params.extend(box)

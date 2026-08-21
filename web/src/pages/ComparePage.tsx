@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { useCandidates, MAX_CANDIDATES } from "../lib/candidates";
-import { usePrefecture } from "../lib/prefecture";
 import { distance, num, percent, score, scoreColor } from "../lib/format";
 import type { CompareResponse, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList, ProvisionalBadge } from "../components/DataNotices";
@@ -40,7 +39,6 @@ const SCORE_ROWS: Row[] = [
 
 export function ComparePage() {
   const { points, remove, clear } = useCandidates();
-  const { code: prefecture } = usePrefecture();
   const [meta, setMeta] = useState<Meta | null>(null);
   const [profile, setProfile] = useState("");
   const [radius, setRadius] = useState(1000);
@@ -68,7 +66,6 @@ export function ComparePage() {
         labels: points.map((p) => p.label).join(";"),
         radius,
         profile: profile || undefined,
-        prefecture_code: prefecture ?? undefined,
       })
       .then((res) => !cancelled && (setData(res), setError(null)))
       .catch((e) => !cancelled && setError(e.message))
@@ -76,7 +73,7 @@ export function ComparePage() {
     return () => {
       cancelled = true;
     };
-  }, [points, radius, profile, prefecture]);
+  }, [points, radius, profile]);
 
   const best = (row: Row): number | null => {
     if (!data || !row.raw || !row.highlight) return null;

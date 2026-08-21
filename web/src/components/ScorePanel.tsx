@@ -66,13 +66,23 @@ export function ScorePanel({ analysis }: { analysis: CandidateAnalysis }) {
 
 export function CatchmentNote({ analysis }: { analysis: CandidateAnalysis }) {
   /** Which shape the figures were measured in. Without it they are ambiguous. */
-  if (!analysis.catchment_kind) return null;
+  if (!analysis.catchment_kind && !analysis.prefecture_name) return null;
   const walk = analysis.catchment_kind === "walk";
   return (
     <p className="muted small catchment-note">
-      商圏の形: <strong>{walk ? "徒歩圏（街路網に沿った距離）" : "円（直線距離）"}</strong>
-      {analysis.catchment_area_km2 != null && ` ／ 面積 ${analysis.catchment_area_km2} km²`}
-      {walk && "。川・線路・幹線道路による分断を反映しています。"}
+      {/* Which prefecture this point was analysed as. The map's selector can
+          say one thing while the click is somewhere else entirely, and a score
+          normalised in another prefecture is not the score for this one. */}
+      {analysis.prefecture_name && (
+        <>分析対象: <strong>{analysis.prefecture_name}</strong>（スコアは同一都道府県内で正規化）<br /></>
+      )}
+      {analysis.catchment_kind && (
+        <>
+          商圏の形: <strong>{walk ? "徒歩圏（街路網に沿った距離）" : "円（直線距離）"}</strong>
+          {analysis.catchment_area_km2 != null && ` ／ 面積 ${analysis.catchment_area_km2} km²`}
+          {walk && "。川・線路・幹線道路による分断を反映しています。"}
+        </>
+      )}
     </p>
   );
 }

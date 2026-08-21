@@ -341,6 +341,55 @@ def _check_api_surface(report: Report, conn: Any) -> None:
     _check_the_analysis_itself(report, conn)
 
 
+def _check_prefectures(report: Report, conn: Any) -> None:
+    """What is loaded, per prefecture, and at what resolution.
+
+    Two prefectures published at different mesh resolutions is not an error and
+    is invisible until it produces "no population here" in the middle of a city:
+    a point analysed under one prefecture's resolution finds nothing in the
+    other's meshes. Printing both makes the mismatch a line of output instead
+    of a mystery.
+    """
+    from kaigyou_core.db import fetch_one
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT prefecture_code AS code, mesh_size_m AS size,
+                   count(*)::int AS meshes, sum(COALESCE(population, 0))::bigint AS pop
+            FROM population_mesh
+            GROUP BY prefecture_code, mesh_size_m
+            ORDER BY prefecture_code, mesh_size_m
+        """)
+        rows = cur.fetchall()
+    if not rows:
+        return
+
+    from kaigyou_core.analysis import prefecture_name
+
+    for row in rows:
+        name = prefecture_name(conn, row["code"])
+        scored = fetch_one(conn, """
+            SELECT count(*) AS n FROM mesh_scores ms
+            JOIN population_mesh pm ON pm.id = ms.mesh_id
+            WHERE pm.prefecture_code = %s
+        """, (row["code"],)) or {"n": 0}
+        detail = (f"{row['meshes']:,}メッシュ / {row['size']}m / "
+                  f"人口 {row['pop']:,} / スコア済 {scored['n']:,}")
+        if scored["n"]:
+            report.add(f"  {name}({row['code']})", OK, detail)
+        else:
+            report.add(f"  {name}({row['code']})", WARN, detail + "（ランキング・ヒートマップが空）",
+                       f"kaigyou-etl refresh-stats --prefecture {row['code']} と "
+                       f"compute-scores --all-profiles --prefecture {row['code']} を実行してください。")
+
+    sizes = {row["size"] for row in rows}
+    if len(sizes) > 1:
+        report.add("メッシュ解像度", WARN,
+                   f"都道府県によって異なります: {sorted(sizes)}",
+                   "解像度が違うと、地点分析は地点のある都道府県の解像度で行われます。"
+                   "揃えたい場合は e-Stat で同じ解像度のファイルを取り直してください。")
+
+
 def _check_the_analysis_itself(report: Report, conn: Any) -> None:
     """Run the query the map runs, at a point where there is data.
 
@@ -397,6 +446,7 @@ def run() -> Report:
         if not _check_migrations(report, conn):
             return report
         _check_data(report, conn)
+        _check_prefectures(report, conn)
         _check_scores(report, conn)
         _check_walk_network(report, conn)
         _check_api_surface(report, conn)

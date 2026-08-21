@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 import psycopg
 
+from kaigyou_core.db import table_exists
 from kaigyou_core.scoring import Distribution, ScoringModel, distributions_from_rows, scope_key
 
 DEFAULT_CATEGORY = "dental_clinic"
@@ -88,6 +89,52 @@ def loaded_prefectures(conn: psycopg.Connection) -> list[dict[str, Any]]:
     } for row in rows]
 
 
+def prefecture_at(conn: psycopg.Connection, lat: float, lng: float) -> str | None:
+    """Which prefecture a point is in, according to the loaded data.
+
+    A point analysis is about the point. Taking the prefecture from a dropdown
+    instead means clicking in Tokyo while the selector says Shizuoka analyses
+    Tokyo against Shizuoka's mesh resolution and Shizuoka's normalisation --
+    which produces "no population here" for the middle of Chiyoda and gives
+    the reader no way to see why.
+
+    Boundaries first, because they are the published answer. Where they are
+    not loaded, the nearest mesh within 5km serves: it is the same question
+    asked of a coarser map.
+    """
+    with conn.cursor() as cur:
+        if table_exists(conn, "municipalities"):
+            cur.execute(
+                """
+                SELECT prefecture_code AS code FROM municipalities
+                WHERE geom && ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                  AND ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                LIMIT 1
+                """, (lng, lat, lng, lat))
+            row = cur.fetchone()
+            if row:
+                return row["code"]
+
+        cur.execute(
+            """
+            SELECT prefecture_code AS code FROM population_mesh
+            WHERE ST_DWithin(centroid::geography,
+                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, 5000)
+            ORDER BY centroid::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+            LIMIT 1
+            """, (lng, lat, lng, lat))
+        row = cur.fetchone()
+    return row["code"] if row else None
+
+
+def prefecture_name(conn: psycopg.Connection, code: str) -> str:
+    """The published spelling where boundaries are loaded, else a known name."""
+    for entry in loaded_prefectures(conn):
+        if entry["code"] == code:
+            return entry["name"]
+    return _PREFECTURE_NAMES.get(code, code)
+
+
 def default_prefecture(conn: psycopg.Connection, requested: str | None = None) -> str:
     """The prefecture to analyse when the caller did not name one.
 
@@ -103,12 +150,19 @@ def default_prefecture(conn: psycopg.Connection, requested: str | None = None) -
 
 
 def resolve_mesh_size(conn: psycopg.Connection, requested: int | None = None,
-                      prefecture_code: str | None = None) -> int | None:
+                      prefecture_code: str | None = None,
+                      bbox: Sequence[float] | None = None) -> int | None:
     """The mesh resolution to analyse at.
 
     An explicit request wins. Otherwise pick the resolution that actually
-    carries the most population in the database, so the analysis follows the
-    data rather than a constant.
+    carries the most population in the scope asked about, so the analysis
+    follows the data rather than a constant.
+
+    Scope matters once there is more than one prefecture: two of them can be
+    published at different resolutions, and a single database-wide answer then
+    draws one prefecture's meshes and none of the other's. Where the caller
+    knows which part of the map it is asking about -- a prefecture, or a
+    viewport -- it says so.
     """
     if requested:
         return requested
@@ -120,12 +174,16 @@ def resolve_mesh_size(conn: psycopg.Connection, requested: int | None = None,
         ORDER BY sum(COALESCE(population, 0)) DESC, mesh_size_m
         LIMIT 1
     """
-    params: tuple = ()
+    clauses: list[str] = []
+    params_list: list[Any] = []
     if prefecture_code:
-        sql = sql.format(where="WHERE prefecture_code = %s")
-        params = (prefecture_code,)
-    else:
-        sql = sql.format(where="")
+        clauses.append("prefecture_code = %s")
+        params_list.append(prefecture_code)
+    if bbox and len(bbox) == 4:
+        clauses.append("geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)")
+        params_list.extend(float(v) for v in bbox)
+    sql = sql.format(where=("WHERE " + " AND ".join(clauses)) if clauses else "")
+    params = tuple(params_list)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         row = cur.fetchone()

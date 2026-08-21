@@ -20,6 +20,8 @@ from kaigyou_core.analysis import (
     analyze_point,
     catchment_geojson,
     default_prefecture,
+    prefecture_at,
+    prefecture_name,
     facility_counts,
     load_distributions,
     resolve_mesh_size,
@@ -187,6 +189,10 @@ def candidate_analysis(
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    # The point decides, not the map's dropdown. Analysing a Chiyoda click
+    # against Shizuoka's mesh resolution answers "no population here" for one
+    # of the densest places in the country, and nothing on screen explains why.
+    prefecture_code = prefecture_code or prefecture_at(conn, lat, lng)
     prefecture_code = default_prefecture(conn, prefecture_code)
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     result = _analyze(conn, lat, lng, radius, model, category, mesh_size_m,
@@ -195,6 +201,7 @@ def candidate_analysis(
     # Which prefecture's normalisation these scores came from. Without it the
     # reader cannot tell that a 70 in Shizuoka is not a 70 in Tokyo.
     result["prefecture_code"] = prefecture_code
+    result["prefecture_name"] = prefecture_name(conn, prefecture_code)
     # The shape itself, so the map draws what the numbers were measured in
     # rather than a circle of its own.
     result["catchment"] = catchment_geojson(conn, lat, lng, radius, catchment)
@@ -333,8 +340,7 @@ def compare(
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
-    prefecture_code = default_prefecture(conn, prefecture_code)
-    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
+    mesh_size_m_requested = mesh_size_m
     parsed: list[tuple[float, float]] = []
     for chunk in points.split(";"):
         chunk = chunk.strip()
@@ -354,9 +360,28 @@ def compare(
     names = [n.strip() for n in (labels or "").split(";")] if labels else []
     results = []
     for i, (lat, lng) in enumerate(parsed):
-        item = _analyze(conn, lat, lng, radius, model, category, mesh_size_m, prefecture_code)
+        # Per point, for the same reason as the single-point analysis: two
+        # candidates can sit in different prefectures, and each is measured
+        # against the data around it. The response says which was used, since
+        # scores normalised in different prefectures are not comparable -- and
+        # that is exactly what this screen invites the reader to do.
+        code = default_prefecture(conn, prefecture_code or prefecture_at(conn, lat, lng))
+        size = resolve_mesh_size(conn, mesh_size_m_requested, code)
+        item = _analyze(conn, lat, lng, radius, model, category, size, code)
         item["label"] = names[i] if i < len(names) and names[i] else f"候補地 {chr(65 + i)}"
+        item["prefecture_code"] = code
+        item["prefecture_name"] = prefecture_name(conn, code)
+        item["mesh_size_m"] = size
         results.append(item)
+
+    scopes = {r["prefecture_code"] for r in results}
+    if len(scopes) > 1:
+        cross = "、".join(sorted({r["prefecture_name"] for r in results}))
+        for item in results:
+            item.setdefault("warnings", []).insert(0, (
+                f"比較している地点が複数の都道府県にまたがっています（{cross}）。"
+                "スコアは都道府県ごとに正規化しているため、スコアどうしの比較はできません。"
+                "人口・従業者数・歯科医院数などの実数は比較できます。"))
 
     prov = provenance.for_tables(conn, ANALYSIS_TABLES)
     dataset_warnings = _dataset_warnings(prov)
@@ -365,7 +390,9 @@ def compare(
 
     return {
         "radius_m": radius,
-        "mesh_size_m": mesh_size_m,
+        # Per point now; the top-level value is what the caller asked for, or
+        # the resolution of the first point when they asked for nothing.
+        "mesh_size_m": mesh_size_m_requested or (results[0]["mesh_size_m"] if results else None),
         "locations": results,
         "model": model.describe(),
         "provenance": prov,

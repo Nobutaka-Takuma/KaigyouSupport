@@ -68,6 +68,7 @@ export interface CandidateAnalysis {
   catchment_kind: "circle" | "walk" | null;
   /** どの都道府県の正規化で出したスコアか。県をまたぐ比較はできない。 */
   prefecture_code?: string;
+  prefecture_name?: string;
   catchment_area_km2: number | null;
   /** 実際に使われた商圏ポリゴン。地図はこれを描く（自前で円を描かない）。 */
   catchment: { geometry: GeoJSON.Geometry; kind: "circle" | "walk" } | null;

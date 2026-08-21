@@ -374,16 +374,18 @@ export function MapPage() {
     setAnalysing(true);
     setError(null);
     api
+      // No prefecture_code on purpose: the point decides which prefecture it
+      // is analysed as. Sending the selector's value would analyse a Tokyo
+      // click as Shizuoka whenever the two disagree.
       .candidateAnalysis({ lat: point.lat, lng: point.lng, radius,
-                           profile: profile || undefined, catchment,
-                           prefecture_code: prefecture ?? undefined })
+                           profile: profile || undefined, catchment })
       .then((res) => !cancelled && setAnalysis(res))
       .catch((e: ApiError) => !cancelled && setError(e.message))
       .finally(() => !cancelled && setAnalysing(false));
     return () => {
       cancelled = true;
     };
-  }, [point, radius, profile, catchment, prefecture]);
+  }, [point, radius, profile, catchment]);
 
   // Frame the prefecture that is selected. Not on first paint when a deep
   // link is carrying its own coordinates, and never over a point the reader

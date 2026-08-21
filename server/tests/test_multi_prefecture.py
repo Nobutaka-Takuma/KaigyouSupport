@@ -216,3 +216,57 @@ def test_batching_the_sweep_does_not_change_its_answer(db, tmp_path):
         assert len(whole) > 2, "precondition: more rows than one page"
         assert [r["mesh_id"] for r in whole] == [r["mesh_id"] for r in paged]
         assert [r["population"] for r in whole] == [r["population"] for r in paged]
+
+
+def test_a_point_is_analysed_as_the_prefecture_it_is_in(db):
+    """Not as whatever the map's dropdown happens to say.
+
+    With Shizuoka selected, a click in Chiyoda was analysed at Shizuoka's mesh
+    resolution against Shizuoka's normalisation, and answered "no population in
+    this trade area" for one of the densest places in Japan. Nothing on screen
+    connected the two.
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_core.analysis import prefecture_at
+
+    with connect() as conn:
+        if prefecture_at(conn, 35.685, 139.796) != "13":
+            pytest.skip("no Tokyo data loaded here")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    body = client.get("/api/candidate-analysis",
+                      params={"lat": 35.685, "lng": 139.796, "radius": 1000}).json()
+    assert body["prefecture_code"] == "13"
+    assert body["population"], "a point in central Tokyo has residents"
+    # And the reader is told which prefecture the score belongs to.
+    assert body["prefecture_name"]
+
+
+def test_asking_for_a_prefecture_explicitly_is_still_honoured(db):
+    """An explicit request is a question, and it gets answered as asked."""
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    body = client.get("/api/candidate-analysis",
+                      params={"lat": 35.685, "lng": 139.796, "radius": 1000,
+                              "prefecture_code": OTHER_PREFECTURE}).json()
+    assert body["prefecture_code"] == OTHER_PREFECTURE
+
+
+def test_the_mesh_layer_follows_the_viewport(db, tmp_path):
+    """Prefectures can be published at different resolutions.
+
+    One database-wide answer draws whichever prefecture has more people and
+    leaves the other blank as the reader pans into it.
+    """
+    from kaigyou_core.analysis import resolve_mesh_size
+
+    with connect() as conn:
+        tokyo = resolve_mesh_size(conn, None, bbox=[139.6, 35.6, 139.9, 35.8])
+        assert tokyo, "precondition: Tokyo meshes are loaded"
+        nowhere = resolve_mesh_size(conn, None, bbox=[100.0, 0.0, 101.0, 1.0])
+        assert nowhere is None, "an empty viewport has no resolution to report"
