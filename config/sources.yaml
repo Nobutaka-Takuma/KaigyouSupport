@@ -283,8 +283,14 @@ sources:
       - primary_link
     # Clip to the area being analysed. A Kanto extract is several times larger
     # than Tokyo, and every edge outside it slows every search.
-    # (min_lng, min_lat, max_lng, max_lat) -- Tokyo mainland.
-    bbox: [138.90, 35.45, 139.95, 35.90]
+    # (min_lng, min_lat, max_lng, max_lat). Start narrow: noding a network is
+    # the slow step and it grows with the square of nothing helpful. Widen once
+    # a run has completed and the size is known.
+    #   23 wards        [139.56, 35.53, 139.92, 35.82]
+    #   Tokyo mainland  [138.90, 35.45, 139.95, 35.90]
+    # Outside the box there is no network, so `walk` falls back to a circle --
+    # which the analysis reports rather than hides.
+    bbox: [139.56, 35.53, 139.92, 35.82]
     # Endpoint-matching tolerance in degrees for pgr_createTopology.
     # 0.00001 deg is about 1.1 m at this latitude.
     topology_tolerance_deg: 0.00001

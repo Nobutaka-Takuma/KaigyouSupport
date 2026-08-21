@@ -104,6 +104,13 @@ def _print_run(result: Any) -> None:
     print(f"[{result.source_id}] {status}  {steps}  records={result.record_count}")
     if result.error_message:
         print(f"    -> {result.error_type}: {result.error_message}")
+    # Scale is worth seeing for the street network: it decides how long the
+    # next step runs and whether the extract was clipped as intended.
+    facts = (result.details or {}).get("validate") or {}
+    if "edges" in facts:
+        clipped = facts.get("excluded_outside_bbox") or 0
+        print(f"    エッジ {facts['edges']:,} 本"
+              + (f"（bbox 外として除外 {clipped:,} 本）" if clipped else ""))
 
 
 def _pending_migrations() -> list[str]:

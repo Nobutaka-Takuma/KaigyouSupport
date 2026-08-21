@@ -181,11 +181,23 @@ class OSMWalkNetworkAdapter(SourceAdapter):
             # Zero-length edges would be nodes pretending to be streets.
             cur.execute("DELETE FROM walk_network WHERE cost_m <= 0")
         conn.commit()
-        build_topology(conn, tolerance_deg=float(self.spec.get("topology_tolerance_deg") or 0.00001))
+        summary = build_topology(
+            conn, tolerance_deg=float(self.spec.get("topology_tolerance_deg") or 0.00001),
+            progress=print)
+        # The connected share decides whether catchments are believable at
+        # all; a low number means the tolerance is wrong for this extract.
+        if summary.get("topology") == "built":
+            print(f"  ノード {summary['nodes']:,} / 分割後エッジ "
+                  f"{summary['noded_edges']:,} / 最大連結成分 "
+                  f"{summary['largest_component_share']:.1%}")
+            if (summary.get("largest_component_share") or 0) < 0.8:
+                print("  警告: ネットワークが分断されています。"
+                      "topology_tolerance_deg の見直しが必要かもしれません。")
         return count
 
 
-def build_topology(conn: psycopg.Connection, *, tolerance_deg: float = 0.00001) -> dict[str, Any]:
+def build_topology(conn: psycopg.Connection, *, tolerance_deg: float = 0.00001,
+                   progress: Any = None) -> dict[str, Any]:
     """Turn a pile of lines into a graph pgRouting can actually search.
 
     Two steps, and the first is the one that is easy to leave out.
@@ -206,10 +218,15 @@ def build_topology(conn: psycopg.Connection, *, tolerance_deg: float = 0.00001) 
     Skipped, with a note, where pgRouting is not installed: the network still
     loads and draws, and catchments fall back to circles.
     """
+    say = progress or (lambda _msg: None)
     with conn.cursor() as cur:
         cur.execute("SELECT to_regproc('pgr_nodenetwork') AS fn")
         if cur.fetchone()["fn"] is None:
             return {"topology": "skipped", "reason": "pgrouting not installed"}
+
+        cur.execute("SELECT count(*) AS n FROM walk_network")
+        say(f"  交差点で分割しています（{cur.fetchone()['n']:,} 本）。"
+            "数分〜数十分かかることがあります...")
 
         # Both, not just the edges. pgr_createTopology adds to an existing
         # vertices table rather than rebuilding it, so a second load leaves the
@@ -229,6 +246,7 @@ def build_topology(conn: psycopg.Connection, *, tolerance_deg: float = 0.00001) 
         cur.execute("DELETE FROM walk_network_noded WHERE cost_m <= 0")
         cur.execute("CREATE INDEX IF NOT EXISTS walk_network_noded_geom_idx "
                     "ON walk_network_noded USING gist (geom)")
+        say("  ノードを接続しています...")
         cur.execute("SELECT pgr_createTopology('walk_network_noded', %s, 'geom', 'id')",
                     (tolerance_deg,))
         cur.execute("CREATE INDEX IF NOT EXISTS walk_network_noded_source_idx "
