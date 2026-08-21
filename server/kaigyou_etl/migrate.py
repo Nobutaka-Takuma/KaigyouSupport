@@ -40,4 +40,45 @@ def migrate(conn: psycopg.Connection, *, force: bool = False) -> list[str]:
             )
         conn.commit()
         run.append(path.name)
+
+    _ensure_optional_functions(conn)
     return run
+
+
+#: Migrations whose body is conditional on an extension being present. They are
+#: re-applied on every migrate, because "already applied" and "actually did
+#: something" are different questions for them.
+_CONDITIONAL = ("009_walk_network.sql", "010_walk_network_noding.sql",
+                "011_catchment_mode.sql")
+
+
+def _ensure_optional_functions(conn: psycopg.Connection) -> None:
+    """Re-apply the pgRouting-conditional migrations once the extension exists.
+
+    Those migrations check for pgrouting and skip the routing function when it
+    is absent -- which is right, because migrate has to succeed on a database
+    that does not have it. But they are then recorded as applied, so enabling
+    pgrouting afterwards leaves the function permanently missing and the app
+    reporting that walking catchments are unavailable on a database that could
+    do them perfectly well. Ordering the two steps correctly is not something a
+    reader should have to know.
+
+    Every statement in them is CREATE OR REPLACE or IF NOT EXISTS, so running
+    them again costs a moment and changes nothing when the function is already
+    there.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM pg_extension WHERE extname = 'pgrouting'")
+        if not cur.fetchone()["n"]:
+            return
+        cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
+        if cur.fetchone()["fn"] is not None:
+            return
+
+    for name in _CONDITIONAL:
+        path = migrations_dir() / name
+        if not path.is_file():
+            continue
+        with conn.cursor() as cur:
+            cur.execute(path.read_text(encoding="utf-8"))
+        conn.commit()

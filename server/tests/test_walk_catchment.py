@@ -145,3 +145,37 @@ def test_the_drawn_polygon_is_the_one_that_was_measured(network):
 def test_status_reports_the_network_as_available(network):
     with connect() as conn:
         assert walk_network_status(conn)["available"] is True
+
+
+def test_migrate_repairs_the_routing_function_if_pgrouting_arrives_later():
+    """Enabling pgRouting after the first migrate must not be a dead end.
+
+    The pgRouting-conditional migrations skip the routing function when the
+    extension is absent -- correct, because migrate has to succeed without it --
+    and are then recorded as applied. Enabling the extension afterwards would
+    otherwise leave the function missing for good, with the app reporting
+    walking catchments as unavailable on a database that could do them.
+    """
+    from kaigyou_etl.migrate import migrate
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM pg_extension WHERE extname = 'pgrouting'")
+            if not cur.fetchone()["n"]:
+                pytest.skip("pgrouting not installed here")
+            cur.execute(
+                "DROP FUNCTION IF EXISTS kg_walk_catchment(double precision,"
+                "double precision,double precision,double precision,double precision)")
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
+            assert cur.fetchone()["fn"] is None, "precondition: function removed"
+
+        migrate(conn)          # reports nothing new applied, and repairs anyway
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
+            assert cur.fetchone()["fn"] is not None
+            # And exactly one kg_analyze_point: replaying must not leave two.
+            cur.execute("SELECT count(*) AS n FROM pg_proc WHERE proname = 'kg_analyze_point'")
+            assert cur.fetchone()["n"] == 1

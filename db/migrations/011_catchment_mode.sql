@@ -42,7 +42,10 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION kg_analyze_point(
+-- OR REPLACE, so this file can be re-applied. `migrate` replays the
+-- pgRouting-conditional migrations when the extension appears after they were
+-- first recorded as applied; a bare CREATE would fail on the second run.
+CREATE OR REPLACE FUNCTION kg_analyze_point(
     p_lat               double precision,
     p_lng               double precision,
     p_radius_m          double precision,
