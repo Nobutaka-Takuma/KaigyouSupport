@@ -535,3 +535,27 @@ def test_no_command_re_imports_a_module_level_name():
     assert not offenders, (
         "these functions re-import a name already imported at module level, "
         f"which shadows it for the entire function: {offenders}")
+
+
+def test_load_local_refuses_before_the_schema_is_migrated(tmp_path, monkeypatch, capsys):
+    """A release that adds a dataset adds a table for it.
+
+    Without this check the load parses an entire multi-hundred-megabyte
+    shapefile and then dies on `relation "walk_network" does not exist` -- a
+    database error for what is really a missed step, reported after the work
+    instead of before it.
+    """
+    import argparse
+
+    from kaigyou_etl import cli
+
+    monkeypatch.setattr(cli, "_pending_migrations", lambda: ["009_walk_network.sql"])
+    (tmp_path / "empty").mkdir()
+
+    code = cli.cmd_load_local(argparse.Namespace(
+        directory=str(tmp_path / "empty"), dry_run=False, partial=True, prefecture="13"))
+
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_ERROR
+    assert "009_walk_network.sql" in out
+    assert "kaigyou-etl migrate" in out

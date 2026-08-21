@@ -106,6 +106,18 @@ def _print_run(result: Any) -> None:
         print(f"    -> {result.error_type}: {result.error_message}")
 
 
+def _pending_migrations() -> list[str]:
+    """Migration files not yet recorded as applied. Empty when unreachable."""
+    from kaigyou_etl.migrate import applied, migrations_dir
+
+    try:
+        with connect() as conn:
+            done = applied(conn)
+    except Exception:  # noqa: BLE001 - connection problems surface elsewhere
+        return []
+    return sorted(p.name for p in migrations_dir().glob("*.sql") if p.name not in done)
+
+
 def cmd_load_local(args: argparse.Namespace) -> int:
     """Load every dataset found in a directory, then rebuild the scores.
 
@@ -143,6 +155,17 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("--dry-run のため、ここで終了します。")
         return EXIT_OK
+
+    # A release that adds a dataset adds a table for it, and the load then dies
+    # on `relation "..." does not exist` after parsing the whole file --
+    # a database error for what is really a missed step. Say so before the work
+    # rather than after it.
+    pending = _pending_migrations()
+    if pending:
+        print("未適用のマイグレーションがあります: " + "、".join(pending))
+        print("先に kaigyou-etl migrate を実行してください"
+              "（新しい情報源はテーブルの追加を伴います）。")
+        return EXIT_ERROR
 
     plan = [
         ("mhlw_dental_clinics", found.clinics, None),
