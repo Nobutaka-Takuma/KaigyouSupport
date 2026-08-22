@@ -66,6 +66,8 @@ export function MapPage() {
   const [error, setError] = useState<string | null>(null);
   const [layerError, setLayerError] = useState<string | null>(null);
   const [zoomedOut, setZoomedOut] = useState(false);
+  /** メッシュは返ってきたがスコアが1件も付いていない = compute-scores 未実行。 */
+  const [scoresMissing, setScoresMissing] = useState(false);
   const viewportRequest = useRef(0);
   // On a phone the controls and the panel cannot both be on screen with the
   // map. The radius chips stay visible; everything else folds away, and the
@@ -245,6 +247,14 @@ export function MapPage() {
 
       (map.getSource("municipalities") as maplibregl.GeoJSONSource)?.setData(muni as never);
       (map.getSource("meshes") as maplibregl.GeoJSONSource)?.setData(mesh as never);
+      // Meshes with no score at all: the heat map has nothing to show, and
+      // saying so beats leaving the reader to wonder why it is blank.
+      const meshFeatures = (mesh as { features?: { properties?: Record<string, unknown> }[] })
+        .features ?? [];
+      setScoresMissing(
+        meshFeatures.length > 0 &&
+          meshFeatures.every((f) => f.properties?.overall_score == null),
+      );
       (map.getSource("clinics") as maplibregl.GeoJSONSource)?.setData(clinics as never);
       (map.getSource("stations") as maplibregl.GeoJSONSource)?.setData(stations as never);
       setZoomedOut(zoom < MIN_ZOOM.clinics);
@@ -282,8 +292,12 @@ export function MapPage() {
       meshMetric === "overall_score"
         ? ([
             "case",
+            // Transparent, not grey. A solid fill over every mesh reads as a
+            // measurement -- "all of Tokyo scores the same" -- when it means
+            // the opposite: nothing has been scored. The notice below says so
+            // in words; the map says it by showing nothing.
             ["==", ["get", "overall_score"], null],
-            "#d1d5db",
+            "rgba(0, 0, 0, 0)",
             [
               "interpolate", ["linear"], ["coalesce", ["get", "overall_score"], 0],
               0, "#3b4cc0", 25, "#6f8fd6", 50, "#d9d9d9", 75, "#e88b6a", 100, "#b40426",
@@ -555,7 +569,13 @@ export function MapPage() {
             </div>
           )}
           {layerError && <div className="map__error">{layerError}</div>}
-          {zoomedOut && !layerError && (
+          {scoresMissing && meshMetric === "overall_score" && !layerError && (
+            <div className="map__hint map__hint--zoom">
+              この範囲のメッシュに候補地スコアがありません（未計算）。
+              「メッシュ表示」を人口・従業者数に切り替えると分布は確認できます。
+            </div>
+          )}
+          {zoomedOut && !layerError && !scoresMissing && (
             <div className="map__hint map__hint--zoom">
               広域表示のため歯科医院を省略しています。拡大すると表示されます。
             </div>

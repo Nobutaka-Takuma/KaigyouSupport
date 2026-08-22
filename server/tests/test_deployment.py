@@ -709,3 +709,22 @@ def test_health_lists_the_bundle_it_is_serving(client_with_web):
     """So a stale bundle can be told apart from a broken application."""
     assets = client_with_web.get("/api/health").json()["web_client_assets"]
     assert "main.js" in assets
+
+
+# --------------------------------------- an unscored map must not look scored
+def test_unscored_meshes_are_not_painted_a_colour():
+    """A grey fill over every mesh reads as a measurement, not as its absence.
+
+    "All of Tokyo scores the same" and "nothing in Tokyo has been scored" are
+    different statements, and the first one is wrong. Transparent says the
+    second, and the notice beside it says it in words.
+    """
+    source = (REPO_ROOT / "web" / "src" / "pages" / "MapPage.tsx").read_text(encoding="utf-8")
+    ramp = source[source.index('["get", "overall_score"], null'):][:200]
+    assert "rgba(0, 0, 0, 0)" in ramp, "an unscored mesh must not be given a fill colour"
+
+
+def test_the_map_says_when_nothing_in_view_is_scored():
+    source = (REPO_ROOT / "web" / "src" / "pages" / "MapPage.tsx").read_text(encoding="utf-8")
+    assert "scoresMissing" in source
+    assert "候補地スコアがありません" in source

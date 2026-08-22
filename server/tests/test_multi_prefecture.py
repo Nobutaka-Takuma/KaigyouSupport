@@ -378,3 +378,38 @@ def test_dropping_needs_saying_so_twice(db, tmp_path):
         prefecture=OTHER_PREFECTURE, dry_run=False, yes=False)) == cli.EXIT_PARTIAL
     with connect() as conn:
         assert _count(conn, OTHER_PREFECTURE) > 0, "nothing should have been deleted"
+
+
+def test_doctor_warns_when_every_score_is_the_same(db, tmp_path):
+    """One flat colour and no colour look identical on a map.
+
+    Scores computed against another prefecture's distribution clamp to the same
+    end of the scale, which is not "no scores" and not a working heat map
+    either. The spread is what tells them apart.
+    """
+    from kaigyou_etl import doctor
+
+    with connect() as conn:
+        adapter = _adapter(tmp_path, OTHER_PREFECTURE)
+        adapter.load(conn, adapter.transform(MESH_FILE))
+        conn.commit()
+        # Every mesh the same score, as a mis-scoped normalisation produces.
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO mesh_scores (mesh_id, profile, radius_m, overall_score)
+                SELECT id, 'default', 998, 100 FROM population_mesh
+                WHERE prefecture_code = %s
+            """, (OTHER_PREFECTURE,))
+        conn.commit()
+
+        try:
+            report = doctor.Report()
+            doctor._check_prefectures(report, conn)
+            flagged = [c for c in report.checks
+                       if OTHER_PREFECTURE in c.name and c.status == doctor.WARN]
+            assert flagged, "a flat score distribution has to be reported"
+            assert "一色" in flagged[0].detail
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM mesh_scores WHERE radius_m = 998")
+            conn.commit()

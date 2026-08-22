@@ -368,14 +368,31 @@ def _check_prefectures(report: Report, conn: Any) -> None:
 
     for row in rows:
         name = prefecture_name(conn, row["code"])
+        # The spread, not just the count. Scores computed against another
+        # prefecture's distribution all clamp to the same end of the scale, and
+        # a heat map of one flat colour is indistinguishable from a heat map of
+        # nothing -- both look like the feature is broken.
         scored = fetch_one(conn, """
-            SELECT count(*) AS n FROM mesh_scores ms
+            SELECT count(*) AS n,
+                   round(min(ms.overall_score)::numeric, 1) AS lo,
+                   round(max(ms.overall_score)::numeric, 1) AS hi,
+                   count(DISTINCT round(ms.overall_score::numeric, 0)) AS steps
+            FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
-            WHERE pm.prefecture_code = %s
+            WHERE pm.prefecture_code = %s AND ms.overall_score IS NOT NULL
         """, (row["code"],)) or {"n": 0}
         detail = (f"{row['meshes']:,}メッシュ / {row['size']}m / "
                   f"人口 {row['pop']:,} / スコア済 {scored['n']:,}")
         if scored["n"]:
+            detail += f"（{scored['lo']}〜{scored['hi']}）"
+        if scored["n"] and (scored["steps"] or 0) < 5:
+            report.add(f"  {name}({row['code']})", WARN,
+                       detail + " ← ほぼ同じ値。ヒートマップが一色になります",
+                       f"別の都道府県の分布で正規化された可能性があります。"
+                       f"refresh-stats --prefecture {row['code']} を実行してから "
+                       f"compute-scores --all-profiles --prefecture {row['code']} "
+                       "をやり直してください。")
+        elif scored["n"]:
             report.add(f"  {name}({row['code']})", OK, detail)
         else:
             report.add(f"  {name}({row['code']})", WARN, detail + "（ランキング・ヒートマップが空）",
