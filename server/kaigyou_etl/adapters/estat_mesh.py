@@ -77,6 +77,10 @@ class EStatMeshAdapter(EStatTableReader, SourceAdapter):
 
     # -------------------------------------------------------------- pipeline
     def validate(self, artifact: Path) -> dict[str, Any]:
+        # Before anything else: the file name is the only place this dataset
+        # says which prefecture it is, and getting it wrong overwrites another
+        # prefecture with these figures.
+        named_prefecture = self.check_prefecture_matches_filename(artifact)
         headers, rows = self._read(artifact)
         resolved = {
             field: self.pick_column(headers, field,
@@ -112,6 +116,8 @@ class EStatMeshAdapter(EStatTableReader, SourceAdapter):
             "loadable_rows": len(loadable),
             "invalid_mesh_codes": bad,
             "resolved_columns": {k: v for k, v in resolved.items() if v},
+            "prefecture_code": self.ctx.prefecture_code,
+            "prefecture_from_filename": named_prefecture,
         }
 
         pop_col = resolved["population"]

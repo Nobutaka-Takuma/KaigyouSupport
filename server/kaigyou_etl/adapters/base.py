@@ -102,6 +102,29 @@ class SourceAdapter(ABC):
             "notes": self.spec.get("notes"),
         }
 
+    def check_prefecture_matches_filename(self, artifact: Path) -> str | None:
+        """Refuse a file whose name says a different prefecture than the run.
+
+        e-Stat mesh tables carry the prefecture only in their file name --
+        tblT001141H22 is Shizuoka, and nothing in the rows says so. A run told
+        the wrong one writes real figures under the wrong label and, because
+        the replace is scoped by that label, deletes the prefecture it was
+        mislabelled as. The load reports success. The published file knows
+        better than the flag, so a disagreement stops here.
+        """
+        from kaigyou_etl.adapters._util import prefecture_from_filename
+
+        named = prefecture_from_filename(artifact)
+        if named and named != self.ctx.prefecture_code:
+            raise AcquisitionError(
+                ERROR_SCHEMA,
+                f"{Path(artifact).name} は都道府県コード {named} のファイルですが、"
+                f"{self.ctx.prefecture_code} として取り込もうとしています。"
+                f"--prefecture {named} を指定するか、正しいファイルを指定してください"
+                f"（このまま取り込むと {self.ctx.prefecture_code} のデータが"
+                f"{named} の数値で置き換わります）。")
+        return named
+
     def source_date(self) -> date | None:
         value = self.spec.get("source_date")
         if isinstance(value, date):

@@ -49,6 +49,10 @@ class EStatBusinessMeshAdapter(EStatTableReader, SourceAdapter):
 
     # -------------------------------------------------------------- pipeline
     def validate(self, artifact: Path) -> dict[str, Any]:
+        # Before anything else: the file name is the only place this dataset
+        # says which prefecture it is, and getting it wrong overwrites another
+        # prefecture with these figures.
+        named_prefecture = self.check_prefecture_matches_filename(artifact)
         headers, rows = self._read(artifact)
         resolved = {
             field: self.pick_column(headers, field,
@@ -83,6 +87,8 @@ class EStatBusinessMeshAdapter(EStatTableReader, SourceAdapter):
             "mesh_code_lengths": lengths,
             "mesh_size_m": sorted({meshlib.NOMINAL_SIZE_M[n] for n in lengths}),
             "resolved_columns": {k: v for k, v in resolved.items() if v},
+            "prefecture_code": self.ctx.prefecture_code,
+            "prefecture_from_filename": named_prefecture,
         }
 
         # Totals for the rows that will actually load, so they can be compared

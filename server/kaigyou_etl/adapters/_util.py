@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import zipfile
 from pathlib import Path
 from typing import Any, Iterator
@@ -198,4 +199,36 @@ def shape_to_wkt(shape: Any) -> str | None:
             )
             parts.append(f"({rings})")
         return f"MULTIPOLYGON({', '.join(parts)})"
+    return None
+
+
+#: e-Stat 統計GIS names its per-prefecture tables `tblT001141H22.txt`, where
+#: the two digits after the final H are the JIS prefecture code. 国土数値情報
+#: puts it between underscores: `N03-20240101_22_GML.zip`.
+#:
+#: This is the only place a mesh file says which prefecture it is. Nothing in
+#: the contents does -- the rows are mesh codes and numbers -- so a run that
+#: does not read the name has to be told, and being told wrongly is silent:
+#: Shizuoka's figures land under Tokyo's label and delete Tokyo on the way in.
+_PREFECTURE_PATTERNS = (
+    re.compile(r"H(\d{2})$"),            # tblT001141H22
+    re.compile(r"_(\d{2})_GML$"),        # N03-20240101_22_GML
+)
+
+
+def prefecture_from_filename(path: Path | str) -> str | None:
+    """The prefecture code a published file names itself after, if it does."""
+    stem = Path(path).name
+    for suffix in (".zip", ".txt", ".csv"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    for pattern in _PREFECTURE_PATTERNS:
+        found = pattern.search(stem)
+        if found:
+            code = found.group(1)
+            # 01..47 are the real ones; anything else is a coincidence in a
+            # name, not a prefecture.
+            if "01" <= code <= "47":
+                return code
     return None

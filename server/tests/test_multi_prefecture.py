@@ -270,3 +270,111 @@ def test_the_mesh_layer_follows_the_viewport(db, tmp_path):
         assert tokyo, "precondition: Tokyo meshes are loaded"
         nowhere = resolve_mesh_size(conn, None, bbox=[100.0, 0.0, 101.0, 1.0])
         assert nowhere is None, "an empty viewport has no resolution to report"
+
+
+# ------------------------------------- the file name is the only prefecture
+def test_a_file_named_for_another_prefecture_is_refused(tmp_path):
+    """The mistake that put Shizuoka's population under Tokyo's label.
+
+    `load-local download/22` without --prefecture tagged every Shizuoka mesh
+    as 13, and the prefecture-scoped replace then deleted Tokyo. The load
+    reported success with a plausible row count; the only visible symptom was
+    that both prefectures reported exactly the same population, days later.
+    """
+    from kaigyou_etl.acquisition import AcquisitionError
+
+    shizuoka = tmp_path / "tblT001141H22.txt"
+    shizuoka.write_bytes(MESH_FILE.read_bytes())
+
+    with pytest.raises(AcquisitionError) as caught:
+        _adapter(tmp_path, "13").validate(shizuoka)
+    assert "22" in str(caught.value) and "13" in str(caught.value)
+
+
+def test_a_file_named_for_this_prefecture_is_accepted(tmp_path):
+    named = tmp_path / "tblT001141H22.txt"
+    named.write_bytes(MESH_FILE.read_bytes())
+    facts = _adapter(tmp_path, "22").validate(named)
+    assert facts["prefecture_from_filename"] == "22"
+    assert facts["prefecture_code"] == "22"
+
+
+def test_a_file_that_names_no_prefecture_is_left_to_the_flag(tmp_path):
+    """Not every publisher puts it in the name; those must still load."""
+    anonymous = tmp_path / "mesh.txt"
+    anonymous.write_bytes(MESH_FILE.read_bytes())
+    assert _adapter(tmp_path, "13").validate(anonymous)["prefecture_from_filename"] is None
+
+
+@pytest.mark.parametrize("names, expected", [
+    (["tblT001141H22.txt"], "22"),
+    (["tblT001141H13.txt"], "13"),
+])
+def test_load_local_reads_the_prefecture_off_the_files(tmp_path, names, expected):
+    from kaigyou_etl.cli import _prefecture_for
+    from kaigyou_etl.discover import Discovery
+
+    found = Discovery(directory=tmp_path)
+    found.mesh_current = tmp_path / names[0]
+    code, problem = _prefecture_for(found, None)
+    assert problem is None and code == expected
+
+
+def test_load_local_refuses_a_folder_holding_two_prefectures(tmp_path):
+    """Discovery keeps one file per slot, so the other would be silently dropped."""
+    from kaigyou_etl.cli import _prefecture_for
+    from kaigyou_etl.discover import Discovery
+
+    found = Discovery(directory=tmp_path)
+    found.mesh_current = tmp_path / "tblT001141H13.txt"
+    found.mesh_business = tmp_path / "tblT001147H22.txt"
+    code, problem = _prefecture_for(found, None)
+    assert not code and problem and "複数の都道府県" in problem
+
+
+def test_load_local_refuses_a_flag_that_contradicts_the_files(tmp_path):
+    from kaigyou_etl.cli import _prefecture_for
+    from kaigyou_etl.discover import Discovery
+
+    found = Discovery(directory=tmp_path)
+    found.mesh_current = tmp_path / "tblT001141H22.txt"
+    code, problem = _prefecture_for(found, "13")
+    assert not code and problem and "22" in problem
+
+
+def test_dropping_a_prefecture_takes_only_that_prefecture(db, tmp_path):
+    """Undoing a mislabelled load must not undo the correct one next to it."""
+    import argparse
+
+    from kaigyou_etl import cli
+
+    with connect() as conn:
+        adapter = _adapter(tmp_path, OTHER_PREFECTURE)
+        adapter.load(conn, adapter.transform(MESH_FILE))
+        conn.commit()
+        tokyo_before = _count(conn, "13")
+        assert _count(conn, OTHER_PREFECTURE) > 0, "precondition"
+
+    assert cli.cmd_drop_prefecture(argparse.Namespace(
+        prefecture=OTHER_PREFECTURE, dry_run=False, yes=True)) == cli.EXIT_OK
+
+    with connect() as conn:
+        assert _count(conn, OTHER_PREFECTURE) == 0
+        assert _count(conn, "13") == tokyo_before
+
+
+def test_dropping_needs_saying_so_twice(db, tmp_path):
+    """A delete of real published data does not happen on a typo."""
+    import argparse
+
+    from kaigyou_etl import cli
+
+    with connect() as conn:
+        adapter = _adapter(tmp_path, OTHER_PREFECTURE)
+        adapter.load(conn, adapter.transform(MESH_FILE))
+        conn.commit()
+
+    assert cli.cmd_drop_prefecture(argparse.Namespace(
+        prefecture=OTHER_PREFECTURE, dry_run=False, yes=False)) == cli.EXIT_PARTIAL
+    with connect() as conn:
+        assert _count(conn, OTHER_PREFECTURE) > 0, "nothing should have been deleted"

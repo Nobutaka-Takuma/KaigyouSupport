@@ -118,6 +118,51 @@ def _print_run(result: Any) -> None:
               + (f"（bbox 外として除外 {clipped:,} 本）" if clipped else ""))
 
 
+
+def _prefecture_for(found: Any, requested: str | None) -> tuple[str, str | None]:
+    """Which prefecture a folder of downloads is, and why.
+
+    The prefecture-specific files name themselves after it. Trusting that over
+    a flag is not a nicety: the mesh tables say nothing about the prefecture
+    anywhere else, so a wrong flag writes real figures under another
+    prefecture's label -- and the replace, being scoped by that label, deletes
+    the prefecture it was mislabelled as.
+    """
+    from kaigyou_etl.adapters._util import prefecture_from_filename
+
+    named: dict[str, list[str]] = {}
+    for path in (found.mesh_current, found.mesh_baseline, found.mesh_business,
+                 found.municipalities):
+        if path is None:
+            continue
+        code = prefecture_from_filename(path)
+        if code:
+            named.setdefault(code, []).append(Path(path).name)
+
+    if len(named) > 1:
+        detail = "、".join(f"{code}: {', '.join(files)}" for code, files in sorted(named.items()))
+        return "", (
+            f"error: このフォルダに複数の都道府県のファイルが混在しています（{detail}）。\n"
+            "都道府県ごとにフォルダを分けて、1回ずつ取り込んでください。")
+
+    detected = next(iter(named), None)
+    if requested and detected and requested != detected:
+        return "", (
+            f"error: --prefecture {requested} が指定されていますが、"
+            f"ファイル名は都道府県コード {detected} です"
+            f"（{', '.join(named[detected])}）。\n"
+            f"このまま取り込むと {requested} のデータが {detected} の数値で"
+            "置き換わります。--prefecture を外すか、正しい値を指定してください。")
+    if requested:
+        return requested, None
+    if detected:
+        return detected, None
+    return "", (
+        "error: 都道府県を判定できませんでした。ファイル名に都道府県コードが"
+        "含まれていません（例: tblT001141H13.txt、N03-20240101_13_GML.zip）。\n"
+        "--prefecture 13 のように明示してください。")
+
+
 def _pending_migrations() -> list[str]:
     """Migration files not yet recorded as applied. Empty when unreachable."""
     from kaigyou_etl.migrate import applied, migrations_dir
@@ -164,6 +209,19 @@ def cmd_load_local(args: argparse.Namespace) -> int:
             print("見つかった分だけ取り込むには --partial を付けてください。")
             return EXIT_PARTIAL
 
+    # Which prefecture this folder is. The published file names say so --
+    # tblT001141H22 is Shizuoka, N03-20240101_22_GML is Shizuoka -- and until
+    # this read them, `load-local download/22` without --prefecture tagged
+    # Shizuoka's figures as Tokyo and deleted Tokyo on the way in. The load
+    # reported success; only the population totals gave it away, days later.
+    prefecture, problem = _prefecture_for(found, args.prefecture)
+    if problem:
+        print(problem, file=sys.stderr)
+        return EXIT_ERROR
+    print(f"都道府県: {prefecture}"
+          + ("（ファイル名から判定）" if not args.prefecture else "（--prefecture の指定）"))
+    print()
+
     if args.dry_run:
         print("--dry-run のため、ここで終了します。")
         return EXIT_OK
@@ -192,7 +250,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
         if input_path is None:
             continue
         result = run_source(source_id, input_path=input_path, baseline_path=baseline,
-                            prefecture_code=args.prefecture)
+                            prefecture_code=prefecture)
         _print_run(result)
         failures += 0 if result.ok else 1
 
@@ -211,7 +269,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import compute_mesh_scores, refresh_stats
     print("\nスコア基準を再計算しています（数分かかります）...")
     with connect() as conn:
-        refresh_stats(conn, prefecture_code=args.prefecture, progress=print)
+        refresh_stats(conn, prefecture_code=prefecture, progress=print)
     # Every configured profile, not just the active one: the UI offers all of
     # them in a dropdown, and a profile with no scores renders an empty ranking
     # and a note telling the reader to run a command. The trade-area sweep is
@@ -220,7 +278,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     print(f"メッシュスコアを再計算しています（プロファイル {len(names)} 件）...")
     with connect() as conn:
         summary = compute_mesh_scores(conn, profiles=names,
-                                      prefecture_code=args.prefecture,
+                                      prefecture_code=prefecture,
                                       progress=print)
     print(json.dumps(summary, ensure_ascii=False, default=_json_default))
 
@@ -269,6 +327,60 @@ def cmd_compute_scores(args: argparse.Namespace) -> int:
                                       prefecture_code=args.prefecture,
                                       progress=print)
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
+    return EXIT_OK
+
+
+
+def cmd_drop_prefecture(args: argparse.Namespace) -> int:
+    """Remove everything loaded under one prefecture code.
+
+    For undoing a mislabelled load. The rows are real published figures under
+    the wrong label, which is worse than missing data: they read as that
+    prefecture's numbers. Nothing here reconstructs anything -- it deletes, and
+    the correct file is then loaded again.
+    """
+    code = args.prefecture
+    tables = ("population_mesh", "mesh_business", "municipalities")
+    with connect() as conn:
+        counts = {}
+        with conn.cursor() as cur:
+            for table in tables:
+                cur.execute(f"SELECT count(*) AS n FROM {table} WHERE prefecture_code = %s",
+                            (code,))
+                counts[table] = cur.fetchone()["n"]
+            cur.execute("""
+                SELECT count(*) AS n FROM mesh_scores ms
+                JOIN population_mesh pm ON pm.id = ms.mesh_id
+                WHERE pm.prefecture_code = %s
+            """, (code,))
+            counts["mesh_scores"] = cur.fetchone()["n"]
+
+        if not any(counts.values()):
+            print(f"都道府県コード {code} のデータはありません。")
+            return EXIT_OK
+
+        print(f"都道府県コード {code} を削除します:")
+        for table, n in counts.items():
+            print(f"  {table:20s} {n:,} 件")
+        if args.dry_run:
+            print("--dry-run のため、削除しません。")
+            return EXIT_OK
+        if not args.yes:
+            print("削除するには --yes を付けてください。")
+            return EXIT_PARTIAL
+
+        with conn.cursor() as cur:
+            # Scores first: they reference the meshes.
+            cur.execute("""
+                DELETE FROM mesh_scores ms USING population_mesh pm
+                WHERE pm.id = ms.mesh_id AND pm.prefecture_code = %s
+            """, (code,))
+            for table in tables:
+                cur.execute(f"DELETE FROM {table} WHERE prefecture_code = %s", (code,))
+            cur.execute("DELETE FROM metric_distributions WHERE scope LIKE %s",
+                        (f"%pref{code}",))
+        conn.commit()
+    print("削除しました。正しいファイルを load-local で取り込み直してください。")
     return EXIT_OK
 
 
@@ -346,7 +458,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only report which file was matched to which source")
     p.add_argument("--partial", action="store_true",
                    help="proceed even when some datasets are missing")
-    p.add_argument("--prefecture", default="13")
+    p.add_argument("--prefecture", default=None,
+                   help="都道府県コード。省略時はファイル名から判定します"
+                        "（tblT001141H22.txt なら 22）")
     p.set_defaults(func=cmd_load_local)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")
@@ -367,6 +481,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="設定済みのプロファイルすべてを計算する（商圏集計は共有されるため追加分は軽い）")
     p.add_argument("--prefecture", default="13")
     p.set_defaults(func=cmd_compute_scores)
+
+    p = sub.add_parser(
+        "drop-prefecture",
+        help="delete everything loaded under one prefecture code（取り込み間違いの取り消し）")
+    p.add_argument("--prefecture", required=True)
+    p.add_argument("--dry-run", action="store_true", help="件数だけ表示する")
+    p.add_argument("--yes", action="store_true", help="実際に削除する")
+    p.set_defaults(func=cmd_drop_prefecture)
 
     p = sub.add_parser(
         "doctor", help="check config, database, migrations and loaded data")
