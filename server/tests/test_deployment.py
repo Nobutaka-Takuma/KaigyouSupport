@@ -728,3 +728,29 @@ def test_the_map_says_when_nothing_in_view_is_scored():
     source = (REPO_ROOT / "web" / "src" / "pages" / "MapPage.tsx").read_text(encoding="utf-8")
     assert "scoresMissing" in source
     assert "候補地スコアがありません" in source
+
+
+def test_the_map_does_not_animate_its_own_startup_correction():
+    """The map is created before the API can say which prefecture is loaded.
+
+    So it always opens somewhere provisional and is corrected a moment later.
+    Animating that correction shows a flight nobody asked for -- Tokyo opened
+    over Chiyoda and slid to Nakano, its population-weighted centre, which
+    reads as a fault. Instant on the first placement, animated only when the
+    reader changes prefecture themselves.
+    """
+    source = (REPO_ROOT / "web" / "src" / "pages" / "MapPage.tsx").read_text(encoding="utf-8")
+    block = source[source.index("const framed = useRef"):][:1200]
+    assert "jumpTo" in block and "flyTo" in block, "both placements must exist"
+    assert block.index("jumpTo") < block.index("flyTo"), (
+        "the first placement is the instant one")
+
+
+def test_the_map_opens_where_the_reader_last_was():
+    """A Shizuoka-only database should not flash Tokyo on every load."""
+    hook = (REPO_ROOT / "web" / "src" / "lib" / "prefecture.ts").read_text(encoding="utf-8")
+    assert "lastCenter" in hook and "kaigyou.prefecture.center" in hook
+
+    source = (REPO_ROOT / "web" / "src" / "pages" / "MapPage.tsx").read_text(encoding="utf-8")
+    assert "lastCenter() ?? FALLBACK_CENTER" in source, (
+        "the initial centre must prefer the remembered one over a constant")

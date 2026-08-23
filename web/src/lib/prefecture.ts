@@ -11,12 +11,39 @@ import { api } from "./api";
 import type { Prefecture } from "./types";
 
 const KEY = "kaigyou.prefecture";
+const CENTER_KEY = "kaigyou.prefecture.center";
 
 function read(): string | null {
   try {
     return window.localStorage.getItem(KEY);
   } catch {
     return null;
+  }
+}
+
+/**
+ * 前回いた場所。地図は API の応答より先に生成しなければならないので、
+ * これが無いと毎回いったん東京都心が描かれてから正しい位置へ飛ぶ。
+ * 静岡県しか入れていない人にとっては、毎回よその県が一瞬映ることになる。
+ */
+export function lastCenter(): [number, number] | null {
+  try {
+    const raw = window.localStorage.getItem(CENTER_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.length === 2 &&
+      parsed.every((v) => Number.isFinite(v))
+      ? [parsed[0], parsed[1]]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberCenter(center: [number, number]) {
+  try {
+    window.localStorage.setItem(CENTER_KEY, JSON.stringify(center));
+  } catch {
+    /* プライベートウィンドウなど。次回また一瞬ずれるだけ */
   }
 }
 
@@ -69,5 +96,10 @@ export function usePrefecture() {
   }, []);
 
   const current = list.find((p) => p.code === code) ?? null;
+
+  useEffect(() => {
+    if (current) rememberCenter(current.center);
+  }, [current]);
+
   return { list, code, current, select, loaded };
 }

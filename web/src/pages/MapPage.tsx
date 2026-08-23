@@ -13,14 +13,16 @@ import { api, ApiError } from "../lib/api";
 import { basemapStyle, hasBasemap } from "../lib/basemap";
 import { circlePolygon, EMPTY_FC } from "../lib/geo";
 import { MAX_CANDIDATES, useCandidates } from "../lib/candidates";
-import { usePrefecture } from "../lib/prefecture";
+import { lastCenter, usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
 import type { CandidateAnalysis, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
 
-const TOKYO_CENTER: [number, number] = [139.7671, 35.6812];
+//: Last resort only -- used on a first ever visit, before the API has said
+//: which prefectures are loaded and before there is a remembered centre.
+const FALLBACK_CENTER: [number, number] = [139.7671, 35.6812];
 
 /** Below these zooms a layer covers too much ground to be worth sending. */
 const MIN_ZOOM = { meshes: 10, clinics: 11, stations: 10 };
@@ -100,7 +102,7 @@ export function MapPage() {
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: basemapStyle(),
-      center: TOKYO_CENTER,
+      center: lastCenter() ?? FALLBACK_CENTER,
       zoom: 11,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
@@ -436,13 +438,25 @@ export function MapPage() {
   // link is carrying its own coordinates, and never over a point the reader
   // has already clicked -- moving the map out from under an open analysis
   // would be the app arguing with them.
+  //
+  // The first placement is instant, later ones animate. The map has to be
+  // created with *some* centre before the API can say which prefecture is
+  // loaded, so on load it is always briefly in the wrong place; animating
+  // that correction shows the reader a flight they did not ask for -- Tokyo
+  // opens over Chiyoda and then slides to Nakano, which is the prefecture's
+  // population-weighted centre and looks like a fault. Changing prefecture
+  // later is a move the reader asked for, and animating that one helps them
+  // keep their bearings.
   const framed = useRef<string | null>(null);
   useEffect(() => {
     if (!ready || !prefectureInfo) return;
     if (framed.current === prefectureInfo.code) return;
+    const first = framed.current === null;
     framed.current = prefectureInfo.code;
     if (point || searchParams.get("lat")) return;
-    mapRef.current?.flyTo({ center: prefectureInfo.center, zoom: 11 });
+    const target = { center: prefectureInfo.center, zoom: 11 } as const;
+    if (first) mapRef.current?.jumpTo(target);
+    else mapRef.current?.flyTo(target);
   }, [ready, prefectureInfo, point, searchParams]);
 
   // Deep link from the ranking table: /?lat=..&lng=..
