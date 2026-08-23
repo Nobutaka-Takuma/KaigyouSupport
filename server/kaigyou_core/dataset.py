@@ -121,6 +121,45 @@ DEFINITIONS: dict[str, dict[str, str]] = {
     "change_rate_pct": {"unit": "%", "description": "地価の対前年変動率。",
                         "source": "国土数値情報 L01"},
     "distance_m": {"unit": "m", "description": "指定地点からの直線距離。", "source": "算出"},
+    "percentile": {
+        "unit": "%",
+        "description": (
+            "同一半径・同一データで算出したメッシュ分布の中で、その値以下のメッシュの割合。"
+            "30 なら「7割のメッシュより低い」。都道府県内と市区町村内の2つの尺度がある。"),
+        "source": "mesh_scores（本アプリが算出したメッシュ集計）",
+    },
+    "nth_nearest_distance_m": {
+        "unit": "m",
+        "description": (
+            "n番目に近い同種施設までの直線距離。件数が同じでも、この階段が短ければ密集、"
+            "長ければ分散を意味する。"),
+        "source": "厚生労働省 医療機能情報提供制度から算出",
+    },
+    "largest_mesh_share": {
+        "unit": "比率",
+        "description": (
+            "商圏人口のうち、最大の1メッシュ（500m四方）が占める割合。0.4 なら4割が"
+            "1メッシュに集中。合計値だけでは集合住宅1棟か一様な住宅地かを区別できない。"),
+        "source": "国勢調査メッシュから算出",
+    },
+    "floor_area_ratio_pct": {
+        "unit": "%",
+        "description": (
+            "容積率。敷地面積に対して建てられる延床面積の割合。テナントとしての診療所が"
+            "入りうる床の量に効く。第一種低層住居専用地域は約100%、商業地域は約600%。"),
+        "source": "国土数値情報 L01（地価公示の標準地の値）",
+    },
+    "building_coverage_pct": {
+        "unit": "%", "description": "建蔽率。敷地面積に対する建築面積の割合。",
+        "source": "国土数値情報 L01（地価公示の標準地の値）",
+    },
+    "zoning": {
+        "unit": "区分",
+        "description": (
+            "都市計画の用途地域。地価公示の標準地が置かれた地点の値であり、"
+            "用途地域図そのものではない。全域の判定には国土数値情報 A29 が必要。"),
+        "source": "国土数値情報 L01",
+    },
     "score": {
         "unit": "0-100",
         "description": (
@@ -281,6 +320,252 @@ def _stations(conn: psycopg.Connection, lat: float, lng: float,
     }
 
 
+
+#: Metrics whose position in the local distribution is worth knowing, mapped to
+#: the mesh_scores column that holds the same figure for every mesh.
+_RANKED_METRICS = {
+    "population": "population",
+    "age_0_14": "age_0_14",
+    "age_65_plus": "age_65_plus",
+    "households": "households",
+    "population_growth": "population_growth",
+    "dental_clinics": "facility_count",
+    "population_per_clinic": "population_per_facility",
+    "land_price_yen_per_sqm": "land_price_yen_per_sqm",
+}
+
+#: Which competitor to measure the distance to. The total inside a radius says
+#: how many; this says how close, which is a different fact and often the
+#: sharper one -- twenty clinics inside 158m is a description no total gives.
+_COMPETITOR_RANKS = (1, 3, 5, 10, 20)
+
+
+def _percentiles(conn: psycopg.Connection, metrics: dict[str, Any], *,
+                 profile: str, radius_m: int, prefecture_code: str,
+                 municipality_name: str | None) -> dict[str, Any] | None:
+    """Where this point sits in the distribution of every mesh around it.
+
+    The single most useful thing this dataset can add, and the one a reader
+    cannot work out for itself. That Ginza's land is expensive is common
+    knowledge; that its 1km resident population sits at the 30th percentile of
+    Tokyo while its clinic count and its land price both sit at the 100th is
+    not, and it is the whole shape of the place in three numbers.
+
+    Compared against mesh_scores, which holds the same figures for every
+    scored mesh, so the comparison is like with like -- same radius, same
+    catchment shape, same source. Percentile means "share of meshes at or
+    below this value", so 30 reads as "lower than 70% of Tokyo".
+    """
+    if not table_exists(conn, "mesh_scores"):
+        return None
+
+    columns = []
+    params: list[Any] = []
+    for name, column in _RANKED_METRICS.items():
+        value = metrics.get(name if name in metrics else _RANKED_METRICS[name])
+        if value is None:
+            continue
+        columns.append(f"count(*) FILTER (WHERE ms.{column} IS NOT NULL "
+                       f"AND ms.{column} <= %s) AS {name}_below")
+        columns.append(f"count(ms.{column}) AS {name}_total")
+        params.append(float(value))
+    if not columns:
+        return None
+
+    def scope(where: str, extra: list[Any]) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT count(*)::int AS meshes, {', '.join(columns)}
+                FROM mesh_scores ms
+                JOIN population_mesh pm ON pm.id = ms.mesh_id
+                WHERE ms.profile = %s AND ms.radius_m = %s AND {where}
+                """,
+                params + [profile, radius_m] + extra)
+            row = cur.fetchone()
+        if not row or not row["meshes"]:
+            return None
+        out: dict[str, Any] = {"compared_against_meshes": row["meshes"]}
+        for name in _RANKED_METRICS:
+            total = row.get(f"{name}_total")
+            if not total:
+                continue
+            out[name] = round(100.0 * row[f"{name}_below"] / total)
+        return out
+
+    result: dict[str, Any] = {
+        "radius_m": radius_m,
+        "profile": profile,
+        "definition": ("その値以下のメッシュの割合（%）。30 なら「7割のメッシュより低い」。"
+                       "同一半径・同一データで算出したメッシュ分布との比較。"),
+        "prefecture": scope("pm.prefecture_code = %s", [prefecture_code]),
+    }
+    if municipality_name:
+        result["municipality"] = scope(
+            "pm.prefecture_code = %s AND ms.area_label = %s",
+            [prefecture_code, municipality_name])
+    return result
+
+
+def _competitor_distances(conn: psycopg.Connection, lat: float, lng: float,
+                          category: str, radius_m: int) -> dict[str, Any]:
+    """How far to the 1st, 3rd, 5th, 10th and 20th nearest competitor.
+
+    A count inside a radius and a distance ladder answer different questions.
+    "186 clinics within 1km" is a density; "the 20th is 158m away" is what it
+    feels like on the street, and it is the version that separates a crowded
+    high street from a wide catchment with the same total.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT n, distance_m FROM (
+                SELECT row_number() OVER (
+                           ORDER BY geom::geography <->
+                                    ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS n,
+                       ST_Distance(geom::geography,
+                                   ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography)
+                           AS distance_m
+                FROM facilities
+                WHERE facility_category = %s
+                ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+                LIMIT %s
+            ) ranked
+            WHERE n = ANY(%s)
+            """,
+            (lng, lat, lng, lat, category, lng, lat, max(_COMPETITOR_RANKS),
+             list(_COMPETITOR_RANKS)))
+        rows = cur.fetchall()
+
+    ladder = {str(r["n"]): round(r["distance_m"]) for r in rows}
+    area_km2 = 3.14159 * (radius_m / 1000) ** 2
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*)::int AS n FROM facilities
+            WHERE facility_category = %s
+              AND ST_DWithin(geom::geography,
+                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+            """, (category, lng, lat, radius_m))
+        inside = cur.fetchone()["n"]
+    return {
+        "nth_nearest_distance_m": ladder,
+        "per_km2": round(inside / area_km2, 1) if area_km2 else None,
+        "definition": ("n番目に近い同種施設までの直線距離（m）。件数が同じでも、"
+                       "この階段が短ければ密集、長ければ分散を意味する。"),
+    }
+
+
+def _catchment_shape(conn: psycopg.Connection, lat: float, lng: float,
+                     radius_m: int, mesh_size_m: int) -> dict[str, Any] | None:
+    """How the catchment's population is spread across the meshes inside it.
+
+    A total hides its own shape. 20,000 residents can be one tower block beside
+    an empty park, or forty streets of houses, and the two are different
+    businesses. The largest mesh's share is the quickest tell.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH buf AS (
+                SELECT ST_Buffer(ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+                                 %s)::geometry AS g
+            ),
+            inside AS (
+                SELECT COALESCE(m.population, 0) * LEAST(1.0, GREATEST(0.0,
+                           ST_Area(ST_Intersection(m.geom, buf.g)::geography)
+                           / NULLIF(ST_Area(m.geom::geography), 0))) AS population
+                FROM population_mesh m, buf
+                WHERE m.mesh_size_m = %s AND m.geom && buf.g
+                  AND ST_Intersects(m.geom, buf.g)
+            )
+            SELECT count(*)::int AS meshes,
+                   count(*) FILTER (WHERE population < 1)::int AS empty_meshes,
+                   sum(population) AS total,
+                   max(population) AS largest,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY population) AS median
+            FROM inside
+            """, (lng, lat, radius_m, mesh_size_m))
+        row = cur.fetchone()
+
+    if not row or not row["meshes"]:
+        return None
+    total = float(row["total"] or 0)
+    return {
+        "meshes": row["meshes"],
+        "meshes_with_no_residents": row["empty_meshes"],
+        "population_median_per_mesh": _round(row["median"]),
+        "population_largest_mesh": _round(row["largest"]),
+        "largest_mesh_share": (round(float(row["largest"]) / total, 3)
+                               if total > 0 and row["largest"] is not None else None),
+        "definition": ("商圏内のメッシュごとの人口の散らばり。largest_mesh_share が"
+                       "0.4 なら、商圏人口の4割が1メッシュ（500m四方）に集中している。"
+                       "合計値だけでは、集合住宅1棟なのか一様な住宅地なのか区別できない。"),
+    }
+
+
+def _zoning(conn: psycopg.Connection, lat: float, lng: float,
+            radius_m: int) -> dict[str, Any] | None:
+    """用途地域・容積率・建蔽率。何をどれだけ建てられる場所か。
+
+    Carried on every 地価公示 point and never surfaced. It is the constraint
+    the other figures sit inside: the same "residential area" is 96% floor area
+    ratio in 第一種低層住居専用 and 583% in 商業, which is the difference
+    between a street of houses and a street of tenanted buildings -- and a
+    practice is a tenant.
+
+    Only where a surveyed parcel happens to be; this is not the zoning map
+    (国土数値情報 A29 would be), and the response says so.
+    """
+    if not table_exists(conn, "land_prices"):
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT zoning, count(*)::int AS points,
+                   -- ::int, or the numeric that round() returns arrives as a
+                   -- Decimal and is serialised as a quoted string. A reader
+                   -- comparing "769" with 800 gets a lexicographic answer.
+                   round(avg(floor_area_ratio_pct))::int AS floor_area_ratio_pct,
+                   round(avg(building_coverage_pct))::int AS building_coverage_pct
+            FROM land_prices
+            WHERE zoning IS NOT NULL
+              AND ST_DWithin(geom::geography,
+                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+            GROUP BY zoning ORDER BY 2 DESC
+            """, (lng, lat, radius_m))
+        rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT zoning, floor_area_ratio_pct, building_coverage_pct, current_use,
+                   ST_Distance(geom::geography,
+                               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS distance_m
+            FROM land_prices
+            WHERE zoning IS NOT NULL
+            ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+            LIMIT 1
+            """, (lng, lat, lng, lat))
+        nearest = cur.fetchone()
+
+    if not rows and not nearest:
+        return None
+    return {
+        "at_nearest_surveyed_point": ({
+            "zoning": nearest["zoning"],
+            "floor_area_ratio_pct": nearest["floor_area_ratio_pct"],
+            "building_coverage_pct": nearest["building_coverage_pct"],
+            "current_use": nearest["current_use"],
+            "distance_m": round(nearest["distance_m"]),
+        } if nearest else None),
+        "in_radius": [dict(r) for r in rows],
+        "definition": ("都市計画の用途地域と、その地点の容積率・建蔽率（%）。"
+                       "地価公示の標準地が置かれた地点の値であり、用途地域図そのものではない。"
+                       "容積率は「その敷地に建てられる延床面積の割合」で、"
+                       "テナントとしての診療所が入りうる床の量に効く。"),
+    }
+
+
 def _round(value: Any, digits: int = 0) -> Any:
     if value is None:
         return None
@@ -331,6 +616,15 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
 
     metrics = analyze_point(conn, lat, lng, radius_m, category,
                             mesh_size_m or 1000, catchment)
+
+    # The mesh distribution exists only at the radius the scoring ran at, so
+    # the comparison is made there and says so. Comparing a 2km catchment
+    # against meshes measured at 1km would be a different quantity wearing the
+    # same name.
+    comparison_radius = model.mesh_scoring_radius_m
+    comparison_metrics = (metrics if comparison_radius == radius_m else
+                          analyze_point(conn, lat, lng, comparison_radius, category,
+                                        mesh_size_m or 1000, catchment))
     scope = scope_key(mesh_size_m or 1000, radius_m, prefecture_code)
     distributions = load_distributions(conn, scope)
 
@@ -406,6 +700,10 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                              or {}).get("geometry")} if include_geometry else {}),
         },
         "demand": {
+            # A total hides its own shape; this is how the residents are laid
+            # out inside the catchment.
+            "distribution": _catchment_shape(conn, lat, lng, radius_m,
+                                             mesh_size_m or 1000),
             "residents": {"by_radius": {r: {
                 k: v for k, v in vals.items()
                 if k in ("population", "age_0_14", "age_15_64", "age_65_plus",
@@ -428,6 +726,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 "distance_m": _round(metrics.get("nearest_facility_distance_m")),
             },
             "clinics_in_radius": _clinics(conn, lat, lng, radius_m, category, max_clinics),
+            # How close, not only how many.
+            "proximity": _competitor_distances(conn, lat, lng, category, radius_m),
         },
         "access": {
             "nearest_station": {
@@ -446,6 +746,14 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "note": (land or {}).get(
                 "note", "地価公示が未取得のため、コストの情報はありません。"),
         },
+        # 用途地域・容積率・建蔽率。The constraint the rest of the figures sit
+        # inside, and the only section here that is about what may be built.
+        "regulation": _zoning(conn, lat, lng, radius_m),
+        # Where this point sits among the meshes around it.
+        "relative_position": _percentiles(
+            conn, comparison_metrics, profile=model.profile_name,
+            radius_m=comparison_radius, prefecture_code=prefecture_code,
+            municipality_name=(municipality or {}).get("name")),
         "scores": {
             "normalization_scope": scope,
             "by_profile": scores,

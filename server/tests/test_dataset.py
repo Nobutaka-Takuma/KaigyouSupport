@@ -205,3 +205,113 @@ def test_the_dataset_is_a_document_not_an_answer(doc):
     """
     for banned in ("recommendation", "推奨", "おすすめ", "成功確率", "売上予測"):
         assert banned not in str(doc), f"the dataset offered a judgement: {banned}"
+
+
+# ------------------------------------------- what a reader cannot work out
+def test_the_point_is_placed_in_its_own_distribution(doc):
+    """The most useful thing here, and the least guessable.
+
+    That Ginza's land is expensive is common knowledge. That its 1km resident
+    population sits at the 30th percentile of Tokyo while its clinic count and
+    its land price both sit at the 100th is the shape of the place, and no
+    reader can derive it without the distribution in front of them.
+    """
+    rel = doc["relative_position"]
+    if rel is None:
+        pytest.skip("no scored meshes to compare against here")
+    pref = rel["prefecture"]
+    assert pref["compared_against_meshes"] > 100
+    for metric, value in pref.items():
+        if metric == "compared_against_meshes":
+            continue
+        assert 0 <= value <= 100, f"{metric} is not a percentile: {value}"
+    assert "%" in rel["definition"], "the reader has to know which way it runs"
+
+
+def test_the_comparison_names_the_radius_it_was_made_at(doc):
+    """Meshes are scored at one radius; comparing a 2km catchment to them
+    would be a different quantity under the same name."""
+    rel = doc["relative_position"]
+    if rel is None:
+        pytest.skip("no scored meshes here")
+    assert rel["radius_m"] > 0 and rel["profile"]
+
+
+def test_both_scopes_are_offered_where_boundaries_are_loaded(doc):
+    """Tokyo-wide and inside the ward answer different questions.
+
+    A mesh can be unremarkable for Tokyo and the densest in its own ward.
+    """
+    rel = doc["relative_position"]
+    if rel is None or "municipality" not in rel:
+        pytest.skip("no municipality scope available here")
+    assert rel["municipality"]["compared_against_meshes"] >= 1
+    assert rel["municipality"]["compared_against_meshes"] <= \
+        rel["prefecture"]["compared_against_meshes"]
+
+
+def test_the_competitor_ladder_is_monotonic(doc):
+    """The 20th nearest cannot be closer than the 1st."""
+    ladder = doc["competition"]["proximity"]["nth_nearest_distance_m"]
+    if len(ladder) < 2:
+        pytest.skip("too few clinics loaded here")
+    ranks = sorted(int(k) for k in ladder)
+    distances = [ladder[str(r)] for r in ranks]
+    assert distances == sorted(distances)
+    assert doc["competition"]["proximity"]["per_km2"] > 0
+
+
+def test_the_catchment_says_how_its_people_are_spread(doc):
+    """20,000 residents can be one tower block or forty streets of houses."""
+    shape = doc["demand"]["distribution"]
+    if shape is None:
+        pytest.skip("no mesh data here")
+    assert shape["meshes"] > 0
+    assert 0 <= shape["largest_mesh_share"] <= 1
+    assert shape["population_largest_mesh"] >= shape["population_median_per_mesh"]
+    assert shape["meshes_with_no_residents"] <= shape["meshes"]
+
+
+def test_the_regulation_section_says_what_may_be_built(doc):
+    """用途地域 decides whether the other figures can be acted on at all.
+
+    A practice is a tenant, and 96% floor area ratio and 583% are different
+    quantities of tenantable floor above the same population.
+    """
+    zoning = doc["regulation"]
+    if zoning is None:
+        pytest.skip("no land price data loaded here")
+    nearest = zoning["at_nearest_surveyed_point"]
+    assert nearest["zoning"]
+    assert nearest["floor_area_ratio_pct"] > 0
+    assert "用途地域図そのものではない" in zoning["definition"], (
+        "the reader must not take surveyed points for a zoning map")
+
+
+def test_numbers_are_numbers(doc):
+    """Postgres numeric arrives as Decimal and serialises as a quoted string.
+
+    A reader comparing "769" with 800 gets a lexicographic answer, silently.
+    """
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{path}[{i}]")
+        elif isinstance(node, str):
+            numeric_field = any(path.endswith(suffix) for suffix in (
+                "_pct", "_m", "_km2", "_count", "points", "workers",
+                "establishments", "population", "households"))
+            assert not numeric_field, f"{path} is a string: {node!r}"
+
+    walk(doc)
+
+
+def test_the_new_sections_are_defined_too(doc):
+    """The unit guard is only worth having if it covers what was added last."""
+    described = set(doc["definitions"])
+    for field in ("percentile", "nth_nearest_distance_m", "largest_mesh_share",
+                  "floor_area_ratio_pct", "building_coverage_pct", "zoning"):
+        assert field in described, f"no definition for {field}"
