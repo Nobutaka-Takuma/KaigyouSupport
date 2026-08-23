@@ -22,10 +22,11 @@ ADAPTER_TABLES = {
     "mlit_stations": "stations",
     "mlit_municipalities": "municipalities",
     "osm_walk_network": "walk_network",
+    "mlit_land_prices": "land_prices",
 }
 
 _TABLES = ("facilities", "population_mesh", "mesh_business", "stations",
-           "municipalities", "walk_network")
+           "municipalities", "walk_network", "land_prices")
 
 _TABLE_LABELS = {
     "facilities": "歯科医院",
@@ -34,6 +35,7 @@ _TABLE_LABELS = {
     "stations": "駅",
     "municipalities": "行政区域",
     "walk_network": "街路ネットワーク",
+    "land_prices": "地価公示",
 }
 
 

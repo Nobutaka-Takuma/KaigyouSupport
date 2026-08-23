@@ -290,6 +290,78 @@ def walk_network_status(conn: psycopg.Connection) -> dict[str, Any]:
     return {"available": True, "edges": edges}
 
 
+def land_prices_near(conn: psycopg.Connection, lat: float, lng: float,
+                     radius_m: int, limit: int = 3) -> dict[str, Any] | None:
+    """Published land prices around a point, by use division.
+
+    地価公示 is the price of specific surveyed parcels, per square metre, on
+    1 January. It is reported here as what it is -- the median and range of the
+    points that fall in the trade area, and the nearest few -- and nothing is
+    derived from it.
+
+    Deliberately NOT a rent estimate and NOT a score component. Rent depends on
+    the building, the floor and the contract, none of which are published here,
+    and the requirements rule out predicting cost. A number that looked like a
+    rent would be believed as one.
+
+    Split by 用途区分 because 住宅地 and 商業地 in the same ward differ several
+    times over: one blended figure would describe neither.
+    """
+    from kaigyou_core.db import table_exists
+
+    if not table_exists(conn, "land_prices"):
+        return None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT use_category,
+                   count(*)::int AS points,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY price_yen_per_sqm)
+                       AS median_yen_per_sqm,
+                   min(price_yen_per_sqm) AS min_yen_per_sqm,
+                   max(price_yen_per_sqm) AS max_yen_per_sqm,
+                   avg(change_rate_pct)   AS mean_change_pct,
+                   max(survey_year)       AS survey_year
+            FROM land_prices
+            WHERE ST_DWithin(geom::geography,
+                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+            GROUP BY use_category
+            ORDER BY count(*) DESC
+            """,
+            (lng, lat, radius_m),
+        )
+        by_use = [dict(row) for row in cur.fetchall()]
+
+        # The nearest points themselves. An aggregate hides that the median of
+        # two points is not a market; naming them lets the reader judge.
+        cur.execute(
+            """
+            SELECT address, municipality_name, use_category, price_yen_per_sqm,
+                   change_rate_pct, current_use, zoning, survey_year,
+                   ST_Distance(geom::geography,
+                               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS distance_m,
+                   ST_Y(geom) AS lat, ST_X(geom) AS lng
+            FROM land_prices
+            ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+            LIMIT %s
+            """,
+            (lng, lat, lng, lat, limit),
+        )
+        nearest = [dict(row) for row in cur.fetchall()]
+
+    if not by_use and not nearest:
+        return None
+    return {
+        "radius_m": radius_m,
+        "by_use": by_use,
+        "nearest": nearest,
+        "note": ("地価公示の標準地の価格（円/m²・1月1日時点）です。"
+                 "賃料の予測ではありません（建物・階数・契約条件は含まれません）。"
+                 "スコアには使用していません。"),
+    }
+
+
 def facility_counts(conn: psycopg.Connection, lat: float, lng: float,
                     radii: Sequence[int],
                     facility_category: str = DEFAULT_CATEGORY) -> dict[int, int]:

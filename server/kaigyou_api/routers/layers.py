@@ -158,6 +158,63 @@ def stations(
     )
 
 
+@router.get("/land-prices", summary="地価公示の標準地レイヤー")
+def land_prices(
+    conn: psycopg.Connection = Depends(get_conn),
+    bbox: str | None = Query(None),
+    use_category_code: str | None = Query(
+        None, description="用途区分コード（000 住宅地 / 005 商業地 …）"),
+    year: int | None = Query(None, description="省略時は読み込み済みの最新年"),
+    limit: int = Query(3000, ge=1, le=20000),
+) -> dict[str, Any]:
+    """地価公示の標準地。
+
+    Points, not a surface. Interpolating between them would produce a price for
+    every address in Tokyo, and 地価公示 does not say that: it says what these
+    particular parcels are worth. Drawn as the points they are.
+    """
+    if not table_exists(conn, "land_prices"):
+        return feature_collection([], provenance={"sources": []})
+
+    where = ["true"]
+    params: list[Any] = []
+    box = parse_bbox(bbox)
+    if box:
+        where.append(f"geom && {_BBOX_SQL}")
+        params.extend(box)
+    if use_category_code:
+        where.append("use_category_code = %s")
+        params.append(use_category_code)
+    if year:
+        where.append("survey_year = %s")
+        params.append(year)
+    else:
+        where.append("survey_year = (SELECT max(survey_year) FROM land_prices)")
+    params.append(limit)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT id, address, municipality_name, use_category, use_category_code,
+                   price_yen_per_sqm, change_rate_pct, current_use, zoning,
+                   nearest_station, station_distance_m, survey_year,
+                   ST_AsGeoJSON(geom, {COORD_DIGITS}) AS geojson
+            FROM land_prices
+            WHERE {' AND '.join(where)}
+            ORDER BY price_yen_per_sqm DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    return feature_collection(
+        _features(rows),
+        provenance=provenance.for_tables(conn, ["land_prices"]),
+        truncated=len(rows) >= limit,
+    )
+
+
 @router.get("/meshes", summary="人口メッシュ / スコアメッシュ")
 def meshes(
     conn: psycopg.Connection = Depends(get_conn),

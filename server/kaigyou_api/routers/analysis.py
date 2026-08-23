@@ -23,6 +23,7 @@ from kaigyou_core.analysis import (
     prefecture_at,
     prefecture_name,
     facility_counts,
+    land_prices_near,
     load_distributions,
     resolve_mesh_size,
     walk_network_status,
@@ -31,7 +32,8 @@ from kaigyou_core.scoring import ScoringModel, scope_key
 
 router = APIRouter()
 
-ANALYSIS_TABLES = ["population_mesh", "mesh_business", "facilities", "stations"]
+ANALYSIS_TABLES = ["population_mesh", "mesh_business", "facilities", "stations",
+                   "land_prices"]
 
 
 # Which score components each dataset feeds. Used to say precisely what is
@@ -43,6 +45,9 @@ _DATASET_COMPONENTS = {
     "mesh_business": ("需要",),
     "facilities": ("競合",),
     "stations": ("アクセス",),
+    # Reported alongside the analysis, deliberately not scored, so it affects
+    # no component -- but its provenance still belongs on the response.
+    "land_prices": (),
 }
 
 
@@ -205,6 +210,10 @@ def candidate_analysis(
     # The shape itself, so the map draws what the numbers were measured in
     # rather than a circle of its own.
     result["catchment"] = catchment_geojson(conn, lat, lng, radius, catchment)
+    # Published land prices around the point. Reported, never scored: see
+    # land_prices_near. Absent (null) rather than empty when L01 is not loaded,
+    # so the UI can say "not obtained" instead of "no land here".
+    result["land_price"] = land_prices_near(conn, lat, lng, radius)
     if catchment == "walk" and result.get("catchment_kind") != "walk":
         status = walk_network_status(conn)
         result["warnings"].insert(0, {

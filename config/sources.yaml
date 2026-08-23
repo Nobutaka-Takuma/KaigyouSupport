@@ -243,6 +243,53 @@ sources:
     # an area name that does not exist.
     exclude_code_suffixes: ["000"]
 
+  mlit_land_prices:
+    adapter: mlit_land_prices
+    name: "国土数値情報 地価公示（L01）標準地"
+    publisher: "国土交通省"
+    dataset_kind: official
+    homepage_url: "https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-L01-v3_1.html"
+    license: "国土数値情報 利用約款に従う（出典明記）"
+    # Published per prefecture per year as L01-<yy>_<pref>_GML.zip. Distributed
+    # from the page above; the usual route is:
+    #
+    #   kaigyou-etl run mlit_land_prices --input L01-26_13_GML.zip
+    #
+    url: null
+    encoding: cp932
+    # 価格時点は毎年1月1日。The file name carries the year (L01-26 = 令和8年);
+    # this is the date shown to the reader as the survey date.
+    source_date: 2026-01-01
+    # The columns are L01_001..L01_148 and nothing in the file says what any of
+    # them mean. This mapping is the documentation.
+    columns:
+      municipality_code: ["L01_001"]      # 市区町村コード
+      use_category:      ["L01_002"]      # 用途区分
+      serial:            ["L01_003"]      # 連番
+      year:              ["L01_007"]      # 価格時点の年
+      price:             ["L01_008"]      # 円/m²
+      change_rate:       ["L01_009"]      # 対前年変動率（%）
+      municipality_name: ["L01_024"]
+      address:           ["L01_025"]
+      current_use:       ["L01_028"]      # 利用の現況
+      nearest_station:   ["L01_048"]
+      station_distance:  ["L01_050"]      # m
+      zoning:            ["L01_051"]      # 用途地域
+      building_coverage: ["L01_057"]      # 建蔽率 %
+      floor_area_ratio:  ["L01_058"]      # 容積率 %
+    # 用途区分の公表コード。Residential and commercial land in the same ward
+    # differ by a factor of three or more, so one blended "land price here"
+    # would describe neither. Unlisted codes load with a null label rather than
+    # being dropped -- the price is still real.
+    use_categories:
+      "000": "住宅地"
+      "003": "宅地見込地"
+      "005": "商業地"
+      "007": "準工業地"
+      "009": "工業地"
+      "010": "市街化調整区域内宅地"
+      "013": "林地"
+
   osm_walk_network:
     adapter: osm_walk_network
     name: "OpenStreetMap 道路データ（徒歩ネットワーク）"

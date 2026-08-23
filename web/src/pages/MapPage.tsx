@@ -17,7 +17,8 @@ import { usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
 import type { CandidateAnalysis, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
-import { AccessTable, CatchmentNote, PopulationTable, ScorePanel } from "../components/ScorePanel";
+import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
+         ScorePanel } from "../components/ScorePanel";
 
 const TOKYO_CENTER: [number, number] = [139.7671, 35.6812];
 
@@ -39,6 +40,7 @@ interface LayerState {
   meshes: boolean;
   clinics: boolean;
   stations: boolean;
+  landPrices: boolean;
 }
 
 export function MapPage() {
@@ -54,6 +56,9 @@ export function MapPage() {
   const { list: prefectures, code: prefecture, current: prefectureInfo,
           select: selectPrefecture } = usePrefecture();
   const [layers, setLayers] = useState<LayerState>({
+    // Off by default: it is reference information, and on over a whole city it
+    // competes with the clinics the screen is actually about.
+    landPrices: false,
     municipalities: true,
     meshes: true,
     clinics: true,
@@ -103,7 +108,8 @@ export function MapPage() {
     mapRef.current = map;
 
     map.on("load", () => {
-      for (const id of ["municipalities", "meshes", "clinics", "stations", "candidate"]) {
+      for (const id of ["municipalities", "meshes", "clinics", "stations",
+                        "landPrices", "candidate"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC });
       }
 
@@ -147,6 +153,25 @@ export function MapPage() {
           ],
           "circle-color": "#0f766e",
           "circle-opacity": 0.75,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1,
+        },
+      });
+      map.addLayer({
+        id: "landPrices-circle",
+        type: "circle",
+        source: "landPrices",
+        paint: {
+          // Radius by price, on a log-ish stepped scale: 地価公示 spans four
+          // orders of magnitude in one prefecture (¥2,240/m² of woodland to
+          // ¥67,100,000/m² in Ginza) and a linear ramp would render all but a
+          // handful of points identically.
+          "circle-radius": [
+            "interpolate", ["linear"], ["log10", ["max", ["get", "price_yen_per_sqm"], 1]],
+            4, 3, 5, 5, 6, 8, 7, 13,
+          ],
+          "circle-color": "#a16207",
+          "circle-opacity": 0.7,
           "circle-stroke-color": "#ffffff",
           "circle-stroke-width": 1,
         },
@@ -215,6 +240,7 @@ export function MapPage() {
   // Every layer follows the viewport. Loading all of Tokyo is
   // 13MB, which is fine on a desktop and unusable on a phone; a city-level
   // viewport is well under one.
+  const showLandPrices = layers.landPrices;
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map) return;
@@ -226,7 +252,7 @@ export function MapPage() {
 
     const request = ++viewportRequest.current;
     try {
-      const [muni, mesh, clinics, stations] = await Promise.all([
+      const [muni, mesh, clinics, stations, landPrices] = await Promise.all([
         // Most of the boundary payload is Izu and Ogasawara coastline, a
         // thousand kilometres from anything the user is looking at. The bbox
         // already excludes it; the prefecture keeps a neighbouring one from
@@ -240,6 +266,9 @@ export function MapPage() {
           : Promise.resolve(EMPTY_RESPONSE),
         zoom >= MIN_ZOOM.stations
           ? api.stations({ bbox, limit: 2000 })
+          : Promise.resolve(EMPTY_RESPONSE),
+        showLandPrices && zoom >= MIN_ZOOM.clinics
+          ? api.landPrices({ bbox, limit: 2000 })
           : Promise.resolve(EMPTY_RESPONSE),
       ]);
       // A slow response for an older viewport must not overwrite a newer one.
@@ -257,6 +286,7 @@ export function MapPage() {
       );
       (map.getSource("clinics") as maplibregl.GeoJSONSource)?.setData(clinics as never);
       (map.getSource("stations") as maplibregl.GeoJSONSource)?.setData(stations as never);
+      (map.getSource("landPrices") as maplibregl.GeoJSONSource)?.setData(landPrices as never);
       setZoomedOut(zoom < MIN_ZOOM.clinics);
       setLayerError(null);
     } catch (e) {
@@ -264,7 +294,7 @@ export function MapPage() {
         setLayerError(e instanceof Error ? e.message : String(e));
       }
     }
-  }, [profile, prefecture]);
+  }, [profile, prefecture, showLandPrices]);
 
   useEffect(() => {
     if (!ready || !mapRef.current) return;
@@ -332,6 +362,7 @@ export function MapPage() {
       meshes: ["meshes-fill"],
       clinics: ["clinics-circle"],
       stations: ["stations-circle"],
+      landPrices: ["landPrices-circle"],
     };
     for (const [key, ids] of Object.entries(mapping)) {
       for (const id of ids) {
@@ -515,6 +546,7 @@ export function MapPage() {
               ["meshes", "メッシュ"],
               ["clinics", "歯科医院"],
               ["stations", "駅"],
+              ["landPrices", "地価"],
               ["municipalities", "境界"],
             ] as [keyof LayerState, string][]
           ).map(([key, label]) => (
@@ -655,6 +687,8 @@ export function MapPage() {
               <h3>人口・競合</h3>
               <CatchmentNote analysis={analysis} />
               <PopulationTable analysis={analysis} />
+
+              <LandPriceTable analysis={analysis} />
 
               <h3>アクセス・その他</h3>
               <AccessTable analysis={analysis} />

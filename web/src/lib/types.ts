@@ -69,6 +69,8 @@ export interface CandidateAnalysis {
   /** どの都道府県の正規化で出したスコアか。県をまたぐ比較はできない。 */
   prefecture_code?: string;
   prefecture_name?: string;
+  /** 参考表示のみ。取り込んでいないときは null。 */
+  land_price?: LandPriceSummary | null;
   catchment_area_km2: number | null;
   /** 実際に使われた商圏ポリゴン。地図はこれを描く（自前で円を描かない）。 */
   catchment: { geometry: GeoJSON.Geometry; kind: "circle" | "walk" } | null;
@@ -254,5 +256,37 @@ export interface Prefecture {
 export interface PrefectureList {
   prefectures: Prefecture[];
   default: string;
+  note: string;
+}
+
+/** 地価公示（国土数値情報 L01）。参考情報であり、スコアには使っていない。 */
+export interface LandPriceByUse {
+  use_category: string | null;
+  points: number;
+  median_yen_per_sqm: number | null;
+  min_yen_per_sqm: number | null;
+  max_yen_per_sqm: number | null;
+  mean_change_pct: number | null;
+  survey_year: number | null;
+}
+
+export interface LandPricePoint {
+  address: string | null;
+  municipality_name: string | null;
+  use_category: string | null;
+  price_yen_per_sqm: number;
+  change_rate_pct: number | null;
+  current_use: string | null;
+  zoning: string | null;
+  survey_year: number | null;
+  distance_m: number;
+  lat: number;
+  lng: number;
+}
+
+export interface LandPriceSummary {
+  radius_m: number;
+  by_use: LandPriceByUse[];
+  nearest: LandPricePoint[];
   note: string;
 }

@@ -32,6 +32,7 @@ class Discovery:
     mesh_baseline: Path | None = None
     mesh_business: Path | None = None
     walk_network: Path | None = None
+    land_prices: Path | None = None
     stations: Path | None = None
     municipalities: Path | None = None
     unmatched: list[Path] = field(default_factory=list)
@@ -56,6 +57,8 @@ class Discovery:
         out = []
         if not self.mesh_business:
             out.append("経済センサス メッシュ（事業所・従業者数）")
+        if not self.land_prices:
+            out.append("地価公示 L01（参考情報として表示）")
         if not self.walk_network:
             out.append("OpenStreetMap 道路（徒歩圏の算出に使用）")
         return out
@@ -67,6 +70,7 @@ class Discovery:
             "mesh_baseline": str(self.mesh_baseline) if self.mesh_baseline else None,
             "mesh_business": str(self.mesh_business) if self.mesh_business else None,
             "walk_network": str(self.walk_network) if self.walk_network else None,
+            "land_prices": str(self.land_prices) if self.land_prices else None,
             "stations": str(self.stations) if self.stations else None,
             "municipalities": str(self.municipalities) if self.municipalities else None,
         }
@@ -127,6 +131,8 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
                 _assign(found, "walk_network", path)
             elif "numberofpassengers" in members or "s12-" in members:
                 _assign(found, "stations", path)
+            elif "l01-" in members or "l01" in path.name.lower():
+                _assign(found, "land_prices", path)
             elif "n03-" in members or "n03" in path.name.lower():
                 _assign(found, "municipalities", path)
             else:
@@ -170,6 +176,11 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
             "OpenStreetMap の道路データがないため、商圏は円（直線距離）のみになります。"
             "徒歩圏（街路網に沿った距離）は選べません。"
         )
+    if found.land_prices is None:
+        found.notes.append(
+            "地価公示（L01）のファイルがないため、地価は表示されません。"
+            "分析・スコアには影響しません。"
+        )
     if found.mesh_business is None:
         found.notes.append(
             "経済センサスのメッシュファイルがないため、従業者数（昼の需要）は"
@@ -209,6 +220,7 @@ def describe(found: Discovery) -> Iterable[str]:
         "walk_network": "街路ネットワーク（OSM）",
         "stations": "駅別乗降客数",
         "municipalities": "行政区域",
+        "land_prices": "地価公示（L01）",
     }
     for slot, label in labels.items():
         path = getattr(found, slot)

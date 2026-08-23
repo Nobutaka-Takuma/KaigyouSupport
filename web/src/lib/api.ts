@@ -77,6 +77,13 @@ export const api = {
     limit?: number;
   }) => get<GeoJSONResponse>("/meshes", params),
 
+  landPrices: (params: {
+    bbox?: string;
+    use_category_code?: string;
+    year?: number;
+    limit?: number;
+  } = {}) => get<GeoJSONResponse>("/land-prices", params),
+
   municipalities: (params: {
     prefecture_code?: string;
     bbox?: string;

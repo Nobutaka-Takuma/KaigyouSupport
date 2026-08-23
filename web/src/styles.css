@@ -527,3 +527,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 地価（参考）。スコアに使っていない情報なので、控えめに置く。 */
+.land-price__nearest { margin: 0.25rem 0 0.75rem; padding-left: 1.1rem; }
+.land-price__nearest li { margin-bottom: 0.25rem; }

@@ -132,7 +132,7 @@ def _prefecture_for(found: Any, requested: str | None) -> tuple[str, str | None]
 
     named: dict[str, list[str]] = {}
     for path in (found.mesh_current, found.mesh_baseline, found.mesh_business,
-                 found.municipalities):
+                 found.municipalities, found.land_prices):
         if path is None:
             continue
         code = prefecture_from_filename(path)
@@ -244,6 +244,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
         ("osm_walk_network", found.walk_network, None),
         ("mlit_stations", found.stations, None),
         ("mlit_municipalities", found.municipalities, None),
+        ("mlit_land_prices", found.land_prices, None),
     ]
     failures = 0
     for source_id, input_path, baseline in plan:

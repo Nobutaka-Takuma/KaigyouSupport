@@ -166,6 +166,7 @@ TABLES = (
     ("walk_network", "街路ネットワーク", False),
     ("stations", "駅", True),
     ("municipalities", "行政区域", True),
+    ("land_prices", "地価公示", False),
 )
 
 
@@ -202,8 +203,8 @@ def _check_data(report: Report, conn: Any) -> None:
     if optional_empty:
         report.add(
             "任意データ", WARN, f"未取得: {', '.join(optional_empty)}",
-            "無くても分析は動きます。徒歩圏の商圏を使うなら "
-            "OpenStreetMap の道路データを download フォルダに置いてください。",
+            "無くても分析は動きます。徒歩圏の商圏には OpenStreetMap の道路データ、"
+            "地価の表示には国土数値情報 L01 を download フォルダに置いてください。",
         )
     if empty:
         report.add(
