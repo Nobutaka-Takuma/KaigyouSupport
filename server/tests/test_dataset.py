@@ -1,0 +1,207 @@
+"""The one-point dataset: what it must contain, and what it must not imply.
+
+This endpoint exists to be read by something that has never seen the project
+-- another program, a person with the JSON open, a model. That reader cannot
+ask a follow-up question, so everything it needs to avoid a confident wrong
+reading has to be in the document: the unit of every figure, the difference
+between a zero and an unknown, and the caveats that separate 従業者数 from
+昼間人口 and 地価 from 賃料.
+"""
+from __future__ import annotations
+
+import psycopg
+import pytest
+from fastapi.testclient import TestClient
+
+from kaigyou_api.main import app
+from kaigyou_core.db import connect, table_exists
+
+#: 銀座4丁目. Dense enough that every section has something in it.
+GINZA = {"lat": 35.6717, "lng": 139.7650, "radius": 1000}
+
+
+@pytest.fixture(scope="module")
+def client():
+    try:
+        with connect() as conn:
+            if not table_exists(conn, "population_mesh"):
+                pytest.skip("schema not migrated here")
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) AS n FROM population_mesh")
+                if not cur.fetchone()["n"]:
+                    pytest.skip("no data loaded here")
+    except psycopg.OperationalError:
+        pytest.skip("no database")
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture(scope="module")
+def doc(client):
+    response = client.get("/api/dataset", params=GINZA)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+# ------------------------------------------------------------------- shape
+def test_the_document_is_versioned_and_dated(doc):
+    """A reader that stores one of these needs to know what it is holding."""
+    assert doc["schema_version"]
+    assert doc["generated_at"].endswith("+00:00"), "timestamps are UTC and say so"
+    assert doc["query"]["radius_m"] == GINZA["radius"]
+
+
+def test_every_section_is_present(doc):
+    for section in ("location", "catchment", "demand", "competition", "access",
+                    "cost", "scores", "data_quality", "definitions", "provenance"):
+        assert section in doc, f"missing section: {section}"
+
+
+def test_the_requested_radius_is_among_the_radii_reported(doc):
+    assert str(GINZA["radius"]) in doc["demand"]["residents"]["by_radius"]
+
+
+# ------------------------------------------------------- self-describing
+def test_every_reported_figure_has_a_unit(doc):
+    """The guard against adding a number and leaving the reader to guess.
+
+    A figure whose unit has to be inferred will be inferred wrongly sooner or
+    later -- 円/m² read as a rent, 従業者数 read as daytime population.
+    """
+    described = set(doc["definitions"])
+    reported = set()
+    for section in (doc["demand"]["residents"]["by_radius"],
+                    doc["demand"]["daytime"]["by_radius"],
+                    doc["competition"]["by_radius"]):
+        for values in section.values():
+            reported |= set(values)
+    # mesh_count is bookkeeping rather than a figure about the place.
+    reported -= {"mesh_count"}
+    assert reported <= described, f"no definition for: {sorted(reported - described)}"
+
+
+def test_the_definitions_say_what_the_dangerous_ones_are_not(doc):
+    """Two figures are routinely read as something they are not."""
+    assert "昼間人口ではない" in doc["definitions"]["workers"]["description"]
+    assert "賃料ではない" in doc["definitions"]["land_price_yen_per_sqm"]["description"]
+
+
+def test_the_caveats_travel_with_the_data(doc):
+    joined = " ".join(doc["data_quality"]["caveats"])
+    for phrase in ("予測するものではありません", "都道府県をまたい", "賃料", "昼間人口"):
+        assert phrase in joined, f"caveat missing: {phrase}"
+    assert doc["disclaimer"]
+
+
+# ---------------------------------------------------- absent is not zero
+def test_a_place_with_no_mesh_data_reports_null_not_zero(client):
+    """Somewhere with no census mesh loaded has unknown population, not none.
+
+    A zero here would read as "nobody lives here", which is a claim the data
+    does not make.
+    """
+    response = client.get("/api/dataset",
+                          params={"lat": 34.9756, "lng": 138.3827, "radius": 1000})
+    assert response.status_code == 200
+    body = response.json()
+    residents = body["demand"]["residents"]["by_radius"]["1000"]
+    if residents["population"] is not None:
+        pytest.skip("this point has mesh data loaded here")
+    assert residents["population"] is None
+    assert residents["households"] is None
+    assert any("人口メッシュ" in n for n in body["data_quality"]["notes"])
+
+
+def test_an_empty_clinic_type_is_reported_as_unavailable_not_as_none_offered(doc):
+    """The published file has no 診療科目 column, so every list is empty.
+
+    Left unexplained, a reader concludes that no clinic in Tokyo offers
+    paediatric dentistry.
+    """
+    assert any("clinic_types" in n for n in doc["data_quality"]["notes"])
+
+
+# ------------------------------------------------------------- the counts
+def test_the_count_is_the_whole_count_even_when_the_list_is_cut(doc):
+    clinics = doc["competition"]["clinics_in_radius"]
+    assert clinics["count"] >= clinics["listed"]
+    if clinics["truncated"]:
+        assert clinics["count"] > clinics["listed"]
+    # And the count agrees with the aggregate the score is built on.
+    assert clinics["count"] == doc["competition"]["by_radius"]["1000"]["dental_clinics"]
+
+
+def test_the_list_can_be_dropped_without_losing_the_count(client):
+    body = client.get("/api/dataset", params={**GINZA, "max_clinics": 0}).json()
+    clinics = body["competition"]["clinics_in_radius"]
+    assert clinics["listed"] == 0 and clinics["items"] == []
+    assert clinics["count"] > 0, "the count survives; only the enumeration goes"
+
+
+# --------------------------------------------------------------- content
+def test_the_daytime_side_carries_its_industry_mix(doc):
+    """Stored per mesh since the economic census landed, surfaced nowhere else.
+
+    "300,000 people work here" and "300,000 work here, mostly in offices" are
+    different places to open a practice.
+    """
+    mix = doc["demand"]["daytime"]["industry_mix"]
+    if mix is None:
+        pytest.skip("economic census not loaded here")
+    assert "tertiary" in mix
+    assert mix["tertiary"]["workers"] > 0
+    assert "産業分類別" in doc["definitions"]["industry_workers"]["description"]
+
+
+def test_stations_come_with_their_operators_and_passenger_counts(doc):
+    stations = doc["access"]["stations_in_radius"]["items"]
+    if not stations:
+        pytest.skip("no stations loaded here")
+    assert stations[0]["name"]
+    assert "distance_m" in stations[0] and "daily_passengers" in stations[0]
+    assert doc["access"]["nearest_station"]["name"] == stations[0]["name"]
+
+
+def test_every_configured_model_is_scored(doc, client):
+    from kaigyou_core import config as cfg
+
+    names = {s["profile"] for s in doc["scores"]["by_profile"]}
+    assert names == set(cfg.scoring_config()["profiles"])
+    for entry in doc["scores"]["by_profile"]:
+        assert entry["is_provisional"] is True
+        assert "weights" in entry, "the reader can see what produced the number"
+
+
+def test_the_scores_name_the_scope_they_are_relative_to(doc):
+    """A score without its normalisation scope invites a cross-prefecture read."""
+    assert "pref" in doc["scores"]["normalization_scope"]
+    assert "都道府県" in doc["scores"]["note"]
+
+
+def test_the_catchment_says_which_shape_produced_the_numbers(doc):
+    assert doc["catchment"]["kind"] in ("circle", "walk")
+    assert doc["catchment"]["area_km2"] > 0
+
+
+def test_the_geometry_is_opt_in(client):
+    without = client.get("/api/dataset", params=GINZA).json()
+    assert "geometry" not in without["catchment"]
+    with_geom = client.get("/api/dataset", params={**GINZA, "geometry": "true"}).json()
+    assert with_geom["catchment"]["geometry"]["type"] in ("Polygon", "MultiPolygon")
+
+
+def test_provenance_names_the_sources_and_their_dates(doc):
+    sources = doc["provenance"]["sources"]
+    assert sources, "a document with no provenance cannot be checked by its reader"
+    for entry in sources:
+        assert entry["publisher"]
+        assert "source_date" in entry
+
+
+def test_the_dataset_is_a_document_not_an_answer(doc):
+    """No prose, no recommendation, no prediction. Numbers and their meaning.
+
+    What reads this may write prose; that is its business, and it will have
+    the caveats to do it honestly. This endpoint must not do it for them.
+    """
+    for banned in ("recommendation", "推奨", "おすすめ", "成功確率", "売上予測"):
+        assert banned not in str(doc), f"the dataset offered a judgement: {banned}"

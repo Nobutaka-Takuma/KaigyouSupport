@@ -29,6 +29,7 @@ from kaigyou_core.analysis import (
     resolve_mesh_size,
     walk_network_status,
 )
+from kaigyou_core.dataset import build_dataset
 from kaigyou_core.scoring import ScoringModel, scope_key
 
 router = APIRouter()
@@ -275,6 +276,42 @@ def candidate_analysis(
     result["disclaimer"] = DISCLAIMER
     result["score_disclaimer"] = SCORE_DISCLAIMER
     return result
+
+
+@router.get("/dataset", summary="1地点の商圏分析データセット（機械可読）")
+def dataset(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius: int = Query(1000, ge=100, le=10000, description="商圏半径（m）"),
+    catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$"),
+    category: str = Query(DEFAULT_CATEGORY),
+    profile: str | None = Query(None, description="省略時は active_profile"),
+    mesh_size_m: int | None = Query(None),
+    prefecture_code: str | None = Query(None),
+    geometry: bool = Query(False, description="商圏ポリゴンを含める（応答が大きくなる）"),
+    max_clinics: int = Query(
+        50, ge=0, le=500,
+        description="列挙する歯科診療所の上限。0 なら件数のみ（件数は常に全数）"),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """この地点について分かることを、ひとつのJSONにまとめて返します。
+
+    The other endpoints are shaped for the screen -- one panel, one question.
+    This is shaped for a reader that has to reason about the place as a whole
+    and has never seen the project: every figure carries its unit and its
+    source in `definitions`, missing datasets are named rather than appearing
+    as zeroes, and the caveats travel with the data.
+
+    No model is called here. It returns the document; what reads it is the
+    caller's business.
+    """
+    return build_dataset(
+        conn, lat, lng, radius,
+        catchment=catchment, category=category,
+        prefecture_code=prefecture_code, mesh_size_m=mesh_size_m,
+        profile=profile, include_geometry=geometry, max_clinics=max_clinics,
+        disclaimer=DISCLAIMER, score_disclaimer=SCORE_DISCLAIMER,
+    )
 
 
 @router.get("/rankings", summary="メッシュ単位の候補地ランキング")
