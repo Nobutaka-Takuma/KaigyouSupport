@@ -1,57 +1,32 @@
--- 011_catchment_mode.sql
--- Let the trade area be a walk, not only a circle.
+-- 014_cost_axis.sql
+-- Give the analysis a cost axis, so the model stops answering only "where is
+-- it good" and can also answer "where is it good for what it costs".
 --
--- The shape is now a choice, and which one was used is returned with the
--- numbers. That matters more than it sounds: a circle and a walking catchment
--- around the same point can differ by a factor of three, so a population
--- figure without its shape is not interpretable. Measured on the test network,
--- with a river and one bridge, at 500m: circle 0.78 km² crossing the river,
--- walk 0.29 km² stopping at the bank.
+-- Without one, the score ranks Ginza above everywhere, which is true and
+-- useless: good locations are expensive, and a practice is an business of
+-- fixed costs. The land price of the trade area is the only published,
+-- geocoded proxy for that available here.
 --
--- 'circle' stays the default. It needs no extra dataset, it is instant, and
--- every score computed so far used it -- switching silently would change every
--- number on the site without anything saying so.
+-- Two figures, both from 地価公示:
+--
+--   land_price_yen_per_sqm  median of the surveyed parcels in the catchment
+--   land_price_points       how many parcels that median rests on
+--
+-- The count matters as much as the median. 地価公示 surveys a few thousand
+-- parcels in a prefecture, so a rural catchment can contain one, and the
+-- median of one parcel is that parcel. The scoring layer withholds the cost
+-- component below a configured minimum rather than scoring on a single point.
+--
+-- 商業地 first, all divisions as fallback: a clinic is a tenant in commercial
+-- premises, and 住宅地 in the same block runs several times cheaper. Where the
+-- catchment has no commercial parcel -- most of the suburbs -- the mixed
+-- median is the honest answer, and land_price_basis says which was used so
+-- the reader is not comparing the two silently.
 
-DROP FUNCTION IF EXISTS kg_analyze_point(
-    double precision, double precision, double precision, text, integer);
-
--- The trade area itself, so the map can draw the same shape the numbers used.
--- Falls back to a circle whenever a walk is asked for and cannot be produced --
--- no network loaded, no pgRouting, or no street within reach of the point.
-CREATE OR REPLACE FUNCTION kg_catchment(
-    p_lat        double precision,
-    p_lng        double precision,
-    p_radius_m   double precision,
-    p_mode       text DEFAULT 'circle'
-)
-RETURNS TABLE (geom geometry, kind text)
-LANGUAGE plpgsql STABLE AS $$
-DECLARE
-    v_point geometry(Point, 4326) := ST_SetSRID(ST_MakePoint(p_lng, p_lat), 4326);
-    v_walk  geometry;
-BEGIN
-    IF p_mode = 'walk' AND to_regproc('kg_walk_catchment') IS NOT NULL THEN
-        v_walk := kg_walk_catchment(p_lat, p_lng, p_radius_m);
-        IF v_walk IS NOT NULL AND NOT ST_IsEmpty(v_walk) THEN
-            RETURN QUERY SELECT v_walk, 'walk'::text;
-            RETURN;
-        END IF;
-    END IF;
-    RETURN QUERY SELECT ST_Buffer(v_point::geography, p_radius_m)::geometry,
-                        'circle'::text;
-END;
-$$;
-
--- Dropped first, including this file's own six-argument form. `migrate`
--- replays this file when pgRouting appears after it was recorded as applied,
--- and by then a later migration may have redefined kg_analyze_point with more
--- columns -- CREATE OR REPLACE cannot change a function's return type, so the
--- replay would fail. The replay continues in file order afterwards, so the
--- newest definition is the one left standing.
 DROP FUNCTION IF EXISTS kg_analyze_point(
     double precision, double precision, double precision, text, integer, text);
 
-CREATE OR REPLACE FUNCTION kg_analyze_point(
+CREATE FUNCTION kg_analyze_point(
     p_lat               double precision,
     p_lng               double precision,
     p_radius_m          double precision,
@@ -73,6 +48,9 @@ RETURNS TABLE (
     facility_count              integer,
     population_per_facility     double precision,
     workers_per_facility        double precision,
+    land_price_yen_per_sqm      double precision,
+    land_price_points           integer,
+    land_price_basis            text,
     catchment_kind              text,
     catchment_area_km2          double precision,
     nearest_facility_id         bigint,
@@ -136,14 +114,28 @@ BEGIN
           AND b.geom && v_buf
           AND ST_Intersects(b.geom, v_buf)
     ),
-    -- Competitors inside the same shape as the demand. Counting clinics in a
-    -- circle while measuring population along the streets would put a rival
-    -- across the river into a catchment its customers cannot reach.
-    --
-    -- Circles keep the exact geodesic test they always used. ST_Buffer on
-    -- geography returns a 32-gon inscribed in the true circle -- about 99.6% of
-    -- its area -- so switching them to an intersection would drop the occasional
-    -- clinic near the edge and move numbers that nothing else here changed.
+    -- Surveyed parcels inside the same shape as everything else. Points, so a
+    -- plain containment test; no apportionment applies to a point.
+    land_pts AS (
+        SELECT l.price_yen_per_sqm AS price,
+               (l.use_category_code = '005') AS commercial
+        FROM land_prices l
+        WHERE l.geom && v_buf
+          AND ST_Intersects(l.geom, v_buf)
+          AND l.survey_year = (SELECT max(survey_year) FROM land_prices)
+    ),
+    land AS (
+        SELECT
+            COALESCE(
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY lp.price)
+                    FILTER (WHERE lp.commercial),
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY lp.price)
+            )                                                    AS price,
+            COUNT(*)::integer                                    AS points,
+            CASE WHEN COUNT(*) FILTER (WHERE lp.commercial) > 0
+                 THEN 'commercial' ELSE 'all' END                AS basis
+        FROM land_pts lp
+    ),
     fac AS (
         SELECT COUNT(*)::integer AS facility_count
         FROM facilities f
@@ -176,14 +168,23 @@ BEGIN
              THEN pop.population / fac.facility_count END,
         CASE WHEN fac.facility_count > 0
              THEN biz.workers / fac.facility_count END,
+        land.price, land.points,
+        CASE WHEN land.points > 0 THEN land.basis END,
         v_kind,
         ST_Area(v_buf::geography) / 1e6,
         nearest_fac.id, nearest_fac.name, nearest_fac.dist,
         nearest_stn.id, nearest_stn.name, nearest_stn.dist, nearest_stn.daily_passengers
     FROM pop
     CROSS JOIN biz
+    CROSS JOIN land
     CROSS JOIN fac
     LEFT JOIN nearest_fac ON true
     LEFT JOIN nearest_stn ON true;
 END;
 $$;
+
+
+-- Kept on the scored mesh so the ranking can show what a place costs beside
+-- what it scores, without re-running the analysis per row.
+ALTER TABLE mesh_scores ADD COLUMN IF NOT EXISTS land_price_yen_per_sqm double precision;
+ALTER TABLE mesh_scores ADD COLUMN IF NOT EXISTS cost_score double precision;

@@ -34,8 +34,12 @@ export interface Scores {
   competition: number | null;
   growth: number | null;
   accessibility: number | null;
+  /** コスト軸。重みを持つプロファイルのときだけ入る。 */
+  cost?: number | null;
   overall: number | null;
   unavailable_components: string[];
+  /** これが空でないとき、総合スコアは算出されない（欠測を無罰にしないため）。 */
+  missing_required_components?: string[];
   breakdown: Record<string, ComponentBreakdown>;
   normalization_scope?: string;
 }
@@ -71,6 +75,13 @@ export interface CandidateAnalysis {
   prefecture_name?: string;
   /** 参考表示のみ。取り込んでいないときは null。 */
   land_price?: LandPriceSummary | null;
+  /** コスト軸の入力。商圏内の地価公示の中央値。 */
+  land_price_yen_per_sqm?: number | null;
+  land_price_points?: number | null;
+  /** "commercial"（商業地のみ）か "all"（全用途区分）。 */
+  land_price_basis?: string | null;
+  /** 全プロファイルの総合スコア。地価を勘案すると順位が変わることを見せるため。 */
+  scores_by_profile?: ProfileScore[];
   catchment_area_km2: number | null;
   /** 実際に使われた商圏ポリゴン。地図はこれを描く（自前で円を描かない）。 */
   catchment: { geometry: GeoJSON.Geometry; kind: "circle" | "walk" } | null;
@@ -132,6 +143,9 @@ export interface RankingItem {
   competition_score: number | null;
   growth_score: number | null;
   accessibility_score: number | null;
+  /** 地価考慮プロファイルのときだけ入る。 */
+  cost_score?: number | null;
+  land_price_yen_per_sqm?: number | null;
   population: number | null;
   age_0_14: number | null;
   age_65_plus: number | null;
@@ -289,4 +303,14 @@ export interface LandPriceSummary {
   by_use: LandPriceByUse[];
   nearest: LandPricePoint[];
   note: string;
+}
+
+
+/** 1プロファイルぶんの結果。地価あり／なしの比較に使う。 */
+export interface ProfileScore {
+  profile: string;
+  label: string;
+  overall: number | null;
+  cost: number | null;
+  uses_cost: boolean;
 }

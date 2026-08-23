@@ -165,6 +165,76 @@ profiles:
       passengers_min: 1000
       passengers_max: 500000
 
+  # -------------------------------------------------------------------------
+  # 地価を勘案したプロファイル。
+  #
+  # The other profiles answer "where is it good". This one answers "where is
+  # it good for what it costs", which is a different question and gives a
+  # visibly different ranking: central commercial land scores well on demand
+  # and access, then gives most of it back on cost.
+  #
+  # `default` and the rest are deliberately unchanged. Their numbers are what
+  # the reader has been looking at, and a cost axis is an opinion -- offered
+  # beside the old answer, not substituted for it.
+  #
+  # The cost weight (0.20) is a hypothesis like every other number in this
+  # file. It says roughly "cost matters about as much as growth and access
+  # together", which is arguable; argue with it here rather than in code.
+  cost_aware:
+    label: "地価考慮（暫定モデル）"
+    description: >
+      標準モデルに地価公示によるコスト軸を加えた仮説重み。
+      地価は賃料そのものではなく、公表されている中で唯一の座標付きの価格指標として
+      代理に使っています。実績データによる較正は行っていません。
+    overall_weights:
+      demand: 0.30
+      competition: 0.25
+      growth: 0.10
+      accessibility: 0.15
+      cost: 0.20
+    demand_weights:
+      population: 0.28
+      workers: 0.20
+      age_0_14: 0.12
+      age_65_plus: 0.12
+      households: 0.16
+      population_growth: 0.12
+    competition:
+      metric: population_per_facility
+      zero_facility_score: 95
+      zero_population_score: 0
+      cap: 20000
+    growth:
+      metric: population_growth
+      low: -0.08
+      high: 0.12
+    accessibility:
+      weights:
+        station_distance: 0.6
+        daily_passengers: 0.4
+      distance_best_m: 200
+      distance_worst_m: 2000
+      passengers_scale: log10
+      passengers_min: 1000
+      passengers_max: 500000
+    # --- Cost --------------------------------------------------------------
+    cost:
+      # 地価公示の標準地の中央値（円/m²）。商圏内に商業地があれば商業地、
+      # なければ全用途区分の中央値。どちらを使ったかは land_price_basis に入ります。
+      metric: land_price_yen_per_sqm
+      # 都内だけで4桁違う（林地 2,240 円/m² 〜 銀座 67,100,000 円/m²）ため、
+      # 線形だと郊外がすべて同じ値に潰れます。
+      scale: log10
+      # これ未満の地点数しか商圏内に無いときは算出しません。標準地は都道府県で
+      # 数千地点しかなく、1地点の中央値はその1地点そのものです。
+      min_points: 3
+    # コストを算出できない地点は、このモデルでは順位を付けません。
+    # 落として残りの重みを正規化すると「コストが分からない＝コストがかからない」
+    # という意味になり、いちばん情報の乏しい場所が1位に来ます（実際に来ました）。
+    # 東京都で3地点以上を満たすのは約71%のメッシュです。
+    required_components: [cost]
+
+
 # Trade-area radii offered by the UI, metres.
 trade_area_radii_m: [500, 1000, 2000]
 

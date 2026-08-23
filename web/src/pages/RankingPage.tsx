@@ -33,6 +33,9 @@ export function RankingPage() {
   const { points, add } = useCandidates();
   const { list: prefectures, code: prefecture, current: prefectureInfo,
           select: selectPrefecture } = usePrefecture();
+  // The cost columns belong to the models that weight cost. Showing them for
+  // the others would be two columns of dashes on every row.
+  const showsCost = Boolean(data?.model?.overall_weights?.cost);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -157,6 +160,8 @@ export function RankingPage() {
                 <th className="right">競合</th>
                 <th className="right">成長</th>
                 <th className="right">アクセス</th>
+                {showsCost && <th className="right">コスト</th>}
+                {showsCost && <th className="right">地価(万円/m²)</th>}
                 <th className="right">人口</th>
                 <th className="right">歯科</th>
                 <th className="right">人口/歯科</th>
@@ -182,6 +187,16 @@ export function RankingPage() {
                   <td className="right">{score(item.competition_score)}</td>
                   <td className="right">{score(item.growth_score)}</td>
                   <td className="right">{score(item.accessibility_score)}</td>
+                  {showsCost && <td className="right">{score(item.cost_score ?? null)}</td>}
+                  {showsCost && (
+                    <td className="right">
+                      {item.land_price_yen_per_sqm == null
+                        ? "—"
+                        : (item.land_price_yen_per_sqm / 10_000).toLocaleString(undefined, {
+                            maximumFractionDigits: 1,
+                          })}
+                    </td>
+                  )}
                   <td className="right">{num(item.population)}</td>
                   <td className="right">{num(item.facility_count)}</td>
                   <td className="right">{num(item.population_per_facility)}</td>

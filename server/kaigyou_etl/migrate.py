@@ -66,6 +66,14 @@ def _ensure_optional_functions(conn: psycopg.Connection) -> None:
     Every statement in them is CREATE OR REPLACE or IF NOT EXISTS, so running
     them again costs a moment and changes nothing when the function is already
     there.
+
+    Everything *after* them is replayed too, and that is not incidental. 011
+    defines kg_analyze_point; 014 redefines it with more columns. Replaying 011
+    alone silently reverts 014 -- the function loses the columns, the analysis
+    starts answering None for them, and nothing reports an error because the
+    older definition is perfectly valid SQL. Whatever defined an object last
+    has to be what defines it after a repair, so the replay runs in file order
+    to the end.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM pg_extension WHERE extname = 'pgrouting'")
@@ -75,9 +83,9 @@ def _ensure_optional_functions(conn: psycopg.Connection) -> None:
         if cur.fetchone()["fn"] is not None:
             return
 
-    for name in _CONDITIONAL:
-        path = migrations_dir() / name
-        if not path.is_file():
+    first = _CONDITIONAL[0]
+    for path in sorted(migrations_dir().glob("*.sql")):
+        if path.name < first:
             continue
         with conn.cursor() as cur:
             cur.execute(path.read_text(encoding="utf-8"))

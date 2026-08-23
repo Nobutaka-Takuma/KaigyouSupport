@@ -31,6 +31,10 @@ DISTRIBUTION_METRICS = (
     "workers",
     "establishments",
     "workers_per_facility",
+    # Cost. Published land price of the catchment (地価公示 median), which is
+    # the only geocoded price this project has. Lower is better here, and the
+    # cost component inverts it -- see ScoringModel.cost.
+    "land_price_yen_per_sqm",
 )
 
 
@@ -157,6 +161,7 @@ class ScoringModel:
             "overall_weights": self.profile.get("overall_weights", {}),
             "demand_weights": self.profile.get("demand_weights", {}),
             "competition": self.profile.get("competition", {}),
+            "cost": self.profile.get("cost", {}),
             "growth": self.profile.get("growth", {}),
             "accessibility": self.profile.get("accessibility", {}),
             "trade_area_radii_m": self.radii,
@@ -280,6 +285,68 @@ class ScoringModel:
             note = "算出に必要な指標が不足しているため未算出"
         return ComponentScore(value, parts, missing, note)
 
+    def cost(self, m: Mapping[str, Any],
+             distributions: Mapping[str, Distribution]) -> ComponentScore:
+        """What the location costs, inverted so that cheaper scores higher.
+
+        The axis the model was missing. Without it every ranking puts Ginza
+        first, which is true and useless: good locations are expensive, and a
+        practice is a business of fixed costs. What moves the ranking is
+        location quality *relative to* what it costs.
+
+        Three things this is careful about.
+
+        Log scale, because 地価公示 spans four orders of magnitude within one
+        prefecture -- ¥2,240/m² of woodland to ¥67,100,000/m² in Ginza. On a
+        linear percentile scale every suburb collapses into one value and the
+        component stops distinguishing anything.
+
+        A minimum number of surveyed parcels, because 地価公示 samples a few
+        thousand parcels per prefecture and the median of one parcel is that
+        parcel. Below the configured minimum the component is withheld, which
+        renormalises the remaining weights rather than scoring on a guess.
+
+        And it is a proxy, not a rent. The land under a location is not the
+        lease on a unit in it. It is the best published, geocoded, comparable
+        stand-in available, and it is labelled as a stand-in everywhere it is
+        shown.
+        """
+        cfg = self.profile.get("cost", {})
+        metric = cfg.get("metric", "land_price_yen_per_sqm")
+        value = m.get(metric)
+        points = m.get("land_price_points")
+        min_points = int(cfg.get("min_points", 3))
+
+        if value is None or value <= 0:
+            return ComponentScore(None, {metric: None}, [metric],
+                                  "商圏内に地価公示の標準地がないため未算出")
+        if points is not None and points < min_points:
+            return ComponentScore(
+                None, {metric: None}, [metric],
+                f"商圏内の地価公示の標準地が{points}地点のみのため未算出"
+                f"（{min_points}地点以上で算出）")
+
+        dist = distributions.get(metric)
+        if dist is None or not dist.usable(self.method):
+            return ComponentScore(None, {metric: None}, [metric])
+
+        scale = cfg.get("scale", "log10")
+        if scale == "log10":
+            low, high = float(dist.p05), float(dist.p95)
+            if low <= 0 or high <= low:
+                return ComponentScore(None, {metric: None}, [metric])
+            placed = _linear(math.log10(max(float(value), 1.0)),
+                             math.log10(low), math.log10(high), self.clamp)
+        else:
+            placed = self.normalize(metric, float(value), distributions)
+        if placed is None:
+            return ComponentScore(None, {metric: None}, [metric])
+
+        # Invert: the cheapest end of the observed spread scores highest.
+        inverted = self.clamp[0] + self.clamp[1] - placed
+        return ComponentScore(inverted, {metric: inverted}, [],
+                              "地価が安いほど高い（地価公示の中央値・対数スケール）")
+
     # ---------------------------------------------------------------- public
     def score(self, metrics: Mapping[str, Any],
               distributions: Mapping[str, Distribution] | None = None) -> dict[str, Any]:
@@ -290,6 +357,11 @@ class ScoringModel:
             "competition": self.competition(metrics, distributions),
             "growth": self.growth(metrics, distributions),
             "accessibility": self.accessibility(metrics, distributions),
+            # Only where a profile asks for it. Adding an unweighted component
+            # to every profile would change nothing arithmetically and would
+            # still put "コスト —" on screens whose model does not use it.
+            **({"cost": self.cost(metrics, distributions)}
+               if "cost" in (self.profile.get("overall_weights") or {}) else {}),
         }
         overall = _weighted(
             {k: c.value for k, c in components.items()},
@@ -297,6 +369,17 @@ class ScoringModel:
             self.min_weight_coverage,
         )
         unavailable = [k for k, c in components.items() if c.value is None]
+
+        # A component a profile calls required is not optional to it. Dropping
+        # one and renormalising the rest -- the right default when an input is
+        # merely absent -- turns "we could not price this place" into "this
+        # place is free", and ranks the places we know least about highest.
+        # 地価公示 covers about 70% of Tokyo's meshes at three parcels or more,
+        # so this is the difference between a cost ranking and an artefact.
+        required = [c for c in (self.profile.get("required_components") or [])
+                    if components.get(c) is None or components[c].value is None]
+        if required:
+            overall = None
         return {
             "profile": self.profile_name,
             "profile_label": self.label,
@@ -305,8 +388,13 @@ class ScoringModel:
             "competition": None if components["competition"].value is None else round(components["competition"].value, 1),
             "growth": None if components["growth"].value is None else round(components["growth"].value, 1),
             "accessibility": None if components["accessibility"].value is None else round(components["accessibility"].value, 1),
+            "cost": (None if "cost" not in components or components["cost"].value is None
+                     else round(components["cost"].value, 1)),
             "overall": None if overall is None else round(overall, 1),
             "unavailable_components": unavailable,
+            # Named separately from "missing": these are why there is no
+            # overall score at all, rather than one computed without them.
+            "missing_required_components": required,
             "breakdown": {k: c.as_dict() for k, c in components.items()},
         }
 

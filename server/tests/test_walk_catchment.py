@@ -231,3 +231,43 @@ def test_doctor_names_the_error_instead_of_leaving_it_a_500(network):
     assert "pgr_drivingdistance does not exist" in failed[0].detail
     assert not [c for c in report.checks
                 if c.status == doctor.FAIL and "current transaction is aborted" in c.detail]
+
+
+def test_the_repair_does_not_revert_a_later_migration():
+    """Replaying 011 alone silently undid 014.
+
+    011 defines kg_analyze_point; 014 redefines it with the land-price columns.
+    The repair path replayed the pgRouting-conditional files in isolation, so
+    after any repair the function went back to its older shape -- valid SQL,
+    no error, and the analysis quietly answering None for columns that had
+    been working a moment earlier. Whatever defined an object last has to win.
+    """
+    from kaigyou_core.analysis import analyze_point
+    from kaigyou_etl.migrate import migrate
+
+    try:
+        conn_test = connect().__enter__()
+    except psycopg.OperationalError:
+        pytest.skip("no database")
+
+    with connect() as conn:
+        if not table_exists(conn, "land_prices"):
+            pytest.skip("land_prices not migrated here")
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM pg_extension WHERE extname = 'pgrouting'")
+            if not cur.fetchone()["n"]:
+                pytest.skip("pgrouting not installed here")
+            # The condition the repair triggers on.
+            cur.execute(
+                "DROP FUNCTION IF EXISTS kg_walk_catchment(double precision,"
+                "double precision,double precision,double precision,double precision)")
+        conn.commit()
+
+        migrate(conn)
+
+        metrics = analyze_point(conn, 35.6812, 139.7671, 1000, "dental_clinic", 500)
+        assert "land_price_yen_per_sqm" in metrics, (
+            "the repair reverted kg_analyze_point to an older definition")
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
+            assert cur.fetchone()["fn"] is not None, "and it still repaired what it is for"

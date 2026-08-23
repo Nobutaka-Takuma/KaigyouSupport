@@ -12,6 +12,7 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn, get_model
+from kaigyou_core import config as cfg
 from kaigyou_core import provenance
 from kaigyou_core.analysis import (
     DEFAULT_CATCHMENT,
@@ -97,6 +98,23 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     distributions = load_distributions(conn, scope)
     scores = model.score(metrics, distributions)
 
+    # Every configured profile, from the same metrics. The catchment sweep is
+    # what costs; scoring it again under another set of weights is arithmetic,
+    # and one number on its own says nothing about whether cost changes the
+    # answer. Two do.
+    other_profiles = []
+    for name in (cfg.scoring_config().get("profiles") or {}):
+        alt = model if name == model.profile_name else ScoringModel(
+            cfg.scoring_config(), name)
+        result = scores if name == model.profile_name else alt.score(metrics, distributions)
+        other_profiles.append({
+            "profile": name,
+            "label": alt.label,
+            "overall": result.get("overall"),
+            "cost": result.get("cost"),
+            "uses_cost": "cost" in (alt.profile.get("overall_weights") or {}),
+        })
+
     warnings: list[str] = []
     if not distributions:
         warnings.append(
@@ -168,7 +186,13 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
             "daily_passengers": metrics.get("daily_passengers"),
         },
         "mesh_count": metrics.get("mesh_count"),
+        # The cost inputs, so the reader can see what the cost score rests on
+        # rather than only its result.
+        "land_price_yen_per_sqm": _round(metrics.get("land_price_yen_per_sqm")),
+        "land_price_points": metrics.get("land_price_points"),
+        "land_price_basis": metrics.get("land_price_basis"),
         "scores": scores,
+        "scores_by_profile": other_profiles,
         "warnings": warnings,
     }
 
@@ -294,7 +318,8 @@ def rankings(
                    ms.growth_score, ms.accessibility_score,
                    ms.population, ms.age_0_14, ms.age_65_plus, ms.households,
                    ms.population_growth, ms.facility_count, ms.population_per_facility,
-                   ms.nearest_station, ms.station_distance_m, ms.daily_passengers
+                   ms.nearest_station, ms.station_distance_m, ms.daily_passengers,
+                   ms.cost_score, ms.land_price_yen_per_sqm
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
             WHERE {' AND '.join(where)}
@@ -309,7 +334,8 @@ def rankings(
     for row in rows:
         item = dict(row)
         for key in ("population", "age_0_14", "age_65_plus", "households",
-                    "population_per_facility", "station_distance_m"):
+                    "population_per_facility", "station_distance_m",
+                    "land_price_yen_per_sqm"):
             item[key] = _round(item.get(key))
         items.append(item)
 

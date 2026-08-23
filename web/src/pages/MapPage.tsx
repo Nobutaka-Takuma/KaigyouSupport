@@ -18,7 +18,7 @@ import { distance, num } from "../lib/format";
 import type { CandidateAnalysis, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
-         ScorePanel } from "../components/ScorePanel";
+         ProfileComparison, ScorePanel } from "../components/ScorePanel";
 
 const TOKYO_CENTER: [number, number] = [139.7671, 35.6812];
 
@@ -687,6 +687,8 @@ export function MapPage() {
               <h3>人口・競合</h3>
               <CatchmentNote analysis={analysis} />
               <PopulationTable analysis={analysis} />
+
+              <ProfileComparison analysis={analysis} />
 
               <LandPriceTable analysis={analysis} />
 

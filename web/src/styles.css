@@ -531,3 +531,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* 地価（参考）。スコアに使っていない情報なので、控えめに置く。 */
 .land-price__nearest { margin: 0.25rem 0 0.75rem; padding-left: 1.1rem; }
 .land-price__nearest li { margin-bottom: 0.25rem; }
+
+/* 表示中のモデルの行。並べたときにどれを見ているかが分かるように。 */
+.metrics tr.is-active { background: var(--accent-soft, #eff6ff); font-weight: 600; }

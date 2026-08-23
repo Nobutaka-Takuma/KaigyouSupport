@@ -8,6 +8,7 @@ const COMPONENT_LABELS: Record<string, string> = {
   competition: "競合 Competition",
   growth: "成長 Growth",
   accessibility: "アクセス Accessibility",
+  cost: "コスト Cost（地価が安いほど高い）",
 };
 
 export function ScoreBar({ label, value }: { label: string; value: number | null }) {
@@ -45,6 +46,14 @@ export function ScorePanel({ analysis }: { analysis: CandidateAnalysis }) {
         </div>
       </div>
 
+      {(s.missing_required_components?.length ?? 0) > 0 && (
+        <p className="warn-inline">
+          このモデルに必須の指標が算出できないため、総合スコアを出していません:{" "}
+          {s.missing_required_components!.map((c) => COMPONENT_LABELS[c] ?? c).join("、")}
+          。落として残りの重みで計算すると「分からない＝負担が無い」という意味に
+          なってしまうためです。
+        </p>
+      )}
       {s.unavailable_components.length > 0 && (
         <p className="warn-inline">
           データ不足で算出できない指標:{" "}
@@ -52,6 +61,11 @@ export function ScorePanel({ analysis }: { analysis: CandidateAnalysis }) {
         </p>
       )}
 
+      {/* Only the profiles that weight cost carry it; the others would show
+          a permanent dash for a component their model does not use. */}
+      {s.cost !== undefined && s.cost !== null && (
+        <ScoreBar label={COMPONENT_LABELS.cost} value={s.cost} />
+      )}
       <ScoreBar label={COMPONENT_LABELS.demand} value={s.demand} />
       <ScoreBar label={COMPONENT_LABELS.competition} value={s.competition} />
       <ScoreBar label={COMPONENT_LABELS.growth} value={s.growth} />
@@ -239,6 +253,64 @@ export function LandPriceTable({ analysis }: { analysis: CandidateAnalysis }) {
           </ul>
         </>
       )}
+    </>
+  );
+}
+
+
+export function ProfileComparison({ analysis }: { analysis: CandidateAnalysis }) {
+  /**
+   * 同じ地点を、コスト軸のあるモデルと無いモデルの両方で採点した結果。
+   *
+   * 片方だけ見せると「そういうスコアなのだ」で終わってしまう。並べると、
+   * 良い立地は高いという当たり前のことがスコアにどう効くかが見える。
+   */
+  const rows = analysis.scores_by_profile ?? [];
+  if (rows.length < 2) return null;
+
+  const active = analysis.scores.profile;
+  const withCost = rows.filter((r) => r.uses_cost);
+  const withoutCost = rows.filter((r) => !r.uses_cost);
+  if (withCost.length === 0 || withoutCost.length === 0) return null;
+
+  return (
+    <>
+      <h3>地価を勘案すると</h3>
+      <table className="metrics">
+        <thead>
+          <tr>
+            <th>モデル</th>
+            <th>総合スコア</th>
+            <th>コスト</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.profile} className={row.profile === active ? "is-active" : undefined}>
+              <td>
+                {row.label}
+                {row.profile === active && <span className="muted small">（表示中）</span>}
+              </td>
+              <td>{score(row.overall)}</td>
+              <td>{row.uses_cost ? score(row.cost) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="muted small">
+        コスト軸は商圏内の地価公示の中央値（
+        {analysis.land_price_yen_per_sqm != null
+          ? `${(analysis.land_price_yen_per_sqm / 10_000).toLocaleString(undefined, {
+              maximumFractionDigits: 1,
+            })} 万円/m²・${analysis.land_price_points ?? 0}地点・${
+              analysis.land_price_basis === "commercial" ? "商業地" : "全用途区分"
+            }`
+          : "商圏内に標準地なし"}
+        ）を対数スケールで反転したものです。安いほど高く出ます。
+        <strong>地価は賃料そのものではありません</strong>
+        — 公表されている中で唯一の座標付きの価格指標として代理に使っています。
+        上部の「分析プロファイル」で切り替えると、地図とランキングもそのモデルになります。
+      </p>
     </>
   );
 }

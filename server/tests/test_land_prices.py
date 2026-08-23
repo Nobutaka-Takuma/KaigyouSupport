@@ -174,23 +174,124 @@ def test_no_land_price_data_is_absent_not_zero():
     assert summary["by_use"] == [], "nowhere near land: no divisions to report"
 
 
-# ------------------------------------------------- it must not become a score
-def test_land_price_feeds_no_score():
-    """Cost is not modelled, and the requirements forbid predicting it.
+# ------------------------------------------------------------- the cost axis
+def test_the_existing_models_are_unchanged():
+    """A cost axis is an opinion. It is offered beside the old answer.
 
-    A weight on land price would turn a published fact into an opinion about
-    what a practice can afford -- and cheaper land is not simply better, since
-    it correlates with the demand the score already measures.
+    `default`, `pediatric` and `office` are what the reader has been looking
+    at; silently reweighting them would move every number on the site with
+    nothing on screen to say why.
     """
-    scoring = cfg.scoring_config()
-    text = str(scoring)
-    for word in ("land_price", "land_prices", "地価"):
-        assert word not in text, (
-            f"{word!r} appears in scoring.yaml; land price is reference "
-            "information, not a score component")
+    profiles = cfg.scoring_config()["profiles"]
+    for name in ("default", "pediatric", "office"):
+        assert "cost" not in profiles[name]["overall_weights"], (
+            f"{name} gained a cost weight; add a profile instead of changing one")
+    assert "cost" in profiles["cost_aware"]["overall_weights"]
 
-    from kaigyou_core.scoring import DISTRIBUTION_METRICS
-    assert not [m for m in DISTRIBUTION_METRICS if "land" in m or "price" in m]
+
+def test_cheaper_land_scores_higher():
+    """The direction of the axis, which is the one thing easy to get backwards."""
+    from kaigyou_core.scoring import Distribution, ScoringModel
+
+    model = ScoringModel(cfg.scoring_config(), "cost_aware")
+    dist = {"land_price_yen_per_sqm": Distribution(
+        metric="land_price_yen_per_sqm", p05=60_000, p50=450_000, p95=3_000_000,
+        sample_count=4000)}
+
+    cheap = model.cost({"land_price_yen_per_sqm": 80_000, "land_price_points": 10}, dist)
+    dear = model.cost({"land_price_yen_per_sqm": 2_500_000, "land_price_points": 10}, dist)
+    assert cheap.value > dear.value
+
+
+def test_the_scale_is_logarithmic():
+    """地価公示 spans four orders of magnitude inside one prefecture.
+
+    On a linear percentile scale every suburb lands on the same value and the
+    component stops separating anything.
+    """
+    from kaigyou_core.scoring import Distribution, ScoringModel
+
+    model = ScoringModel(cfg.scoring_config(), "cost_aware")
+    dist = {"land_price_yen_per_sqm": Distribution(
+        metric="land_price_yen_per_sqm", p05=60_000, p50=450_000, p95=3_000_000,
+        sample_count=4000)}
+
+    def at(price: float) -> float:
+        return model.cost({"land_price_yen_per_sqm": price,
+                           "land_price_points": 10}, dist).value
+
+    # Two suburban prices a factor of three apart must be visibly different.
+    assert abs(at(100_000) - at(300_000)) > 10
+    # Linear would put both within a couple of points of the top of the scale.
+
+
+def test_one_surveyed_parcel_is_not_a_market():
+    """地価公示 samples a few thousand parcels per prefecture."""
+    from kaigyou_core.scoring import Distribution, ScoringModel
+
+    model = ScoringModel(cfg.scoring_config(), "cost_aware")
+    dist = {"land_price_yen_per_sqm": Distribution(
+        metric="land_price_yen_per_sqm", p05=60_000, p50=450_000, p95=3_000_000,
+        sample_count=4000)}
+
+    thin = model.cost({"land_price_yen_per_sqm": 500_000, "land_price_points": 1}, dist)
+    assert thin.value is None and "1地点" in (thin.note or "")
+
+
+def test_a_place_that_cannot_be_costed_is_not_ranked_as_free():
+    """The artefact this design exists to avoid.
+
+    Dropping an unavailable component and renormalising the rest is right when
+    an input is merely absent. For cost it inverts the meaning: "we could not
+    price this" becomes "this is free", and the places with the least data rank
+    highest. Measured before the fix, four of the top five meshes under the
+    cost model had no cost score at all.
+    """
+    from kaigyou_core.scoring import Distribution, ScoringModel
+
+    model = ScoringModel(cfg.scoring_config(), "cost_aware")
+    # Enough of the model's other inputs to produce a score at all, so that the
+    # only thing under test is what cost does.
+    dist = {m: Distribution(metric=m, p05=lo, p50=(lo + hi) / 2, p95=hi,
+                            sample_count=4000)
+            for m, lo, hi in (
+                ("land_price_yen_per_sqm", 60_000, 3_000_000),
+                ("population", 500, 40_000),
+                ("age_0_14", 50, 5_000),
+                ("age_65_plus", 100, 9_000),
+                ("households", 200, 20_000),
+                ("workers", 100, 60_000),
+                ("population_per_facility", 500, 20_000),
+            )}
+    metrics = {
+        "population": 20_000, "age_0_14": 2_000, "age_65_plus": 4_000,
+        "households": 10_000, "population_growth": 0.05,
+        "population_per_facility": 5_000, "facility_count": 4,
+        "station_distance_m": 300, "daily_passengers": 50_000,
+        # No land price at all.
+        "land_price_yen_per_sqm": None, "land_price_points": 0,
+    }
+    scored = model.score(metrics, dist)
+    assert scored["overall"] is None, (
+        "a place with no cost data must not out-rank one that was priced")
+    assert scored["missing_required_components"] == ["cost"]
+
+    # The same place, priced, does get a score.
+    priced = model.score(dict(metrics, land_price_yen_per_sqm=400_000,
+                              land_price_points=8), dist)
+    assert priced["overall"] is not None
+
+
+def test_the_cost_axis_is_still_not_a_rent():
+    """It moves the score now; it still is not what a practice would pay."""
+    profile = cfg.scoring_config()["profiles"]["cost_aware"]
+    assert profile["cost"]["metric"] == "land_price_yen_per_sqm"
+    assert "賃料" in profile["description"] or "地価" in profile["description"]
+
+    source = (REPO_ROOT / "web" / "src" / "components" / "ScorePanel.tsx").read_text(
+        encoding="utf-8")
+    assert "地価は賃料そのものではありません" in source, (
+        "the panel that shows the cost comparison has to say what the axis is")
 
 
 def test_the_panel_keeps_the_caveat_next_to_the_number():

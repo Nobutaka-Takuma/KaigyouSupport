@@ -180,14 +180,16 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                 cur.executemany(
                 """
                 INSERT INTO mesh_scores (
-                    mesh_id, profile, radius_m, population, age_0_14, age_65_plus,
+                    mesh_id, profile, radius_m, land_price_yen_per_sqm, cost_score,
+                    population, age_0_14, age_65_plus,
                     households, population_growth, facility_count,
                     population_per_facility, nearest_facility_distance_m,
                     nearest_station, station_distance_m, daily_passengers,
                     demand_score, competition_score, growth_score,
                     accessibility_score, overall_score, area_label, computed_at
                 ) VALUES (
-                    %(mesh_id)s, %(profile)s, %(radius_m)s, %(population)s,
+                    %(mesh_id)s, %(profile)s, %(radius_m)s,
+                    %(land_price_yen_per_sqm)s, %(cost)s, %(population)s,
                     %(age_0_14)s, %(age_65_plus)s, %(households)s,
                     %(population_growth)s, %(facility_count)s,
                     %(population_per_facility)s, %(nearest_facility_distance_m)s,
@@ -197,6 +199,8 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                 )
                 ON CONFLICT (mesh_id, profile, radius_m) DO UPDATE SET
                     overall_score = EXCLUDED.overall_score,
+                    cost_score = EXCLUDED.cost_score,
+                    land_price_yen_per_sqm = EXCLUDED.land_price_yen_per_sqm,
                     computed_at = now()
                 """, batch[start:start + 500])
             scored_profiles.append(model.profile_name)
@@ -230,6 +234,8 @@ def _score_row(model: ScoringModel, row: Mapping[str, Any],
         "nearest_station": row.get("nearest_station"),
         "station_distance_m": row.get("station_distance_m"),
         "daily_passengers": row.get("daily_passengers"),
+        "land_price_yen_per_sqm": row.get("land_price_yen_per_sqm"),
+        "cost": scored.get("cost"),
         "demand": scored["demand"],
         "competition": scored["competition"],
         "growth": scored["growth"],
