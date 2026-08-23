@@ -413,3 +413,61 @@ def test_doctor_warns_when_every_score_is_the_same(db, tmp_path):
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM mesh_scores WHERE radius_m = 998")
             conn.commit()
+
+
+def test_the_labelling_queries_are_paged_too(db, tmp_path, monkeypatch):
+    """The sweep was batched; the labelling after it was not, and it is slower.
+
+    `compute-scores` against Supabase got all the way through the trade-area
+    sweep -- 5,449 of 5,449 -- and then died on the statement timeout in the
+    query that names each mesh after its municipality. Paged here with a page
+    size of two, so the paging is what is under test rather than the clock.
+    """
+    from kaigyou_etl import scores
+
+    monkeypatch.setattr(scores, "LABEL_BATCH", 2)
+    with connect() as conn:
+        adapter = _adapter(tmp_path, OTHER_PREFECTURE)
+        adapter.load(conn, adapter.transform(MESH_FILE))
+        conn.commit()
+
+        seen: list[str] = []
+        rows = scores._label_batches(
+            conn,
+            """
+            SELECT m.id AS mesh_id, m.mesh_code
+            FROM (
+                SELECT id, mesh_code FROM population_mesh
+                WHERE mesh_size_m = %s AND prefecture_code = %s AND id > %s
+                ORDER BY id LIMIT %s
+            ) m
+            ORDER BY m.id
+            """,
+            (), 500, OTHER_PREFECTURE, seen.append)
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM population_mesh "
+                        "WHERE mesh_size_m = 500 AND prefecture_code = %s",
+                        (OTHER_PREFECTURE,))
+            expected = cur.fetchone()["n"]
+
+    assert expected > 2, "precondition: more meshes than fit on one page"
+    ids = [r["mesh_id"] for r in rows]
+    assert len(ids) == expected, "paging lost or repeated a mesh"
+    assert len(set(ids)) == len(ids)
+    assert seen, "a paged job reports its progress"
+
+
+def test_the_etl_asks_for_a_longer_statement_timeout(db):
+    """Batches short enough for a laptop still take minutes over a pooler."""
+    from kaigyou_core.db import relax_statement_timeout
+
+    with connect() as conn:
+        assert relax_statement_timeout(conn, 60_000) is True
+        with conn.cursor() as cur:
+            cur.execute("SHOW statement_timeout")
+            assert cur.fetchone()["statement_timeout"] == "1min"
+        # And the connection is still usable afterwards.
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 AS ok")
+            assert cur.fetchone()["ok"] == 1

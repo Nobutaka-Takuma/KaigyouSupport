@@ -117,6 +117,36 @@ def connection_hint(url: str, message: str) -> str | None:
     )
 
 
+#: How long a single ETL statement may run, in milliseconds. Scoring a
+#: prefecture is minutes of PostGIS work split across many statements, and a
+#: managed database sets a timeout meant for web requests -- Supabase cancels
+#: at two minutes, which is shorter than the slowest statement here and turns
+#: a long job into a job that never finishes. Only the ETL asks for this; the
+#: API keeps the server's own limit, because a request that runs for minutes
+#: is a bug there rather than a batch.
+ETL_STATEMENT_TIMEOUT_MS = 600_000
+
+
+def relax_statement_timeout(conn: psycopg.Connection,
+                            milliseconds: int = ETL_STATEMENT_TIMEOUT_MS) -> bool:
+    """Give a batch job room to finish. Reports whether it was allowed.
+
+    Session-level, so it lasts as long as this connection and affects nothing
+    else. Managed providers may refuse; a refusal is not fatal -- the work is
+    batched to fit inside a short timeout anyway -- so it is reported rather
+    than raised.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {int(milliseconds)}")
+        if not conn.autocommit:
+            conn.commit()
+        return True
+    except psycopg.Error:
+        conn.rollback()
+        return False
+
+
 @contextmanager
 def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
     url = dsn()

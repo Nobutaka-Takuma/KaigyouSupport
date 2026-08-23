@@ -253,6 +253,7 @@ Vercel の `DATABASE_URL` が**データを入れたのとは別のデータベ�
 | ランキングが空で「メッシュスコアが未計算です」 | そのプロファイルのスコアが無い | `kaigyou-etl compute-scores --all-profiles` |
 | データを追加した直後だけ API がエラー | Supabase にマイグレーションが未適用 | `DATABASE_URL` を Supabase にして `kaigyou-etl migrate` → `load-local`。3.5 節を参照 |
 | 静岡県を入れたら東京都のランキングが消えた | スコアの再計算が県で区切られていなかった（e68829b 以前）| `git pull` して `python -m kaigyou_etl compute-scores --all-profiles --prefecture 13` で東京都ぶんを計算し直してください。以降は県ごとに保持されます |
+| `compute-scores` が `QueryCanceled: canceling statement due to statement timeout` で落ちる | 1文が長すぎてホスト側の statement timeout に当たっている | `git pull` してください。商圏の集計もエリア名の付与も1,000メッシュずつに分割し、セッションの statement_timeout も延長するようになります。「商圏を集計中」で止まるか「エリア名を付与中」で止まるかで、どちらの段階かが分かります |
 | `compute-scores` が `kg_analyze_point` のエラーで落ちる（県が大きい）| 1文が長すぎてホスト側の statement timeout に当たっている | `git pull` で 1,000メッシュずつに分割して実行するようになります。進捗も表示されます |
 | 画面に「読み込んでいます…」が残る | JavaScript の読み込みに失敗している（バンドルが 404、または HTML が返っている） | ブラウザの Network タブで `/assets/index-*.js` のステータスと Content-Type を確認してください。404 ならビルド出力が配信されていません。`/api/health` の `web_client_assets` に index.html が参照しているファイル名が含まれているかも確認してください（含まれていなければ index.html と bundle が別ビルドです）|
 | 画面が真っ白（APIは動いている） | `vercel.json` の rewrite が `/assets/*.js` まで `/index.html` に転送している | **rewrite を置かないでください。** ブラウザのコンソールに `Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"` が出ます。SPA のフォールバックは API 側が行います |

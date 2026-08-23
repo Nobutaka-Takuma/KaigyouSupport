@@ -33,11 +33,30 @@ from kaigyou_core.scoring import DISTRIBUTION_METRICS, ScoringModel, distributio
 BOUNDARY_FALLBACK_RADIUS_M = 3000
 
 
+
+def _make_room(conn: psycopg.Connection, progress: Any = None) -> None:
+    """Ask the server for a longer statement timeout, and say if it refuses.
+
+    Every statement here is batched to be short, but "short" is relative to a
+    laptop; over a pooled connection to a hosted database the same batch can
+    take a minute, and Supabase cancels at two. Raising the session limit costs
+    nothing when the work is quick and is the difference between finishing and
+    never finishing when it is not.
+    """
+    from kaigyou_core.db import ETL_STATEMENT_TIMEOUT_MS, relax_statement_timeout
+
+    if not relax_statement_timeout(conn) and progress:
+        progress("  注意: statement_timeout を延長できませんでした"
+                 f"（{ETL_STATEMENT_TIMEOUT_MS // 1000}秒を要求）。"
+                 "サーバ側の制限のままで実行します。")
+
+
 def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
                   mesh_size_m: int | None = None,
                   prefecture_code: str = "13",
                   facility_category: str = DEFAULT_CATEGORY,
                   progress: Any = None) -> dict[str, Any]:
+    _make_room(conn, progress)
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to compute statistics from")
@@ -105,6 +124,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     as the sweep is shared, which is why `profiles` exists: the UI offers every
     configured profile, so every configured profile should have numbers.
     """
+    _make_room(conn, progress)
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to score")
@@ -131,8 +151,9 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     # right source; without them, fall back to the municipality recorded on
     # the nearby facilities, which is real published data either way.
     use_boundaries = has_official_boundaries(conn)
-    labels = (_boundary_area_labels(conn, mesh_size_m, prefecture_code) if use_boundaries
-              else _derive_area_labels(conn, mesh_size_m, prefecture_code))
+    labels = (_boundary_area_labels(conn, mesh_size_m, prefecture_code, progress)
+              if use_boundaries
+              else _derive_area_labels(conn, mesh_size_m, prefecture_code, progress))
 
     # One statement, then one batch per profile: 5,449 rows at a round trip each
     # is fine against localhost and minutes of waiting against a hosted database.
@@ -240,8 +261,42 @@ def _describe(values: list[float]) -> dict[str, Any]:
     }
 
 
+#: Meshes per statement in the labelling queries. Same reason as the catchment
+#: sweep: one statement over a whole prefecture is minutes of PostGIS work, and
+#: a managed database cancels it long before it finishes.
+LABEL_BATCH = 1000
+
+
+def _label_batches(conn: psycopg.Connection, sql: str, params: tuple,
+                   mesh_size_m: int, prefecture_code: str,
+                   progress: Any = None) -> list[dict[str, Any]]:
+    """Run a per-mesh labelling query in keyset-paged batches.
+
+    ``sql`` must open with the paged subquery aliased ``m``, so that the four
+    placeholders this supplies -- mesh size, prefecture, last id, page size --
+    are the first four in the statement. Any the caller needs come after, in
+    the order they appear; psycopg binds positionally.
+    """
+    say = progress or (lambda _msg: None)
+    out: list[dict[str, Any]] = []
+    after = 0
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(sql, (mesh_size_m, prefecture_code, after, LABEL_BATCH) + params)
+            rows = cur.fetchall()
+        if not rows:
+            break
+        out.extend(rows)
+        after = max(r["mesh_id"] for r in rows)
+        say(f"    エリア名を付与中: {len(out):,} メッシュ")
+        if len(rows) < LABEL_BATCH:
+            break
+    return out
+
+
 def _boundary_area_labels(conn: psycopg.Connection, mesh_size_m: int,
-                          prefecture_code: str) -> dict[int, str]:
+                          prefecture_code: str,
+                          progress: Any = None) -> dict[int, str]:
     """Name each mesh by the municipality its centre falls in.
 
     A centre can fall outside every municipality: N03 publishes reclaimed land
@@ -250,12 +305,16 @@ def _boundary_area_labels(conn: psycopg.Connection, mesh_size_m: int,
     scoring waterfront meshes sit there, so those fall back to the nearest
     municipality -- still the right locator for the reader, and never invented.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
+    rows = _label_batches(
+        conn,
+        """
             SELECT m.id AS mesh_id,
                    COALESCE(inside.name, nearby.name) AS name
-            FROM population_mesh m
+            FROM (
+                SELECT id, centroid FROM population_mesh
+                WHERE mesh_size_m = %s AND prefecture_code = %s AND id > %s
+                ORDER BY id LIMIT %s
+            ) m
             LEFT JOIN LATERAL (
                 SELECT mu.name
                 FROM municipalities mu
@@ -274,26 +333,29 @@ def _boundary_area_labels(conn: psycopg.Connection, mesh_size_m: int,
                 ORDER BY mu.geom::geography <-> m.centroid::geography
                 LIMIT 1
             ) AS nearby ON true
-            WHERE m.mesh_size_m = %s AND m.prefecture_code = %s
-            """,
-            (BOUNDARY_FALLBACK_RADIUS_M, mesh_size_m, prefecture_code),
-        )
-        rows = cur.fetchall()
+            ORDER BY m.id
+        """,
+        (BOUNDARY_FALLBACK_RADIUS_M,), mesh_size_m, prefecture_code, progress)
     return {r["mesh_id"]: r["name"] for r in rows if r["name"]}
 
 
 def _derive_area_labels(conn: psycopg.Connection, mesh_size_m: int,
-                        prefecture_code: str) -> dict[int, str]:
+                        prefecture_code: str,
+                        progress: Any = None) -> dict[int, str]:
     """Label each mesh with the municipality most of its nearby clinics are in."""
     names = municipality_names_from_facilities(conn, prefecture_code)
     if not names:
         return {}
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
+    rows = _label_batches(
+        conn,
+        """
             SELECT DISTINCT ON (m.id) m.id AS mesh_id, x.municipality_code
-            FROM population_mesh m
+            FROM (
+                SELECT id, centroid FROM population_mesh
+                WHERE mesh_size_m = %s AND prefecture_code = %s AND id > %s
+                ORDER BY id LIMIT %s
+            ) m
             CROSS JOIN LATERAL (
                 SELECT f.municipality_code, count(*) AS n
                 FROM facilities f
@@ -305,11 +367,9 @@ def _derive_area_labels(conn: psycopg.Connection, mesh_size_m: int,
                 ORDER BY n DESC
                 LIMIT 1
             ) x
-            WHERE m.mesh_size_m = %s AND m.prefecture_code = %s
-            """,
-            (mesh_size_m, prefecture_code),
-        )
-        rows = cur.fetchall()
+            ORDER BY m.id
+        """,
+        (), mesh_size_m, prefecture_code, progress)
 
     return {r["mesh_id"]: names[r["municipality_code"]]
             for r in rows if r["municipality_code"] in names}
