@@ -9,6 +9,8 @@ between a zero and an unknown, and the caveats that separate 従業者数 from
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
@@ -315,3 +317,45 @@ def test_the_new_sections_are_defined_too(doc):
     for field in ("percentile", "nth_nearest_distance_m", "largest_mesh_share",
                   "floor_area_ratio_pct", "building_coverage_pct", "zoning"):
         assert field in described, f"no definition for {field}"
+
+
+# ------------------------------------------------------------ the UI button
+_EXPORT = Path(__file__).resolve().parents[2] / "web" / "src" / "components" / "DatasetExport.tsx"
+
+
+def test_the_panel_offers_the_dataset_for_export():
+    """The endpoint is only useful if a reader can get at it without curl."""
+    source = _EXPORT.read_text(encoding="utf-8")
+    assert "api.dataset" in source
+    page = (Path(__file__).resolve().parents[2] / "web" / "src" / "pages" /
+            "MapPage.tsx").read_text(encoding="utf-8")
+    assert "DatasetExport" in page and "JSONで出力" in page
+
+
+def test_a_blocked_clipboard_falls_back_to_a_file():
+    """navigator.clipboard is unavailable over plain http and can be refused.
+
+    A copy button that silently does nothing is worse than one that saves a
+    file and says it did.
+    """
+    source = _EXPORT.read_text(encoding="utf-8")
+    copy_block = source[source.index("async function onCopy"):]
+    assert "catch" in copy_block and "save(text)" in copy_block
+    assert "クリップボードが使えない" in copy_block
+
+
+def test_the_clipboard_copy_is_compact_and_the_file_is_readable():
+    """Indentation nearly doubles the payload, and it goes to a model.
+
+    The saved file is opened by a person in an editor, so that one is
+    formatted. The two differ on purpose.
+    """
+    source = _EXPORT.read_text(encoding="utf-8")
+    assert "fetchJson(false)" in source, "the clipboard copy must not be pretty-printed"
+    assert "fetchJson(true)" in source, "the saved file must be"
+    assert 'JSON.stringify(data, null, 2) : JSON.stringify(data)' in source
+
+
+def test_the_export_reports_its_size():
+    """So the reader knows what they are about to paste."""
+    assert "KB" in _EXPORT.read_text(encoding="utf-8")

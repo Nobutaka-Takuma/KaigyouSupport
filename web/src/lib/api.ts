@@ -77,6 +77,17 @@ export const api = {
     limit?: number;
   }) => get<GeoJSONResponse>("/meshes", params),
 
+  /** 1地点の全データ。LLMや他のプログラムに渡すための構造化JSON。 */
+  dataset: (params: {
+    lat: number;
+    lng: number;
+    radius: number;
+    catchment?: "circle" | "walk";
+    profile?: string;
+    max_clinics?: number;
+    geometry?: boolean;
+  }) => get<Record<string, unknown>>("/dataset", params),
+
   landPrices: (params: {
     bbox?: string;
     use_category_code?: string;

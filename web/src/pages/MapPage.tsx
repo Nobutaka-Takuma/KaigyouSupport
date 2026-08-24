@@ -19,6 +19,7 @@ import type { CandidateAnalysis, Meta } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
+import { DatasetExport } from "../components/DatasetExport";
 
 //: Last resort only -- used on a first ever visit, before the API has said
 //: which prefectures are loaded and before there is a remembered centre.
@@ -55,6 +56,7 @@ export function MapPage() {
   const [radius, setRadius] = useState(1000);
   const [meshMetric, setMeshMetric] = useState<MeshMetric>("overall_score");
   const [catchment, setCatchment] = useState<Catchment>("circle");
+  const [showExport, setShowExport] = useState(false);
   const { list: prefectures, code: prefecture, current: prefectureInfo,
           select: selectPrefecture } = usePrefecture();
   const [layers, setLayers] = useState<LayerState>({
@@ -687,6 +689,13 @@ export function MapPage() {
                     比較に追加（{candidates.length}/{MAX_CANDIDATES}）
                   </button>
                   {candidates.length > 0 && <Link to="/compare">比較画面へ →</Link>}
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => setShowExport((v) => !v)}
+                  >
+                    {showExport ? "JSON出力を閉じる" : "JSONで出力"}
+                  </button>
                 </div>
               </div>
 
@@ -701,6 +710,16 @@ export function MapPage() {
               <h3>人口・競合</h3>
               <CatchmentNote analysis={analysis} />
               <PopulationTable analysis={analysis} />
+
+              {showExport && (
+                <DatasetExport
+                  lat={analysis.location.lat}
+                  lng={analysis.location.lng}
+                  radius={radius}
+                  profile={profile}
+                  catchment={catchment}
+                />
+              )}
 
               <ProfileComparison analysis={analysis} />
 

@@ -534,3 +534,27 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* 表示中のモデルの行。並べたときにどれを見ているかが分かるように。 */
 .metrics tr.is-active { background: var(--accent-soft, #eff6ff); font-weight: 600; }
+
+/* JSON出力。貼り付け先はLLMなので、コピーが主でダウンロードが従。 */
+.dataset-export {
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 8px;
+  padding: 0.75rem 0.9rem;
+  margin: 0.75rem 0;
+  background: var(--panel-soft, #f8fafc);
+}
+.dataset-export h3 { margin-top: 0; }
+.dataset-export__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+.dataset-export__opt {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
