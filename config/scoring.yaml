@@ -89,12 +89,19 @@ profiles:
       passengers_min: 1000      # -> 0
       passengers_max: 500000    # -> 100
 
-  # Example of an alternative hypothesis: a paediatric-leaning practice cares
-  # more about children and less about the elderly. Kept here to demonstrate
-  # that the model is configuration, not code.
+  # 小児歯科寄りの仮説。需要側で 0〜14 歳を重く見るだけでなく、競合も
+  # 「小児歯科を標榜している医院」だけを数えます。
+  #
+  # 標榜科目データ（医療情報ネット 032）を入れるまでは、このプロファイルは
+  # 子どもの人口を重く見ながら競合は歯科医院すべてで数えていました。小児歯科を
+  # やろうとしている人にとって、小児歯科を標榜していない医院は同じ重さの競合
+  # ではないので、そこだけ噛み合っていませんでした。
+  #
+  # 分母も人口総数から 0〜14 歳人口に変えています。「小児歯科 1 件あたりの
+  # 子どもの数」が、この仮説で見たい比率そのものだからです。
   pediatric:
     label: "小児歯科寄り（暫定モデル）"
-    description: "0〜14歳人口と世帯数を重視した仮説重み。"
+    description: "0〜14歳人口と世帯数を重視し、競合を小児歯科の標榜医院に限定した仮説重み。"
     overall_weights:
       demand: 0.40
       competition: 0.30
@@ -108,10 +115,69 @@ profiles:
       households: 0.17
       population_growth: 0.15
     competition:
+      # 標榜科目で競合を絞る。キーは config/sources.yaml の specialty_codes に
+      # あるもの（general / pediatric / orthodontics / oral_surgery /
+      # pediatric_orthodontics）だけを使ってください。インプラントや審美は
+      # 自由記載欄にしか現れず、書いた医院しか数えられないので、競合の
+      # 少なさの根拠には使えません（数え落としが一方向にしか起きない）。
+      specialty: pediatric
+      # 比率の分子。小児歯科 1 件あたりの 0〜14 歳人口。
+      population_metric: age_0_14
       metric: population_per_facility
+      # 商圏内の歯科医院のうち、診療科目が分かっているものの割合の下限。
+      # 下回るときは算出しません。載っていない医院は「標榜していない」のでは
+      # なく「分からない」ので、そのまま数えると競合が少ない土地に見えます。
+      min_specialty_coverage: 0.8
       zero_facility_score: 95
       zero_population_score: 0
-      cap: 20000
+      # 分母が 0〜14 歳人口なので、人口総数のときの 20,000 とは桁が違います。
+      # 東京都の 1km 商圏の中央値はおよそ 1,300 人／小児歯科 1 件。
+      cap: 6000
+    growth:
+      metric: population_growth
+      low: -0.08
+      high: 0.12
+    accessibility:
+      weights:
+        station_distance: 0.6
+        daily_passengers: 0.4
+      distance_best_m: 200
+      distance_worst_m: 2000
+      passengers_scale: log10
+      passengers_min: 1000
+      passengers_max: 500000
+
+  # 矯正歯科寄りの仮説。競合は矯正歯科を標榜している医院だけを数えます。
+  #
+  # 需要側は小児寄りに振りますが 0〜14 歳一本ではありません。矯正の患者は
+  # 小児と若年成人にまたがるので、生産年齢人口にも重みを残しています。
+  # これも較正された係数ではなく仮説です。
+  orthodontics:
+    label: "矯正歯科寄り（暫定モデル）"
+    description: "競合を矯正歯科の標榜医院に限定し、小児と若年層の人口を重視した仮説重み。"
+    overall_weights:
+      demand: 0.35
+      competition: 0.30
+      growth: 0.20
+      accessibility: 0.15
+    demand_weights:
+      population: 0.22
+      workers: 0.10
+      age_0_14: 0.28
+      age_15_64: 0.15
+      age_65_plus: 0.02
+      households: 0.13
+      population_growth: 0.10
+    competition:
+      specialty: orthodontics
+      population_metric: population
+      metric: population_per_facility
+      min_specialty_coverage: 0.8
+      zero_facility_score: 95
+      zero_population_score: 0
+      # 矯正を標榜する医院は歯科医院全体のおよそ半分なので、1 件あたりの
+      # 人口は全科目のときのおよそ 2 倍になります。
+      cap: 40000
     growth:
       metric: population_growth
       low: -0.08

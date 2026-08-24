@@ -17,6 +17,7 @@ from kaigyou_core import config as cfg
 # Which table each adapter fills, for the row counts below.
 ADAPTER_TABLES = {
     "mhlw_clinics": "facilities",
+    "mhlw_specialties": "facility_specialties",
     "estat_mesh": "population_mesh",
     "estat_business_mesh": "mesh_business",
     "mlit_stations": "stations",
@@ -25,11 +26,13 @@ ADAPTER_TABLES = {
     "mlit_land_prices": "land_prices",
 }
 
-_TABLES = ("facilities", "population_mesh", "mesh_business", "stations",
-           "municipalities", "walk_network", "land_prices")
+_TABLES = ("facilities", "facility_specialties", "population_mesh",
+           "mesh_business", "stations", "municipalities", "walk_network",
+           "land_prices")
 
 _TABLE_LABELS = {
     "facilities": "歯科医院",
+    "facility_specialties": "診療科目・診療時間",
     "population_mesh": "人口メッシュ",
     "mesh_business": "事業所・従業者メッシュ",
     "stations": "駅",

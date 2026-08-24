@@ -415,6 +415,12 @@ def without_mesh_business():
     A deploy builds in seconds; migrations are run by hand afterwards. In
     between, the code knows about a table the database has not got. Skipped
     unless a database is reachable.
+
+    Which migrations to rewind past is worked out from the files rather than
+    listed here. The list went stale the moment a later migration redefined
+    kg_analyze_point again: the fixture restored the older signature and every
+    test that ran afterwards in the same session saw a function two releases
+    behind -- passing alone, failing in a full run.
     """
     from pathlib import Path
 
@@ -422,10 +428,12 @@ def without_mesh_business():
     from kaigyou_core.db import connect, table_exists
 
     root = Path(__file__).resolve().parents[2]
+    migrations = sorted((root / "db" / "migrations").glob("*.sql"))
     old_fn = (root / "db" / "migrations" / "005_functions.sql").read_text(encoding="utf-8")
-    new_fn = (root / "db" / "migrations" / "008_daytime_workers.sql").read_text(encoding="utf-8")
-    catchment_fn = (root / "db" / "migrations" / "011_catchment_mode.sql").read_text(
-        encoding="utf-8")
+    # Every migration after 005 that touches the analysis function, in order.
+    later = [m for m in migrations
+             if m.name > "005_functions.sql"
+             and "kg_analyze_point" in m.read_text(encoding="utf-8")]
 
     try:
         with connect() as probe:
@@ -434,16 +442,19 @@ def without_mesh_business():
     except psycopg.OperationalError:
         pytest.skip("no database")
 
+    # Every signature the function has ever had. Leaving a newer one in place
+    # would let the code find it and call into a body that reads the hidden
+    # table -- which is not the state a database behind the code is ever in.
+    signatures = [
+        "double precision,double precision,double precision,text,integer",
+        "double precision,double precision,double precision,text,integer,text",
+        "double precision,double precision,double precision,text,integer,text,text",
+    ]
+
     with connect(autocommit=True) as conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE mesh_business RENAME TO mesh_business_hidden_test")
-        # Both signatures: the five-argument original and the six-argument one
-        # that takes a catchment mode. Leaving the newer one in place would let
-        # the code find it and call into a body that reads the hidden table --
-        # which is not the state a database behind the code is ever in.
-        cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
-                    "double precision,double precision,double precision,text,integer)")
-        cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
-                    "double precision,double precision,double precision,text,integer,text)")
+        for signature in signatures:
+            cur.execute(f"DROP FUNCTION IF EXISTS kg_analyze_point({signature})")
         cur.execute("DROP FUNCTION IF EXISTS kg_catchment("
                     "double precision,double precision,double precision,text)")
         cur.execute(old_fn)
@@ -452,8 +463,8 @@ def without_mesh_business():
     finally:
         with connect(autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("ALTER TABLE mesh_business_hidden_test RENAME TO mesh_business")
-            cur.execute(new_fn)
-            cur.execute(catchment_fn)
+            for migration in later:
+                cur.execute(migration.read_text(encoding="utf-8"))
 
 
 def test_the_api_survives_a_table_that_is_not_migrated_yet(without_mesh_business):
@@ -754,3 +765,77 @@ def test_the_map_opens_where_the_reader_last_was():
     source = (REPO_ROOT / "web" / "src" / "pages" / "MapPage.tsx").read_text(encoding="utf-8")
     assert "lastCenter() ?? FALLBACK_CENTER" in source, (
         "the initial centre must prefer the remembered one over a constant")
+
+
+def test_the_mesh_sweep_ignores_an_older_signature_left_behind():
+    """005 still creates the original five-argument analysis function.
+
+    Replaying it -- which the migration repair does, and which the fixture
+    above does -- leaves that signature beside the current one. A five-argument
+    call binds to it exactly, and the sweep then returns rows with no workers,
+    no land price and no specialties: every mesh scored, no error raised, the
+    wrong numbers stored. Naming the full signature makes the older overload
+    unreachable, and this is the test that says so.
+
+    Swept over two meshes of its own under a prefecture code nothing uses, in a
+    transaction that is rolled back: the loaded data is neither read nor
+    disturbed, and the check costs a moment instead of a minute.
+    """
+    psycopg = pytest.importorskip("psycopg")
+
+    from kaigyou_core import mesh as meshlib
+    from kaigyou_core.analysis import mesh_catchments, supports_specialties
+    from kaigyou_core.db import connect
+
+    root = Path(__file__).resolve().parents[2]
+    old_fn = (root / "db" / "migrations" / "005_functions.sql").read_text(encoding="utf-8")
+    source_id = "__stale_signature_test__"
+    codes = ("50302040", "50302041")
+
+    try:
+        with connect() as probe:
+            if not supports_specialties(probe):
+                pytest.skip("015_specialties.sql not applied")
+    except psycopg.OperationalError:
+        pytest.skip("no database")
+
+    with connect(autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(old_fn)
+    try:
+        with connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) AS n FROM pg_proc "
+                            "WHERE proname = 'kg_analyze_point' AND pronargs = 5")
+                assert cur.fetchone()["n"] == 1, "the older signature should be present"
+
+                cur.execute(
+                    "INSERT INTO data_sources (id, name, publisher, dataset_kind) "
+                    "VALUES (%s, 'test fixture', 'test', 'sample') "
+                    "ON CONFLICT (id) DO NOTHING", (source_id,))
+                for code in codes:
+                    lng, lat = meshlib.centroid(code)
+                    cur.execute(
+                        """
+                        INSERT INTO population_mesh (
+                            source_id, mesh_code, mesh_size_m, prefecture_code,
+                            geom, centroid, population, source_date
+                        ) VALUES (
+                            %s, %s, 1000, '98', ST_GeomFromText(%s, 4326),
+                            ST_SetSRID(ST_MakePoint(%s, %s), 4326), 100, current_date
+                        )
+                        """,
+                        (source_id, code, meshlib.to_polygon_wkt(code), lng, lat))
+
+            rows = mesh_catchments(conn, 500, mesh_size_m=1000, prefecture_code="98")
+            conn.rollback()
+
+        assert len(rows) == len(codes)
+        # Columns the five-argument function does not have. Present means the
+        # call reached the current one.
+        for column in ("workers", "land_price_yen_per_sqm",
+                       "facility_specialty_counts", "facilities_with_specialty_data"):
+            assert column in rows[0], f"the sweep lost {column} to the older signature"
+    finally:
+        with connect(autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
+                        "double precision,double precision,double precision,text,integer)")

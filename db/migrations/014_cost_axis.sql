@@ -23,8 +23,15 @@
 -- median is the honest answer, and land_price_basis says which was used so
 -- the reader is not comparing the two silently.
 
+-- 既知の署名をすべて落としてから作り直します。マイグレーションの修復は
+-- 009 以降をファイル順に流し直すので、あとの版が作った 7 引数版が残っていると
+-- CREATE が `already exists with same argument types` で落ちるか、引数の数だけ
+-- 違う多重定義ができて呼び出しが曖昧になります。
 DROP FUNCTION IF EXISTS kg_analyze_point(
     double precision, double precision, double precision, text, integer, text);
+DROP FUNCTION IF EXISTS kg_analyze_point(
+    double precision, double precision, double precision, text, integer,
+    text, text);
 
 CREATE FUNCTION kg_analyze_point(
     p_lat               double precision,

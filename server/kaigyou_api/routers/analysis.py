@@ -30,7 +30,13 @@ from kaigyou_core.analysis import (
     walk_network_status,
 )
 from kaigyou_core.dataset import build_dataset
-from kaigyou_core.scoring import ScoringModel, scope_key
+from kaigyou_core import specialties as vocab
+from kaigyou_core.scoring import (
+    ScoringModel,
+    augment_specialty_metrics,
+    competition_specialties,
+    scope_key,
+)
 
 router = APIRouter()
 
@@ -95,6 +101,8 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
              model: ScoringModel, category: str, mesh_size_m: int,
              prefecture_code: str, catchment: str = DEFAULT_CATCHMENT) -> dict[str, Any]:
     metrics = analyze_point(conn, lat, lng, radius_m, category, mesh_size_m, catchment)
+    # 科目で絞った件数と比率。どの科目が要るかはプロファイルの設定が決めます。
+    augment_specialty_metrics(metrics, competition_specialties(cfg.scoring_config()))
     scope = scope_key(mesh_size_m, radius_m, prefecture_code)
     distributions = load_distributions(conn, scope)
     scores = model.score(metrics, distributions)
@@ -108,12 +116,17 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         alt = model if name == model.profile_name else ScoringModel(
             cfg.scoring_config(), name)
         result = scores if name == model.profile_name else alt.score(metrics, distributions)
+        specialty = (alt.profile.get("competition") or {}).get("specialty")
         other_profiles.append({
             "profile": name,
             "label": alt.label,
             "overall": result.get("overall"),
             "cost": result.get("cost"),
             "uses_cost": "cost" in (alt.profile.get("overall_weights") or {}),
+            # 競合をどの標榜科目で数えたか。同じ地点で総合点が profile ごとに
+            # 違う理由の半分はこれなので、点数だけでなく数え方も返します。
+            "competition_specialty": specialty,
+            "competition_specialty_label": vocab.label(specialty) if specialty else None,
         })
 
     warnings: list[str] = []
@@ -157,6 +170,22 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
             "（通学者・来街者は含まれません）。"
         )
 
+    # 標榜科目の被覆率。商圏内の歯科医院のうち、診療科目が分かっているものの
+    # 割合です。科目別の件数はすべてこの分母の上の話なので、低いときは黙って
+    # 出すより言ったほうがいい。
+    coverage = metrics.get("specialty_data_coverage")
+    if facility_count and not metrics.get("facilities_with_specialty_data"):
+        warnings.append(
+            "診療科目データ（医療情報ネット 032）が未取得のため、"
+            "一般歯科・小児歯科・矯正歯科などの内訳は表示できません。"
+        )
+    elif coverage is not None and coverage < 0.95:
+        warnings.append(
+            f"商圏内の歯科医院 {facility_count} 件のうち、診療科目が分かるのは "
+            f"{metrics.get('facilities_with_specialty_data')} 件"
+            f"（{coverage * 100:.0f}%）です。科目別の件数はこの範囲での数字です。"
+        )
+
     return {
         "location": {"lat": lat, "lng": lng},
         "radius_m": radius_m,
@@ -187,6 +216,9 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
             "daily_passengers": metrics.get("daily_passengers"),
         },
         "mesh_count": metrics.get("mesh_count"),
+        # 標榜科目の内訳と診療時間。競合を「歯科医院 n 件」で終わらせないための
+        # 部分で、小児歯科をやるつもりの人が見るべき数はここにあります。
+        "specialties": _specialty_block(metrics),
         # The cost inputs, so the reader can see what the cost score rests on
         # rather than only its result.
         "land_price_yen_per_sqm": _round(metrics.get("land_price_yen_per_sqm")),
@@ -195,6 +227,36 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         "scores": scores,
         "scores_by_profile": other_profiles,
         "warnings": warnings,
+    }
+
+
+def _specialty_block(metrics: dict[str, Any]) -> dict[str, Any]:
+    """標榜科目の内訳・診療時間・被覆率。
+
+    件数だけでなく分母（``with_data``）を必ず一緒に返します。「小児歯科 3 件」が
+    「3 件しかない」のか「3 件しか分かっていない」のかは、分母が無いと読み手が
+    区別できません。自由記載の科目には ``declared_only`` の印を付けます。
+    """
+    total = metrics.get("facility_count") or 0
+    with_data = metrics.get("facilities_with_specialty_data") or 0
+    hours = metrics.get("facility_hours_counts") or {}
+    return {
+        "total_clinics": total,
+        "with_data": with_data,
+        "coverage": (None if not total else round(with_data / total, 3)),
+        "breakdown": vocab.describe(metrics.get("facility_specialty_counts")),
+        "hours": {
+            "declared": hours.get("declared"),
+            "counts": [
+                {"key": key, "label": label, "count": hours.get(key)}
+                for key, label in vocab.HOURS_LABELS.items()
+            ],
+            "weekly_hours_median": _round(
+                metrics.get("facility_weekly_hours_median"), 1),
+        },
+        "note": ("インプラント・審美・訪問診療などは標榜診療科目ではなく"
+                 "「その他」欄への自由記載のため、実施していても記載が無い医院が"
+                 "多数あります。件数は「そう記載した医院の数」です。"),
     }
 
 
@@ -356,7 +418,8 @@ def rankings(
                    ms.population, ms.age_0_14, ms.age_65_plus, ms.households,
                    ms.population_growth, ms.facility_count, ms.population_per_facility,
                    ms.nearest_station, ms.station_distance_m, ms.daily_passengers,
-                   ms.cost_score, ms.land_price_yen_per_sqm
+                   ms.cost_score, ms.land_price_yen_per_sqm,
+                   ms.facility_specialty_count, ms.facility_specialty_counts
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
             WHERE {' AND '.join(where)}
@@ -367,6 +430,10 @@ def rankings(
         )
         rows = cur.fetchall()
 
+    # このプロファイルが競合として数えた標榜科目。ランキングの「歯科医院 n 件」が
+    # 全科目の数なのか絞った数なのかは、列を見ただけでは分かりません。
+    ranking_specialty = (model.profile.get("competition") or {}).get("specialty")
+
     items = []
     for row in rows:
         item = dict(row)
@@ -374,6 +441,8 @@ def rankings(
                     "population_per_facility", "station_distance_m",
                     "land_price_yen_per_sqm"):
             item[key] = _round(item.get(key))
+        item["specialty_breakdown"] = vocab.describe(
+            item.pop("facility_specialty_counts", None))
         items.append(item)
 
     if not items:
@@ -392,6 +461,9 @@ def rankings(
         "limit": limit,
         "offset": offset,
         "radius_m": radius_m,
+        "competition_specialty": ranking_specialty,
+        "competition_specialty_label": (vocab.label(ranking_specialty)
+                                        if ranking_specialty else None),
         "model": model.describe(),
         "message": message,
         "provenance": ranking_prov,

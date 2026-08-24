@@ -28,6 +28,7 @@ class Discovery:
 
     directory: Path
     clinics: Path | None = None
+    specialties: Path | None = None
     mesh_current: Path | None = None
     mesh_baseline: Path | None = None
     mesh_business: Path | None = None
@@ -59,6 +60,8 @@ class Discovery:
             out.append("経済センサス メッシュ（事業所・従業者数）")
         if not self.land_prices:
             out.append("地価公示 L01（参考情報として表示）")
+        if not self.specialties:
+            out.append("診療科目・診療時間（標榜科目別の競合分析に使用）")
         if not self.walk_network:
             out.append("OpenStreetMap 道路（徒歩圏の算出に使用）")
         return out
@@ -66,6 +69,7 @@ class Discovery:
     def as_dict(self) -> dict[str, str | None]:
         return {
             "clinics": str(self.clinics) if self.clinics else None,
+            "specialties": str(self.specialties) if self.specialties else None,
             "mesh_current": str(self.mesh_current) if self.mesh_current else None,
             "mesh_baseline": str(self.mesh_baseline) if self.mesh_baseline else None,
             "mesh_business": str(self.mesh_business) if self.mesh_business else None,
@@ -109,12 +113,17 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
         raise NotADirectoryError(directory)
 
     clinic_spec = sources.get("mhlw_dental_clinics", {})
+    specialty_spec = sources.get("mhlw_dental_specialties", {})
     mesh_spec = sources.get("estat_population_mesh", {})
     business_spec = sources.get("estat_business_mesh", {})
     baseline_spec = (mesh_spec.get("growth_baseline") or {})
 
-    clinic_keys = set(_candidates(clinic_spec, "facility_id")) | set(
-        _candidates(clinic_spec, "lat"))
+    # The facility file is identified by its coordinates, not by "ID": the
+    # companion 診療科目 file carries the same "ID" column and nothing else in
+    # common, so matching on the identifier alone claimed both files for the
+    # same slot and one of them was silently dropped as a duplicate.
+    clinic_keys = set(_candidates(clinic_spec, "lat"))
+    specialty_keys = set(_candidates(specialty_spec, "specialty_code"))
     mesh_code_keys = set(_candidates(mesh_spec, "mesh_code"))
     mesh_current_keys = set(_candidates(mesh_spec, "population"))
     mesh_baseline_keys = {
@@ -162,6 +171,8 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
                     f"{path.name}: メッシュ統計だが、設定済みの列IDと一致しません"
                     f"（config/sources.yaml の columns.population を確認してください）"
                 )
+        elif header & specialty_keys:
+            _assign(found, "specialties", path)
         elif header & clinic_keys:
             _assign(found, "clinics", path)
         else:
@@ -175,6 +186,12 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
         found.notes.append(
             "OpenStreetMap の道路データがないため、商圏は円（直線距離）のみになります。"
             "徒歩圏（街路網に沿った距離）は選べません。"
+        )
+    if found.specialties is None:
+        found.notes.append(
+            "診療科目・診療時間のファイル（032）がないため、競合は「歯科医院すべて」"
+            "として数えます。小児歯科・矯正歯科など標榜科目を絞ったプロファイルは"
+            "順位を算出できません。"
         )
     if found.land_prices is None:
         found.notes.append(
@@ -214,6 +231,7 @@ def _assign(found: Discovery, slot: str, path: Path) -> None:
 def describe(found: Discovery) -> Iterable[str]:
     labels = {
         "clinics": "歯科診療所",
+        "specialties": "診療科目・診療時間",
         "mesh_current": "人口メッシュ（最新年）",
         "mesh_baseline": "人口メッシュ（基準年）",
         "mesh_business": "事業所・従業者メッシュ",

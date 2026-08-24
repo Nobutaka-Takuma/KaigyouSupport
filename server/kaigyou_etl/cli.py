@@ -239,6 +239,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
 
     plan = [
         ("mhlw_dental_clinics", found.clinics, None),
+        ("mhlw_dental_specialties", found.specialties, None),
         ("estat_population_mesh", found.mesh_current, found.mesh_baseline),
         ("estat_business_mesh", found.mesh_business, None),
         ("osm_walk_network", found.walk_network, None),

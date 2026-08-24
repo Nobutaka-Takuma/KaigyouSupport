@@ -41,8 +41,14 @@ from kaigyou_core.analysis import (
     prefecture_name,
     resolve_mesh_size,
 )
-from kaigyou_core.db import table_exists
-from kaigyou_core.scoring import ScoringModel, scope_key
+from kaigyou_core.db import column_exists, table_exists
+from kaigyou_core import specialties as vocab
+from kaigyou_core.scoring import (
+    ScoringModel,
+    augment_specialty_metrics,
+    competition_specialties,
+    scope_key,
+)
 
 #: Bumped when the shape changes in a way that would break a reader.
 SCHEMA_VERSION = "1.0"
@@ -85,6 +91,30 @@ DEFINITIONS: dict[str, dict[str, str]] = {
     },
     "establishments": {"unit": "事業所", "description": "事業所数。",
                        "source": "経済センサス"},
+    "specialty_counts": {
+        "unit": "件",
+        "description": (
+            "商圏内の歯科医院を標榜診療科目別に数えたもの。分母は診療科目データが"
+            "ある医院（with_data）であり、商圏内の全医院ではない。"
+            "declared_only=true の科目は自由記載欄からの抽出で、記載した医院しか"
+            "数えられない。"),
+        "source": "厚生労働省 医療機能情報提供制度（医療情報ネット）診療科目",
+    },
+    "specialty_population_per_clinic": {
+        "unit": "人",
+        "description": (
+            "その科目を標榜する医院1件あたりの商圏人口。小児歯科は0〜14歳人口で"
+            "算出する（scores の competition.population_metric を参照）。"),
+        "source": "国勢調査 × 医療情報ネット",
+    },
+    "clinic_hours": {
+        "unit": "件 / 時間",
+        "description": (
+            "商圏内の医院のうち土曜・日曜・祝日・夜間に診療枠がある件数と、"
+            "週間診療時間の中央値。夜間は終了時刻18:30以降。重複する時間帯は"
+            "結合してから合計している。"),
+        "source": "厚生労働省 医療機能情報提供制度（医療情報ネット）診療時間",
+    },
     "industry_workers": {
         "unit": "人",
         "description": (
@@ -179,7 +209,13 @@ def _dataset_caveats() -> list[str]:
         "繁華街の来街需要は捕捉できていません。",
         "「地価」は土地の価格であり賃料ではありません。テナント賃料・初期投資額の"
         "代わりには使えません。",
-        "歯科診療所は施設数のみです。規模・ユニット数・診療実績・経営状態は含まれません。",
+        "歯科診療所は施設数と標榜診療科目・診療時間までです。"
+        "規模・ユニット数・診療実績・経営状態・自費診療の比率は含まれません。",
+        "標榜診療科目は届出値です。「小児歯科」を標榜していても小児を主に診ているとは限らず、"
+        "標榜していなくても小児を診ている医院はあります。看板の数であって診療内容の数ではありません。",
+        "インプラント・審美・訪問診療などは標榜診療科目ではなく自由記載欄にしかありません。"
+        "記載率が低いため、これらの件数は実施医院数の下限です（東京都で"
+        "インプラントの記載は1%台）。競合の少なさの根拠には使えません。",
         "国勢調査メッシュは秘匿処理により、小規模メッシュの値が隣接メッシュへ"
         "合算されています。合計は保たれますが局所的に1メッシュ分ずれることがあります。",
         "人口増減率は2015年→2020年の変化で、直近の動向とは異なる場合があります。",
@@ -259,18 +295,25 @@ def _clinics(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
             """, (category, lng, lat, radius_m))
         total = cur.fetchone()["n"]
 
+        # 標榜科目と診療時間を一緒に引きます。「近くに 50 件ある」より
+        # 「近い順に 50 件、それぞれ何を標榜していて土日は開いているか」のほうが、
+        # 読み手が自分で数えなおせるぶん情報量があります。
         cur.execute(
             """
-            SELECT name, address, clinic_types, founder_type, opening_date,
-                   attributes,
-                   ST_Distance(geom::geography,
+            SELECT f.name, f.address, f.clinic_types, f.founder_type, f.opening_date,
+                   f.attributes,
+                   ff.specialty_keys, ff.declared_specialties, ff.weekly_open_hours,
+                   ff.open_days, ff.latest_close, ff.opens_saturday, ff.opens_sunday,
+                   ff.opens_holiday, ff.opens_evening,
+                   ST_Distance(f.geom::geography,
                                ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS distance_m,
-                   ST_Y(geom) AS lat, ST_X(geom) AS lng
-            FROM facilities
-            WHERE facility_category = %s
-              AND ST_DWithin(geom::geography,
+                   ST_Y(f.geom) AS lat, ST_X(f.geom) AS lng
+            FROM facilities f
+            LEFT JOIN facility_features ff ON ff.facility_id = f.facility_id
+            WHERE f.facility_category = %s
+              AND ST_DWithin(f.geom::geography,
                              ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
-            ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+            ORDER BY f.geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
             LIMIT %s
             """, (lng, lat, category, lng, lat, radius_m, lng, lat, max(limit, 0)))
         rows = cur.fetchall() if limit > 0 else []
@@ -286,6 +329,22 @@ def _clinics(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
             "founder_type": row["founder_type"],
             "opening_date": row["opening_date"].isoformat() if row["opening_date"] else None,
             "homepage": (row["attributes"] or {}).get("homepage"),
+            "specialties": ([
+                {"key": key, "label": vocab.label(key),
+                 "declared_only": vocab.is_free_text(key)}
+                for key in sorted(row["specialty_keys"] or [], key=vocab.sort_key)
+            ] or None),
+            "declared_specialty_names": row["declared_specialties"] or None,
+            "hours": (None if row["weekly_open_hours"] is None else {
+                "weekly_hours": row["weekly_open_hours"],
+                "open_days": row["open_days"],
+                "latest_close": (row["latest_close"].isoformat()
+                                 if row["latest_close"] else None),
+                "saturday": row["opens_saturday"],
+                "sunday": row["opens_sunday"],
+                "holiday": row["opens_holiday"],
+                "evening": row["opens_evening"],
+            }),
         }
         items.append(item)
     return {"count": total, "listed": len(items), "truncated": total > len(items),
@@ -332,6 +391,9 @@ _RANKED_METRICS = {
     "dental_clinics": "facility_count",
     "population_per_clinic": "population_per_facility",
     "land_price_yen_per_sqm": "land_price_yen_per_sqm",
+    # そのプロファイルが競合として数えた標榜科目の件数。プロファイルを絞って
+    # いないときは mesh_scores 側が NULL なので、この行は自然に落ちます。
+    "specialty_clinics": "facility_specialty_count",
 }
 
 #: Which competitor to measure the distance to. The total inside a radius says
@@ -364,6 +426,8 @@ def _percentiles(conn: psycopg.Connection, metrics: dict[str, Any], *,
     for name, column in _RANKED_METRICS.items():
         value = metrics.get(name if name in metrics else _RANKED_METRICS[name])
         if value is None:
+            continue
+        if not column_exists(conn, "mesh_scores", column):
             continue
         columns.append(f"count(*) FILTER (WHERE ms.{column} IS NOT NULL "
                        f"AND ms.{column} <= %s) AS {name}_below")
@@ -572,6 +636,73 @@ def _round(value: Any, digits: int = 0) -> Any:
     return round(float(value), digits) if digits else round(float(value))
 
 
+def _by_specialty(metrics: dict[str, Any],
+                  by_radius: dict[str, Any]) -> dict[str, Any]:
+    """標榜科目別の競合。件数・占有率・1 件あたり人口を、半径ごとにも。
+
+    分母（``with_data``）を必ず並べます。科目別の件数は「診療科目が分かって
+    いる医院のうち何件か」であって、「商圏内に何件あるか」ではありません。
+    今の抽出は東京都を全部含んでいますが、他県では欠けることがあります。
+
+    自由記載の科目（インプラント・審美・訪問診療）は ``declared_only`` の印を
+    付けます。書かなかった医院を「やっていない」と数えてしまうため、これらの
+    件数は競合の少なさの根拠には使えません。
+    """
+    total = metrics.get("facility_count") or 0
+    with_data = metrics.get("facilities_with_specialty_data") or 0
+    counts = metrics.get("facility_specialty_counts") or {}
+    population = metrics.get("population")
+
+    detail = []
+    for row in vocab.describe(counts):
+        count = row["count"]
+        detail.append({
+            **row,
+            "share_of_clinics_with_data": (
+                None if not with_data else round(count / with_data, 3)),
+            "population_per_clinic": (
+                None if not count or population is None
+                else round(float(population) / count)),
+        })
+
+    return {
+        "total_clinics": total,
+        "with_data": with_data,
+        "coverage": None if not total else round(with_data / total, 3),
+        "detail": detail,
+        "by_radius": {r: vals.get("specialty_counts") or {}
+                      for r, vals in by_radius.items()},
+        "note": ("標榜診療科目は告示に基づく届出（歯科・小児歯科・矯正歯科・"
+                 "歯科口腔外科・小児矯正歯科）。インプラント・審美・訪問診療などは"
+                 "「その他」欄への自由記載のため、実施していても記載が無い医院が"
+                 "多数あります。declared_only=true の件数は「そう記載した医院の数」"
+                 "であり、実施医院数の下限にすぎません。"),
+    }
+
+
+def _hours_block(metrics: dict[str, Any]) -> dict[str, Any]:
+    """商圏内の医院の診療時間。件数では見えない競合の形。
+
+    土曜に開けている医院が 6 割の商圏と 9 割の商圏では、同じ件数でも空いている
+    時間帯が違います。中央値の週間診療時間は、その商圏の「ふつう」の営業量。
+    """
+    counts = metrics.get("facility_hours_counts") or {}
+    declared = counts.get("declared") or 0
+    return {
+        "declared": declared,
+        "counts": [
+            {"key": key, "label": label, "count": counts.get(key),
+             "share": (None if not declared or counts.get(key) is None
+                       else round(counts[key] / declared, 3))}
+            for key, label in vocab.HOURS_LABELS.items()
+        ],
+        "weekly_hours_median": _round(metrics.get("facility_weekly_hours_median"), 1),
+        "note": ("診療時間は医療機能情報提供制度の届出値。曜日ごとの開始・終了時刻から"
+                 "算出しています。夜間診療は終了時刻が 18:30 以降の枠がある医院。"
+                 "週間診療時間は重複する時間帯を結合してから合計しています。"),
+    }
+
+
 def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: int, *,
                   catchment: str = DEFAULT_CATCHMENT,
                   category: str = DEFAULT_CATEGORY,
@@ -594,10 +725,16 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     prefecture_code = default_prefecture(conn, prefecture_code)
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
 
+    # そのプロファイルが競合として数える標榜科目。指定するとメッシュ分布との
+    # 比較（relative_position）もその科目の件数で行われます。
+    specialty = (model.profile.get("competition") or {}).get("specialty")
+    pairs = competition_specialties(scoring_config)
+
     radii = sorted({*model.radii, radius_m})
     by_radius: dict[str, Any] = {}
     for r in radii:
-        m = analyze_point(conn, lat, lng, r, category, mesh_size_m or 1000, catchment)
+        m = analyze_point(conn, lat, lng, r, category, mesh_size_m or 1000, catchment,
+                          specialty)
         by_radius[str(r)] = {
             "population": _round(m.get("population")),
             "age_0_14": _round(m.get("age_0_14")),
@@ -612,10 +749,13 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "workers_per_clinic": _round(m.get("workers_per_facility")),
             "land_price_yen_per_sqm": _round(m.get("land_price_yen_per_sqm")),
             "mesh_count": m.get("mesh_count"),
+            "specialty_counts": m.get("facility_specialty_counts") or {},
+            "clinics_with_specialty_data": m.get("facilities_with_specialty_data"),
         }
 
     metrics = analyze_point(conn, lat, lng, radius_m, category,
-                            mesh_size_m or 1000, catchment)
+                            mesh_size_m or 1000, catchment, specialty)
+    augment_specialty_metrics(metrics, pairs)
 
     # The mesh distribution exists only at the radius the scoring ran at, so
     # the comparison is made there and says so. Comparing a 2km catchment
@@ -624,7 +764,7 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     comparison_radius = model.mesh_scoring_radius_m
     comparison_metrics = (metrics if comparison_radius == radius_m else
                           analyze_point(conn, lat, lng, comparison_radius, category,
-                                        mesh_size_m or 1000, catchment))
+                                        mesh_size_m or 1000, catchment, specialty))
     scope = scope_key(mesh_size_m or 1000, radius_m, prefecture_code)
     distributions = load_distributions(conn, scope)
 
@@ -632,9 +772,13 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     for name in (scoring_config.get("profiles") or {}):
         alt = ScoringModel(scoring_config, name)
         result = alt.score(metrics, distributions)
+        alt_specialty = (alt.profile.get("competition") or {}).get("specialty")
         scores.append({
             "profile": name,
             "label": alt.label,
+            "competition_specialty": alt_specialty,
+            "competition_specialty_label": (vocab.label(alt_specialty)
+                                            if alt_specialty else None),
             "overall": result.get("overall"),
             "components": {
                 "demand": result.get("demand"),
@@ -728,6 +872,11 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "clinics_in_radius": _clinics(conn, lat, lng, radius_m, category, max_clinics),
             # How close, not only how many.
             "proximity": _competitor_distances(conn, lat, lng, category, radius_m),
+            # 標榜科目別の競合。「歯科医院 186 件」は、小児歯科をやるつもりの
+            # 人にとっては 186 件ではありません。
+            "by_specialty": _by_specialty(metrics, by_radius),
+            # 診療時間。空いている曜日・時間帯は、件数には出てこない競合の形。
+            "hours": _hours_block(metrics),
         },
         "access": {
             "nearest_station": {

@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 import psycopg
+from psycopg.types.json import Json
 
 from kaigyou_core import config as cfg
 from kaigyou_core.analysis import (
@@ -25,7 +26,16 @@ from kaigyou_core.analysis import (
     municipality_names_from_facilities,
     resolve_mesh_size,
 )
-from kaigyou_core.scoring import DISTRIBUTION_METRICS, ScoringModel, distributions_from_rows, scope_key
+from kaigyou_core.scoring import (
+    DISTRIBUTION_METRICS,
+    ScoringModel,
+    augment_specialty_metrics,
+    competition_specialties,
+    derived_metrics,
+    distributions_from_rows,
+    scope_key,
+    specialty_count_metric,
+)
 
 #: How far a mesh centre may sit outside every municipality and still borrow
 #: the nearest one's name. Waterfront reclaimed land is the case this exists
@@ -60,9 +70,15 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to compute statistics from")
-    model = ScoringModel(cfg.scoring_config())
+    config = cfg.scoring_config()
+    model = ScoringModel(config)
     radii = radii or sorted(set(model.radii + [model.mesh_scoring_radius_m]))
-    summary: dict[str, Any] = {"radii": radii, "mesh_size_m": mesh_size_m, "scopes": {}}
+    # 科目で絞った比率は、全科目の比率とは別の分布を持ちます。どの科目が要るかは
+    # プロファイルの設定が決めるので、ここで設定から引いてきます。
+    pairs = competition_specialties(config)
+    metrics = list(DISTRIBUTION_METRICS) + derived_metrics(config)
+    summary: dict[str, Any] = {"radii": radii, "mesh_size_m": mesh_size_m,
+                               "specialty_metrics": derived_metrics(config), "scopes": {}}
 
     for radius in radii:
         if progress:
@@ -71,9 +87,11 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
                                prefecture_code=prefecture_code,
                                facility_category=facility_category,
                                progress=progress)
+        for row in rows:
+            augment_specialty_metrics(row, pairs)
         scope = scope_key(mesh_size_m, radius, prefecture_code)
         written = 0
-        for metric in DISTRIBUTION_METRICS:
+        for metric in metrics:
             values = sorted(
                 float(r[metric]) for r in rows
                 if r.get(metric) is not None
@@ -146,6 +164,9 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                            prefecture_code=prefecture_code,
                            facility_category=facility_category,
                            progress=progress)
+    pairs = competition_specialties(config)
+    for row in rows:
+        augment_specialty_metrics(row, pairs)
 
     # Area names for the ranking table. Official boundary polygons are the
     # right source; without them, fall back to the municipality recorded on
@@ -181,6 +202,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                 """
                 INSERT INTO mesh_scores (
                     mesh_id, profile, radius_m, land_price_yen_per_sqm, cost_score,
+                    facility_specialty_counts, facility_specialty_count,
                     population, age_0_14, age_65_plus,
                     households, population_growth, facility_count,
                     population_per_facility, nearest_facility_distance_m,
@@ -189,7 +211,9 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     accessibility_score, overall_score, area_label, computed_at
                 ) VALUES (
                     %(mesh_id)s, %(profile)s, %(radius_m)s,
-                    %(land_price_yen_per_sqm)s, %(cost)s, %(population)s,
+                    %(land_price_yen_per_sqm)s, %(cost)s,
+                    %(facility_specialty_counts)s, %(facility_specialty_count)s,
+                    %(population)s,
                     %(age_0_14)s, %(age_65_plus)s, %(households)s,
                     %(population_growth)s, %(facility_count)s,
                     %(population_per_facility)s, %(nearest_facility_distance_m)s,
@@ -201,6 +225,10 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     overall_score = EXCLUDED.overall_score,
                     cost_score = EXCLUDED.cost_score,
                     land_price_yen_per_sqm = EXCLUDED.land_price_yen_per_sqm,
+                    facility_specialty_counts = EXCLUDED.facility_specialty_counts,
+                    facility_specialty_count = EXCLUDED.facility_specialty_count,
+                    competition_score = EXCLUDED.competition_score,
+                    demand_score = EXCLUDED.demand_score,
                     computed_at = now()
                 """, batch[start:start + 500])
             scored_profiles.append(model.profile_name)
@@ -219,8 +247,14 @@ def _score_row(model: ScoringModel, row: Mapping[str, Any],
                distributions: Mapping[str, Any], radius: int,
                labels: Mapping[int, str | None]) -> dict[str, Any]:
     scored = model.score(row, distributions)
+    # ランキングに出す件数は、そのプロファイルが競合として数えたものと同じで
+    # なければ意味がありません。科目を絞っていないプロファイルでは None。
+    specialty = (model.profile.get("competition") or {}).get("specialty")
     return {
         "mesh_id": row["mesh_id"],
+        "facility_specialty_counts": Json(row.get("facility_specialty_counts") or {}),
+        "facility_specialty_count": (
+            row.get(specialty_count_metric(specialty)) if specialty else None),
         "profile": model.profile_name,
         "radius_m": radius,
         "population": row.get("population"),

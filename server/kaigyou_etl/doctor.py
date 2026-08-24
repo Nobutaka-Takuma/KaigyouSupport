@@ -167,6 +167,7 @@ TABLES = (
     ("stations", "駅", True),
     ("municipalities", "行政区域", True),
     ("land_prices", "地価公示", False),
+    ("facility_specialties", "診療科目", False),
 )
 
 
@@ -234,6 +235,74 @@ def _check_scores(report: Report, conn: Any) -> None:
                    "kaigyou-etl compute-scores を実行してください。")
     else:
         report.add("メッシュスコア", OK, f"{scores['n']:,} メッシュ")
+
+
+def _check_specialties(report: Report, conn: Any) -> None:
+    """診療科目データが、どの都道府県のどれだけの医院を覆っているか。
+
+    件数が 0 でないことだけでは足りません。この抽出は都道府県によって全部
+    入っていたり一部しか無かったりします。被覆率が低い県では、科目別の件数は
+    「その科目が少ない」ではなく「分かっていない」を意味するので、そこを
+    黙って通すと読み手が競合を数え違えます。
+
+    科目を絞ったプロファイルが設定にあるのにデータが無い、という組み合わせも
+    ここで言います。順位が出ないまま「未算出」だけが並ぶより、なぜ出ないかを
+    先に言ったほうがいい。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_core.db import fetch_one, table_exists
+    from kaigyou_core.scoring import competition_specialties
+
+    scoped = competition_specialties(cfg.scoring_config())
+    labels = "、".join(sorted({s for _pop, s in scoped}))
+
+    if not table_exists(conn, "facility_features"):
+        report.add("診療科目", WARN, "テーブルがありません",
+                   "kaigyou-etl migrate を実行してください。")
+        return
+
+    row = fetch_one(conn, "SELECT count(*) AS n FROM facility_features")
+    if not row or row["n"] == 0:
+        detail = "未取得（競合は歯科医院すべてで数えます）"
+        if scoped:
+            detail += f"。標榜科目を絞ったプロファイル（{labels}）は順位を算出できません"
+        report.add("診療科目", WARN, detail,
+                   "032_dental_speciality_hours_*.csv を download フォルダに置いて "
+                   "kaigyou-etl load-local を実行してください。")
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT f.prefecture_code AS pref, count(*)::int AS clinics,
+                   count(ff.facility_id)::int AS with_data
+            FROM facilities f
+            LEFT JOIN facility_features ff ON ff.facility_id = f.facility_id
+            WHERE f.facility_category = 'dental_clinic'
+            GROUP BY f.prefecture_code
+            HAVING count(*) > 0
+            ORDER BY f.prefecture_code
+            """)
+        rows = cur.fetchall()
+
+    covered = [r for r in rows if r["with_data"]]
+    thin = [r for r in covered if r["with_data"] / r["clinics"] < 0.8]
+    report.add("診療科目", OK,
+               f"{row['n']:,} 医院／{len(covered)} 都道府県"
+               + (f"（競合を絞るプロファイル: {labels}）" if scoped else ""))
+    if thin:
+        detail = "、".join(
+            f"{r['pref']}: {r['with_data']:,}/{r['clinics']:,}"
+            f"（{r['with_data'] / r['clinics'] * 100:.0f}%）" for r in thin[:6])
+        report.add("診療科目の被覆", WARN,
+                   f"科目が分からない医院が多い都道府県があります — {detail}",
+                   "その都道府県では標榜科目別の件数・スコアは算出されません。"
+                   "全国版の 032 ファイルを取り込むと解消します。")
+    else:
+        report.add("診療科目の被覆", OK,
+                   "、".join(f"{r['pref']}: {r['with_data'] / r['clinics'] * 100:.0f}%"
+                            for r in covered[:8])
+                   + ("…" if len(covered) > 8 else ""))
 
 
 def _check_walk_network(report: Report, conn: Any) -> None:
@@ -466,6 +535,7 @@ def run() -> Report:
         _check_data(report, conn)
         _check_prefectures(report, conn)
         _check_scores(report, conn)
+        _check_specialties(report, conn)
         _check_walk_network(report, conn)
         _check_api_surface(report, conn)
     return report

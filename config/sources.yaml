@@ -83,6 +83,87 @@ sources:
       closed_sun:    "毎週決まった曜日に休診（日）"
       closed_holiday: "祝日に休診"
 
+  mhlw_dental_specialties:
+    adapter: mhlw_specialties
+    name: "医療機能情報提供制度（医療情報ネット）歯科 診療科目・診療時間"
+    publisher: "厚生労働省"
+    dataset_kind: official
+    homepage_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2400/initialize"
+    terms_url: "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S9000/riyoukiyaku"
+    license: "厚生労働省 医療情報ネット 利用規約に従う"
+    # Companion file to `mhlw_dental_clinics`, published from the same page as
+    # `0xx_dental_speciality_hours_YYYYMMDD.csv`. It has no coordinates and no
+    # names: it is one row per (施設, 診療科目, 診療時間帯 1-3), joined back to
+    # the facility file on ID.
+    #
+    #   kaigyou-etl run mhlw_dental_specialties --input <downloaded>.csv
+    #
+    url: null
+    encoding: utf-8-sig
+    facility_category: dental_clinic
+    source_date: 2026-06-01
+    columns:
+      facility_id:    ["ID", "医療機関コード", "医療機関ID"]
+      specialty_code: ["診療科目コード"]
+      specialty_name: ["診療科目名"]
+      time_band:      ["診療時間帯"]
+
+    # ---------------------------------------------------------------- 診療科目
+    # 標榜診療科目コードは告示に基づく固定値。名称ではなくコードで正規化するのは、
+    # 名称は表記ゆれ（「歯科口腔外科」「口腔外科」）があるため。
+    #
+    # 08991（その他）だけは自由記載で、インプラント・審美・訪問などはここにしか
+    # 現れません。書いた医院しか数えられないので、この区分から作られたキーは
+    # is_free_text = true として区別し、既定のスコアには使いません。
+    specialty_codes:
+      "08001": general                 # 歯科
+      "08002": orthodontics            # 矯正歯科
+      "08003": oral_surgery            # 歯科口腔外科
+      "08004": pediatric               # 小児歯科
+      "08005": pediatric_orthodontics  # 小児矯正歯科
+    #: この区分は自由記載。下のキーワードで正規化し、当たらないものは other に。
+    free_text_code: "08991"
+    free_text_keywords:
+      implant:         ["インプラント"]
+      cosmetic:        ["審美", "ホワイトニング", "美容歯科"]
+      home_visit:      ["訪問"]
+      periodontal:     ["歯周病", "歯周治療", "ペリオ"]
+      preventive:      ["予防歯科", "予防"]
+      special_needs:   ["障害者歯科", "障がい者歯科", "スペシャルニーズ"]
+      dental_anesthesia: ["歯科麻酔"]
+      prosthodontics:  ["補綴", "義歯", "入れ歯"]
+      endodontics:     ["歯内療法", "根管治療"]
+      sleep_apnea:     ["睡眠時無呼吸", "いびき"]
+      general:         ["一般歯科"]
+      orthodontics:    ["矯正"]
+      oral_surgery:    ["口腔外科"]
+      pediatric:       ["小児歯科", "こども歯科", "小児"]
+    #: 歯科以外の標榜科（内科・皮膚科など。歯科口腔外科を併設する病院に出る）。
+    #: 歯科の競合数には混ぜず、この 1 つのキーにまとめます。
+    non_dental_key: other_medical
+
+    # ---------------------------------------------------------------- 診療時間
+    # 曜日 8 種 × 診療時間帯 3 種 × (診療/外来受付) の開始・終了。
+    # 列名は「月_診療開始時間」のように接頭辞＋接尾辞で決まっているので、
+    # 一覧を書き並べずにテンプレートで解決します。
+    weekday_prefixes:
+      "1": "月"
+      "2": "火"
+      "3": "水"
+      "4": "木"
+      "5": "金"
+      "6": "土"
+      "7": "日"
+      "8": "祝"
+    hour_columns:
+      opens:             "{day}_診療開始時間"
+      closes:            "{day}_診療終了時間"
+      reception_opens:   "{day}_外来受付開始時間"
+      reception_closes:  "{day}_外来受付終了時間"
+    #: 「夜間も開いている」と数える終了時刻。競合の営業時間の差を見るための
+    #: 便宜的な区切りで、法令上の定義ではありません。
+    evening_from: "18:30"
+
   estat_population_mesh:
     adapter: estat_mesh
     name: "国勢調査 500mメッシュ 人口・世帯（2020年）"

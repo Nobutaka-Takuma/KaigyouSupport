@@ -12,7 +12,14 @@ from typing import Any, Mapping, Sequence
 import psycopg
 
 from kaigyou_core.db import table_exists
-from kaigyou_core.scoring import Distribution, ScoringModel, distributions_from_rows, scope_key
+from kaigyou_core.scoring import (
+    Distribution,
+    ScoringModel,
+    augment_specialty_metrics,
+    competition_specialties,
+    distributions_from_rows,
+    scope_key,
+)
 
 DEFAULT_CATEGORY = "dental_clinic"
 
@@ -224,13 +231,35 @@ def supports_catchment_mode(conn: psycopg.Connection) -> bool:
         return cur.fetchone()["n"] > 0
 
 
+def supports_specialties(conn: psycopg.Connection) -> bool:
+    """Whether kg_analyze_point takes the 標榜科目 argument yet.
+
+    Same deploy window as :func:`supports_catchment_mode`: the code ships in
+    seconds, the migration is run by hand afterwards. Asking the seven-argument
+    form of a six-argument function fails every analysis in between.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM pg_proc "
+            "WHERE proname = 'kg_analyze_point' AND pronargs >= 7"
+        )
+        return cur.fetchone()["n"] > 0
+
+
 def analyze_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
                   facility_category: str = DEFAULT_CATEGORY,
                   mesh_size_m: int = DEFAULT_MESH_SIZE_M,
-                  catchment: str = DEFAULT_CATCHMENT) -> dict[str, Any]:
+                  catchment: str = DEFAULT_CATCHMENT,
+                  specialty: str | None = None) -> dict[str, Any]:
     """Raw catchment metrics for one point. No scoring applied."""
     with conn.cursor() as cur:
-        if supports_catchment_mode(conn):
+        if supports_specialties(conn):
+            cur.execute(
+                "SELECT * FROM kg_analyze_point(%s, %s, %s, %s, %s, %s, %s)",
+                (lat, lng, radius_m, facility_category, mesh_size_m, catchment,
+                 specialty),
+            )
+        elif supports_catchment_mode(conn):
             cur.execute(
                 "SELECT * FROM kg_analyze_point(%s, %s, %s, %s, %s, %s)",
                 (lat, lng, radius_m, facility_category, mesh_size_m, catchment),
@@ -364,12 +393,21 @@ def land_prices_near(conn: psycopg.Connection, lat: float, lng: float,
 
 def facility_counts(conn: psycopg.Connection, lat: float, lng: float,
                     radii: Sequence[int],
-                    facility_category: str = DEFAULT_CATEGORY) -> dict[int, int]:
+                    facility_category: str = DEFAULT_CATEGORY,
+                    specialty: str | None = None) -> dict[int, int]:
+    """Facilities within each radius, optionally only those declaring 標榜科目."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT radius_m, facility_count FROM kg_facility_counts(%s, %s, %s, %s)",
-            (lat, lng, [float(r) for r in radii], facility_category),
-        )
+        if specialty is not None and supports_specialties(conn):
+            cur.execute(
+                "SELECT radius_m, facility_count "
+                "FROM kg_facility_counts_by_specialty(%s, %s, %s, %s, %s)",
+                (lat, lng, [float(r) for r in radii], facility_category, specialty),
+            )
+        else:
+            cur.execute(
+                "SELECT radius_m, facility_count FROM kg_facility_counts(%s, %s, %s, %s)",
+                (lat, lng, [float(r) for r in radii], facility_category),
+            )
         return {int(r["radius_m"]): r["facility_count"] for r in cur.fetchall()}
 
 
@@ -385,6 +423,7 @@ def score_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
                 prefecture_code: str = "13") -> dict[str, Any]:
     """Analyse a point and score it against the observed mesh distribution."""
     metrics = analyze_point(conn, lat, lng, radius_m, facility_category, mesh_size_m)
+    augment_specialty_metrics(metrics, competition_specialties(model.config))
     scope = scope_key(mesh_size_m, radius_m, prefecture_code)
     distributions = load_distributions(conn, scope)
     scores = model.score(metrics, distributions)
@@ -418,12 +457,32 @@ def mesh_catchments(conn: psycopg.Connection, radius_m: int, *,
     analysis for every row it then throws away.
     """
     say = progress or (lambda _msg: None)
+
+    # Every argument named, not only the ones that differ from their defaults.
+    #
+    # 005_functions.sql still creates the original five-argument function, and
+    # replaying it -- which the migration repair and the deploy-window tests
+    # both do -- leaves that older signature sitting beside the current one. A
+    # five-argument call then binds to it exactly, and the sweep silently
+    # returns a row without workers, land price or specialties: every mesh
+    # scored, no error, the wrong numbers. Asking for the full signature makes
+    # the older overload unreachable from here.
+    extra: tuple[Any, ...] = ()
+    if supports_specialties(conn):
+        arguments = "ST_Y(m.centroid), ST_X(m.centroid), %s, %s, %s, %s, %s"
+        extra = (DEFAULT_CATCHMENT, None)
+    elif supports_catchment_mode(conn):
+        arguments = "ST_Y(m.centroid), ST_X(m.centroid), %s, %s, %s, %s"
+        extra = (DEFAULT_CATCHMENT,)
+    else:
+        arguments = "ST_Y(m.centroid), ST_X(m.centroid), %s, %s, %s"
+
     out: list[dict[str, Any]] = []
     after = 0
     while True:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT m.id AS mesh_id, m.mesh_code,
                        ST_Y(m.centroid) AS lat, ST_X(m.centroid) AS lng,
                        a.*
@@ -437,13 +496,11 @@ def mesh_catchments(conn: psycopg.Connection, radius_m: int, *,
                     ORDER BY id
                     LIMIT %s
                 ) m
-                CROSS JOIN LATERAL kg_analyze_point(
-                    ST_Y(m.centroid), ST_X(m.centroid), %s, %s, %s
-                ) AS a
+                CROSS JOIN LATERAL kg_analyze_point({arguments}) AS a
                 ORDER BY m.id
                 """,
                 (mesh_size_m, prefecture_code, after, batch_size,
-                 radius_m, facility_category, mesh_size_m),
+                 radius_m, facility_category, mesh_size_m) + extra,
             )
             rows = cur.fetchall()
         if not rows:

@@ -82,6 +82,8 @@ export interface CandidateAnalysis {
   land_price_basis?: string | null;
   /** 全プロファイルの総合スコア。地価を勘案すると順位が変わることを見せるため。 */
   scores_by_profile?: ProfileScore[];
+  /** 標榜科目別の競合と診療時間。診療科目データが無い環境では undefined。 */
+  specialties?: SpecialtyBreakdown | null;
   catchment_area_km2: number | null;
   /** 実際に使われた商圏ポリゴン。地図はこれを描く（自前で円を描かない）。 */
   catchment: { geometry: GeoJSON.Geometry; kind: "circle" | "walk" } | null;
@@ -313,4 +315,54 @@ export interface ProfileScore {
   overall: number | null;
   cost: number | null;
   uses_cost: boolean;
+  /** 競合をどの標榜科目で数えたか。null なら歯科医院すべて。 */
+  competition_specialty?: string | null;
+  competition_specialty_label?: string | null;
+}
+
+/** 標榜科目1件分の内訳。 */
+export interface SpecialtyCount {
+  key: string;
+  label: string;
+  count: number;
+  /**
+   * 自由記載欄からしか取れない科目（インプラント・審美・訪問診療など）。
+   * 記載した医院しか数えられないので、件数は実施医院数の下限にすぎない。
+   * この印が付いた行は「競合が少ない」の根拠に使ってはいけない。
+   */
+  declared_only: boolean;
+}
+
+/** 商圏内の医院を標榜科目と診療時間で分けたもの。 */
+export interface SpecialtyBreakdown {
+  total_clinics: number;
+  /** 診療科目が分かっている医院の数。科目別件数の分母はこれ。 */
+  with_data: number;
+  coverage: number | null;
+  breakdown: SpecialtyCount[];
+  hours: {
+    declared: number | null;
+    counts: { key: string; label: string; count: number | null }[];
+    weekly_hours_median: number | null;
+  };
+  note: string;
+}
+
+export interface SpecialtyOption {
+  key: string;
+  label: string;
+  clinics: number;
+  share: number | null;
+  declared_only: boolean;
+  /** 歯科の科目か。併設の内科などは false で、絞り込みには出さない。 */
+  dental: boolean;
+}
+
+export interface SpecialtyList {
+  available: boolean;
+  clinics?: number;
+  clinics_with_data?: number;
+  coverage?: number | null;
+  specialties: SpecialtyOption[];
+  note?: string;
 }

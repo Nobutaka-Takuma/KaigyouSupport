@@ -45,7 +45,10 @@ def clinics(
     conn: psycopg.Connection = Depends(get_conn),
     bbox: str | None = Query(None, description="min_lng,min_lat,max_lng,max_lat"),
     category: str = Query("dental_clinic"),
-    clinic_type: str | None = Query(None, description="標榜診療科で絞り込み"),
+    clinic_type: str | None = Query(None, description="公表名称そのままの標榜診療科で絞り込み"),
+    specialty: str | None = Query(
+        None, description="正規化した標榜科目キーで絞り込み（general / pediatric / "
+                          "orthodontics / oral_surgery / pediatric_orthodontics ほか）"),
     fields: str = Query("points", pattern="^(points|minimal|full)$"),
     limit: int = Query(5000, ge=1, le=20000),
 ) -> dict[str, Any]:
@@ -53,28 +56,42 @@ def clinics(
     # are a megabyte that nothing on screen draws -- the dots need a position.
     # The popup fetches the one record it is about.
     select = {
-        "points": "id",
-        "minimal": "id, name, address",
-        "full": ("id, facility_id, name, address, facility_category, clinic_types, "
-                 "opening_date, founder_type, attributes, source_id, source_date"),
+        "points": "f.id",
+        "minimal": "f.id, f.name, f.address",
+        "full": ("f.id, f.facility_id, f.name, f.address, f.facility_category, "
+                 "f.clinic_types, f.opening_date, f.founder_type, f.attributes, "
+                 "f.source_id, f.source_date"),
     }[fields]
 
-    where = ["facility_category = %s"]
+    # 標榜科目は別テーブルなので、絞り込むときだけ結合します。全件を描くときに
+    # 毎回結合すると、市街地ズームの数千件に無駄が乗ります。
+    has_specialties = table_exists(conn, "facility_features")
+    join = ""
+    if specialty and has_specialties:
+        join = "JOIN facility_features ff ON ff.facility_id = f.facility_id"
+        if fields == "full":
+            select += ", ff.specialty_keys, ff.opens_saturday, ff.opens_sunday, ff.opens_evening"
+
+    where = ["f.facility_category = %s"]
     params: list[Any] = [category]
     box = parse_bbox(bbox)
     if box:
-        where.append(f"geom && {_BBOX_SQL}")
+        where.append(f"f.geom && {_BBOX_SQL}")
         params.extend(box)
     if clinic_type:
-        where.append("%s = ANY(clinic_types)")
+        where.append("%s = ANY(f.clinic_types)")
         params.append(clinic_type)
+    if specialty and has_specialties:
+        where.append("%s = ANY(ff.specialty_keys)")
+        params.append(specialty)
     params.append(limit)
 
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT {select}, ST_AsGeoJSON(geom, {COORD_DIGITS}) AS geojson
-            FROM facilities
+            SELECT {select}, ST_AsGeoJSON(f.geom, {COORD_DIGITS}) AS geojson
+            FROM facilities f
+            {join}
             WHERE {' AND '.join(where)}
             LIMIT %s
             """,
@@ -82,11 +99,20 @@ def clinics(
         )
         rows = cur.fetchall()
 
-    return feature_collection(
+    result = feature_collection(
         _features(rows),
         provenance=provenance.for_tables(conn, ["facilities"]),
         truncated=len(rows) >= limit,
     )
+    # 絞り込みを頼まれたのに絞り込めなかったことは、黙って全件を返すより
+    # 言ったほうがいい。地図には「小児歯科だけ」と書いてあるので。
+    if specialty and not has_specialties:
+        result["specialty_filter_applied"] = False
+        result["note"] = ("診療科目データ（医療情報ネット 032）が未取得のため、"
+                          "標榜科目での絞り込みはできません。全件を表示しています。")
+    elif specialty:
+        result["specialty_filter_applied"] = True
+    return result
 
 
 @router.get("/clinics/{facility_id}", summary="歯科医院1件の詳細")
@@ -102,9 +128,13 @@ def clinic_detail(
             """
             SELECT f.id, f.facility_id, f.name, f.address, f.facility_category,
                    f.clinic_types, f.opening_date, f.founder_type, f.attributes,
-                   f.source_date, ds.name AS source_name
+                   f.source_date, ds.name AS source_name,
+                   ff.specialty_keys, ff.declared_specialties, ff.weekly_open_hours,
+                   ff.open_days, ff.latest_close, ff.opens_saturday, ff.opens_sunday,
+                   ff.opens_holiday, ff.opens_evening
             FROM facilities f
             JOIN data_sources ds ON ds.id = f.source_id
+            LEFT JOIN facility_features ff ON ff.facility_id = f.facility_id
             WHERE f.id = %s
             """,
             (facility_id,),

@@ -38,6 +38,72 @@ DISTRIBUTION_METRICS = (
 )
 
 
+#: 科目で絞った指標の名前の区切り。``population_per_facility@pediatric`` の @。
+#: 分布は指標ごとに 1 本なので、科目で絞った比率は別の指標として持たないと、
+#: 全科目の分布で小児歯科の比率を評価することになります（競合が少ないぶん
+#: 比率は大きく出るので、どこもかしこも高得点になります）。
+SPECIALTY_SEP = "@"
+
+
+def specialty_count_metric(specialty: str) -> str:
+    """その科目を標榜する商圏内の医院数の指標名。"""
+    return f"facility_count{SPECIALTY_SEP}{specialty}"
+
+
+def specialty_ratio_metric(population_metric: str, specialty: str) -> str:
+    """その科目 1 件あたりの人口の指標名。"""
+    return f"{population_metric}_per_facility{SPECIALTY_SEP}{specialty}"
+
+
+def competition_specialties(config: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """設定に現れる (人口指標, 科目) の組。プロファイル横断で重複を除く。
+
+    分布の集計と得点付けの両方がこの一覧を必要とします。片方だけが知っている
+    状態だと、プロファイルを足したときに「分布が無いので未算出」になります。
+    """
+    seen: list[tuple[str, str]] = []
+    for profile in (config.get("profiles") or {}).values():
+        cfg = (profile or {}).get("competition") or {}
+        specialty = cfg.get("specialty")
+        if not specialty:
+            continue
+        pair = (str(cfg.get("population_metric", "population")), str(specialty))
+        if pair not in seen:
+            seen.append(pair)
+    return seen
+
+
+def derived_metrics(config: Mapping[str, Any]) -> list[str]:
+    """DISTRIBUTION_METRICS に足して集計すべき、科目で絞った指標名。"""
+    return [specialty_ratio_metric(pop, spec)
+            for pop, spec in competition_specialties(config)]
+
+
+def augment_specialty_metrics(row: dict[str, Any],
+                              pairs: Iterable[tuple[str, str]]) -> dict[str, Any]:
+    """商圏 1 件の集計に、科目で絞った件数と比率を書き足す。
+
+    ``facility_specialty_counts`` は kg_analyze_point が返す科目キーごとの件数。
+    そこに現れない科目は 0 件であって欠測ではありません（商圏内の医院を全部
+    見たうえで 1 件も標榜していなかった、という意味）。ただしそれが言えるのは
+    科目データを持つ医院についてだけなので、被覆率も一緒に置いておきます。
+    """
+    counts = row.get("facility_specialty_counts") or {}
+    total = row.get("facility_count")
+    known = row.get("facilities_with_specialty_data")
+    row["specialty_data_coverage"] = (
+        None if not total else (known or 0) / total
+    )
+    for population_metric, specialty in pairs:
+        count = int(counts.get(specialty, 0) or 0)
+        row[specialty_count_metric(specialty)] = count
+        population = row.get(population_metric)
+        row[specialty_ratio_metric(population_metric, specialty)] = (
+            None if not count or population is None else float(population) / count
+        )
+    return row
+
+
 @dataclass(frozen=True)
 class Distribution:
     """Observed spread of one metric, used to place a value on a 0-100 scale."""
@@ -207,10 +273,39 @@ class ScoringModel:
 
     def competition(self, m: Mapping[str, Any],
                     distributions: Mapping[str, Distribution]) -> ComponentScore:
+        """商圏の競合。科目を指定したプロファイルではその科目だけを数える。
+
+        小児歯科をやろうとしている人にとって、小児歯科を標榜していない医院は
+        同じ重さの競合ではありません。``competition.specialty`` を置くと、
+        件数も分母の人口も（``population_metric``）その科目のものに切り替わり、
+        正規化に使う分布もその科目専用のものになります。
+
+        切り替えたときだけ効く安全弁が 1 つあります。商圏内の医院のうち
+        診療科目データを持つ割合が ``min_specialty_coverage`` を下回るときは
+        算出しません。科目ファイルに載っていない医院は「標榜していない」のでは
+        なく「分からない」ので、そのまま数えると競合が少ない土地に見えます。
+        """
         cfg = self.profile.get("competition", {})
-        metric = cfg.get("metric", "population_per_facility")
-        population = m.get("population")
-        count = m.get("facility_count")
+        specialty = cfg.get("specialty")
+        population_metric = cfg.get("population_metric", "population")
+        population = m.get(population_metric)
+
+        if specialty:
+            metric = specialty_ratio_metric(population_metric, specialty)
+            count = m.get(specialty_count_metric(specialty))
+            coverage = m.get("specialty_data_coverage")
+            minimum = float(cfg.get("min_specialty_coverage", 0.8))
+            if count is None:
+                return ComponentScore(None, {metric: None}, [metric],
+                                      "診療科目データが読み込まれていないため未算出")
+            if coverage is not None and coverage < minimum:
+                return ComponentScore(
+                    None, {metric: None}, [metric],
+                    f"商圏内の歯科医院のうち診療科目が分かるのは"
+                    f"{coverage * 100:.0f}%（{minimum * 100:.0f}%以上で算出）")
+        else:
+            metric = cfg.get("metric", "population_per_facility")
+            count = m.get("facility_count")
 
         if count == 0:
             if not population:
@@ -222,7 +317,9 @@ class ScoringModel:
             return ComponentScore(
                 float(cfg.get("zero_facility_score", 95)),
                 {metric: None}, [],
-                "商圏内に歯科医院が0件のため、ゼロ除算を避けて上限付近の固定値を適用",
+                ("商圏内に該当する標榜科目の歯科医院が0件のため、"
+                 "ゼロ除算を避けて上限付近の固定値を適用" if specialty else
+                 "商圏内に歯科医院が0件のため、ゼロ除算を避けて上限付近の固定値を適用"),
             )
 
         value = m.get(metric)

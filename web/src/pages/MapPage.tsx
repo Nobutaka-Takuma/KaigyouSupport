@@ -15,11 +15,12 @@ import { circlePolygon, EMPTY_FC } from "../lib/geo";
 import { MAX_CANDIDATES, useCandidates } from "../lib/candidates";
 import { lastCenter, usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
-import type { CandidateAnalysis, Meta } from "../lib/types";
+import type { CandidateAnalysis, Meta, SpecialtyOption } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
 import { DatasetExport } from "../components/DatasetExport";
+import { SpecialtyPanel, SpecialtyProfiles } from "../components/SpecialtyPanel";
 
 //: Last resort only -- used on a first ever visit, before the API has said
 //: which prefectures are loaded and before there is a remembered centre.
@@ -59,6 +60,15 @@ export function MapPage() {
   const [showExport, setShowExport] = useState(false);
   const { list: prefectures, code: prefecture, current: prefectureInfo,
           select: selectPrefecture } = usePrefecture();
+  /**
+   * 地図に出す歯科医院を標榜科目で絞る。空文字は「すべて」。
+   *
+   * 選べる科目は固定値ではなく API に聞く。診療科目ファイルを入れていない
+   * 環境ではこの絞り込み自体を出さない（絞り込めないのに絞り込めるように
+   * 見えるのがいちばん悪い）。
+   */
+  const [specialty, setSpecialty] = useState("");
+  const [specialtyOptions, setSpecialtyOptions] = useState<SpecialtyOption[]>([]);
   const [layers, setLayers] = useState<LayerState>({
     // Off by default: it is reference information, and on over a whole city it
     // competes with the clinics the screen is actually about.
@@ -240,11 +250,33 @@ export function MapPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .specialties({ prefecture_code: prefecture ?? undefined })
+      .then((res) => {
+        if (cancelled) return;
+        // 自由記載の科目は絞り込みに出さない。記載した医院しか出てこないので、
+        // 「インプラント」で絞ると地図がほぼ空になり、それを見た人は
+        // 「この辺にインプラントの医院は無い」と読んでしまう。
+        setSpecialtyOptions(
+          res.available
+            ? res.specialties.filter((s) => s.dental && !s.declared_only && s.clinics > 0)
+            : [],
+        );
+      })
+      .catch(() => !cancelled && setSpecialtyOptions([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [prefecture]);
+
   // ------------------------------------------------------------- load layers
   // Every layer follows the viewport. Loading all of Tokyo is
   // 13MB, which is fine on a desktop and unusable on a phone; a city-level
   // viewport is well under one.
   const showLandPrices = layers.landPrices;
+  const clinicSpecialty = specialty;
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map) return;
@@ -266,7 +298,8 @@ export function MapPage() {
           ? api.meshes({ bbox, profile: profile || undefined, limit: 4000 })
           : Promise.resolve(EMPTY_RESPONSE),
         zoom >= MIN_ZOOM.clinics
-          ? api.clinics({ bbox, fields: "points", limit: 5000 })
+          ? api.clinics({ bbox, fields: "points", limit: 5000,
+                          specialty: clinicSpecialty || undefined })
           : Promise.resolve(EMPTY_RESPONSE),
         zoom >= MIN_ZOOM.stations
           ? api.stations({ bbox, limit: 2000 })
@@ -298,7 +331,7 @@ export function MapPage() {
         setLayerError(e instanceof Error ? e.message : String(e));
       }
     }
-  }, [profile, prefecture, showLandPrices]);
+  }, [profile, prefecture, showLandPrices, clinicSpecialty]);
 
   useEffect(() => {
     if (!ready || !mapRef.current) return;
@@ -547,6 +580,20 @@ export function MapPage() {
           </select>
         </label>
 
+        {specialtyOptions.length > 0 && (
+          <label className="toolbar__foldable">
+            歯科医院の絞り込み
+            <select value={specialty} onChange={(e) => setSpecialty(e.target.value)}>
+              <option value="">すべての歯科医院</option>
+              {specialtyOptions.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.label}（{s.clinics.toLocaleString("ja-JP")}件）
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
         <label className="toolbar__foldable">
           メッシュ表示
           <select value={meshMetric} onChange={(e) => setMeshMetric(e.target.value as MeshMetric)}>
@@ -720,6 +767,10 @@ export function MapPage() {
               <h3>人口・競合</h3>
               <CatchmentNote analysis={analysis} />
               <PopulationTable analysis={analysis} />
+
+              <SpecialtyPanel analysis={analysis} />
+
+              <SpecialtyProfiles analysis={analysis} />
 
               <ProfileComparison analysis={analysis} />
 

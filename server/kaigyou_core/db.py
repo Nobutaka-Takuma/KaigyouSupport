@@ -168,6 +168,23 @@ def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
         conn.close()
 
 
+def column_exists(conn: psycopg.Connection, table: str, column: str) -> bool:
+    """Whether a column has been added yet.
+
+    Same deploy window as :func:`table_exists`, one level finer: a release that
+    adds a column to an existing table reaches the running code before the
+    migration reaches the database, and a SELECT naming the missing column
+    fails the whole request rather than the one figure it feeds.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) AS n FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+            """, (table, column))
+        return cur.fetchone()["n"] > 0
+
+
 def table_exists(conn: psycopg.Connection, table: str) -> bool:
     """Whether a table has been created yet.
 

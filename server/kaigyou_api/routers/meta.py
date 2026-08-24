@@ -8,7 +8,9 @@ from fastapi import APIRouter, Depends
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn
 from kaigyou_core import config as cfg
+from kaigyou_core import specialties as vocab
 from kaigyou_core.analysis import default_prefecture, loaded_prefectures
+from kaigyou_core.db import table_exists
 from kaigyou_core.scoring import ScoringModel
 from kaigyou_core.status import data_status
 
@@ -93,4 +95,72 @@ def prefectures(conn: psycopg.Connection = Depends(get_conn)) -> dict[str, Any]:
         "default": default_prefecture(conn),
         "note": ("スコアは都道府県ごとに正規化しています。"
                  "異なる都道府県のスコアを直接比べることはできません。"),
+    }
+
+
+@router.get("/specialties", summary="標榜診療科目（読み込み済みのもの）")
+def specialties(
+    prefecture_code: str | None = None,
+    category: str = "dental_clinic",
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """絞り込みに使える標榜科目と、それぞれの医院数。
+
+    一覧を固定値で返さないのは、どの科目が選べるかは告示ではなく「いま
+    読み込まれているデータ」が決めるからです。診療科目ファイルを入れていない
+    環境では ``available: false`` を返し、UI は絞り込みを出しません。
+    """
+    if not table_exists(conn, "facility_features"):
+        return {"available": False, "specialties": [],
+                "note": "診療科目データ（医療情報ネット 032）が未取得です。"}
+
+    where = ["f.facility_category = %s"]
+    params: list[Any] = [category]
+    if prefecture_code:
+        where.append("f.prefecture_code = %s")
+        params.append(prefecture_code)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT count(*)::int AS clinics,
+                   count(ff.facility_id)::int AS with_data
+            FROM facilities f
+            LEFT JOIN facility_features ff ON ff.facility_id = f.facility_id
+            WHERE {' AND '.join(where)}
+            """, params)
+        totals = cur.fetchone()
+
+        cur.execute(
+            f"""
+            SELECT k AS key, count(*)::int AS clinics
+            FROM facilities f
+            JOIN facility_features ff ON ff.facility_id = f.facility_id,
+                 unnest(ff.specialty_keys) AS k
+            WHERE {' AND '.join(where)}
+            GROUP BY k
+            """, params)
+        rows = cur.fetchall()
+
+    listed = [
+        {"key": r["key"], "label": vocab.label(r["key"]), "clinics": r["clinics"],
+         "declared_only": vocab.is_free_text(r["key"]),
+         # 歯科以外の標榜科（併設の内科など）。歯科の競合の軸ではないので、
+         # 絞り込みの選択肢には出しません。
+         "dental": r["key"] != vocab.non_dental_key(),
+         "share": (None if not totals["with_data"]
+                   else round(r["clinics"] / totals["with_data"], 3))}
+        for r in rows
+    ]
+    listed.sort(key=lambda row: vocab.sort_key(row["key"]))
+    return {
+        "available": True,
+        "prefecture_code": prefecture_code,
+        "clinics": totals["clinics"],
+        "clinics_with_data": totals["with_data"],
+        "coverage": (None if not totals["clinics"]
+                     else round(totals["with_data"] / totals["clinics"], 3)),
+        "specialties": listed,
+        "note": ("declared_only の科目は「その他」欄への自由記載から抽出したものです。"
+                 "記載した医院しか数えられないため、件数は実施医院数の下限です。"),
     }

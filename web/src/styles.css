@@ -558,3 +558,26 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 0.85rem;
   color: var(--muted);
 }
+
+/* --- 標榜科目 ------------------------------------------------------------
+   自由記載の診療内容は表ではなく小さな札で出す。件数がそのまま競合数として
+   読めてしまうと困るので、表の行と同じ見た目にはしない。 */
+.panel h4.small { margin: 14px 0 4px; font-size: 13px; color: var(--muted); }
+
+.chips {
+  list-style: none;
+  margin: 4px 0 10px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chips li {
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-muted, #f9fafb);
+}

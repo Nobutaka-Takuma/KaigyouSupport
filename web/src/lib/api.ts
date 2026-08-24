@@ -14,6 +14,7 @@ import type {
   Meta,
   PrefectureList,
   RankingResponse,
+  SpecialtyList,
 } from "./types";
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
@@ -57,9 +58,15 @@ export const api = {
   prefectures: () => get<PrefectureList>("/prefectures"),
   dataStatus: () => get<DataStatus>("/data-status"),
 
+  /** 絞り込みに使える標榜科目。読み込み済みのデータが決めるので API に聞く。 */
+  specialties: (params: { prefecture_code?: string } = {}) =>
+    get<SpecialtyList>("/specialties", params),
+
   clinics: (params: {
     bbox?: string;
     clinic_type?: string;
+    /** 正規化した標榜科目キー（pediatric / orthodontics ...）で絞り込む。 */
+    specialty?: string;
     fields?: "points" | "minimal" | "full";
     limit?: number;
   }) => get<GeoJSONResponse>("/clinics", params),
