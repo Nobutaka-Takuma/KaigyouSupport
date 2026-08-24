@@ -89,3 +89,15 @@ def scoring_config() -> dict[str, Any]:
 
 def sources_config() -> dict[str, Any]:
     return load_yaml(config_dir() / "sources.yaml")
+
+
+def insights_config() -> dict[str, Any]:
+    """複合指標の定義。無くてもデータセットは組み立てられる。
+
+    この 1 つだけ欠けても分析は成立するので、見つからないときは空で返します。
+    設定ファイルの不在でデータセット全体が 500 になるのは割に合いません。
+    """
+    try:
+        return load_yaml(config_dir() / "insights.yaml")
+    except ConfigNotFound:
+        return {}

@@ -63,13 +63,34 @@ def test_the_requested_radius_is_among_the_radii_reported(doc):
 
 
 # ------------------------------------------------------- self-describing
+#: measures のキーと、半径別の内訳での呼び名の対応。同じ量に 2 つ名前がある
+#: ところだけ。
+_SPEC_METRIC = {
+    "child_population": "age_0_14",
+    "working_age_population": "age_15_64",
+    "elderly_population": "age_65_plus",
+    "dental_clinics": "dental_clinics",
+    "population_per_clinic": "population_per_clinic",
+}
+
+
 def test_every_reported_figure_has_a_unit(doc):
     """The guard against adding a number and leaving the reader to guess.
 
     A figure whose unit has to be inferred will be inferred wrongly sooner or
     later -- 円/m² read as a rent, 従業者数 read as daytime population.
     """
+    # Schema 2.0: each measure carries its own unit, source and definition, so
+    # a figure is described either by `measures` or by the `definitions` table
+    # for the fields measures does not cover. Both count; being in neither does
+    # not.
     described = set(doc["definitions"])
+    for item in doc["measures"]["items"]:
+        assert item["unit"], f"{item['key']} has no unit"
+        assert item["definition"], f"{item['key']} has no definition"
+        described.add(item["key"])
+        described.add(_SPEC_METRIC.get(item["key"], item["key"]))
+
     reported = set()
     for section in (doc["demand"]["residents"]["by_radius"],
                     doc["demand"]["daytime"]["by_radius"],
@@ -77,14 +98,19 @@ def test_every_reported_figure_has_a_unit(doc):
         for values in section.values():
             reported |= set(values)
     # mesh_count is bookkeeping rather than a figure about the place.
-    reported -= {"mesh_count"}
+    reported -= {"mesh_count", "specialty_counts", "clinics_with_specialty_data"}
     assert reported <= described, f"no definition for: {sorted(reported - described)}"
 
 
 def test_the_definitions_say_what_the_dangerous_ones_are_not(doc):
-    """Two figures are routinely read as something they are not."""
-    assert "昼間人口ではない" in doc["definitions"]["workers"]["description"]
-    assert "賃料ではない" in doc["definitions"]["land_price_yen_per_sqm"]["description"]
+    """Two figures are routinely read as something they are not.
+
+    Both now carry their warning on the measure itself, which is where a reader
+    working through `measures` will actually see it.
+    """
+    by_key = {m["key"]: m for m in doc["measures"]["items"]}
+    assert "昼間人口ではない" in by_key["workers"]["definition"]
+    assert "賃料でも" in by_key["land_price_yen_per_sqm"]["definition"]
 
 
 def test_the_caveats_travel_with_the_data(doc):
@@ -217,26 +243,28 @@ def test_the_point_is_placed_in_its_own_distribution(doc):
     population sits at the 30th percentile of Tokyo while its clinic count and
     its land price both sit at the 100th is the shape of the place, and no
     reader can derive it without the distribution in front of them.
+
+    Schema 2.0 moved this onto the measures themselves, so the placement
+    travels with the figure rather than in a separate table the reader has to
+    join by hand.
     """
-    rel = doc["relative_position"]
-    if rel is None:
-        pytest.skip("no scored meshes to compare against here")
-    pref = rel["prefecture"]
-    assert pref["compared_against_meshes"] > 100
-    for metric, value in pref.items():
-        if metric == "compared_against_meshes":
-            continue
-        assert 0 <= value <= 100, f"{metric} is not a percentile: {value}"
-    assert "%" in rel["definition"], "the reader has to know which way it runs"
+    placed = [m for m in doc["measures"]["items"] if m["value"] is not None]
+    if not placed:
+        pytest.skip("no scored meshes here")
+    for item in placed:
+        assert 0 <= item["percentile"] <= 100, f"{item['key']}: {item['percentile']}"
+        assert item["benchmark_value"] is not None, item["key"]
+        assert item["direction"] in ("high", "low", "typical", "unknown"), item["key"]
+    guide = doc["reading_guide"]["how_to_read_a_measure"]
+    assert "%" in guide["percentile"], "the reader has to know which way it runs"
 
 
 def test_the_comparison_names_the_radius_it_was_made_at(doc):
     """Meshes are scored at one radius; comparing a 2km catchment to them
     would be a different quantity under the same name."""
-    rel = doc["relative_position"]
-    if rel is None:
-        pytest.skip("no scored meshes here")
-    assert rel["radius_m"] > 0 and rel["profile"]
+    basis = doc["measures"]["measurement_basis"]
+    assert basis["radius_m"] > 0 and basis["profile"]
+    assert basis["compared_against"]
 
 
 def test_both_scopes_are_offered_where_boundaries_are_loaded(doc):
@@ -244,12 +272,17 @@ def test_both_scopes_are_offered_where_boundaries_are_loaded(doc):
 
     A mesh can be unremarkable for Tokyo and the densest in its own ward.
     """
-    rel = doc["relative_position"]
-    if rel is None or "municipality" not in rel:
+    scopes = {s["benchmark_type"]: s for s in doc["measures"]["benchmark_scopes"]}
+    if "municipality" not in scopes:
         pytest.skip("no municipality scope available here")
-    assert rel["municipality"]["compared_against_meshes"] >= 1
-    assert rel["municipality"]["compared_against_meshes"] <= \
-        rel["prefecture"]["compared_against_meshes"]
+    assert 1 <= scopes["municipality"]["sample_count"] <= scopes["prefecture"]["sample_count"]
+
+
+def test_a_comparison_never_claims_to_be_national(doc):
+    """全国のメッシュ統計は読み込んでいない。都のメッシュを全国と呼ばない。"""
+    types = {s["benchmark_type"] for s in doc["measures"]["benchmark_scopes"]}
+    assert "national" not in types
+    assert any("全国" in note for note in doc["data_quality"]["benchmark_notes"])
 
 
 def test_the_competitor_ladder_is_monotonic(doc):
@@ -296,6 +329,10 @@ def test_numbers_are_numbers(doc):
     A reader comparing "769" with 800 gets a lexicographic answer, silently.
     """
     def walk(node, path=""):
+        # The reading guide describes the fields; its values are sentences
+        # about numbers, not numbers.
+        if path.startswith(".reading_guide"):
+            return
         if isinstance(node, dict):
             for key, value in node.items():
                 walk(value, f"{path}.{key}")

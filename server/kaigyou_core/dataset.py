@@ -20,6 +20,16 @@ names it, so "no clinics nearby" cannot be read out of an unloaded table.
 **It carries its own caveats.** The disclaimers and the known weaknesses of
 each dataset travel with the data rather than living in a screen the reader
 never sees. Anything that reads this and produces prose will have them.
+
+**Every headline figure knows where it stands** (schema 2.0). A number on its
+own can only be restated: "0〜14歳が7,331人" rewrites to "there are 7,331
+children". The same number carrying its benchmark, percentile, rank and change
+-- 7,331, against a prefecture median of 3,137, top 6%, 327th of 5,448, +4.3%
+where the median moved +1.2% -- can be reasoned about. ``measures`` holds every
+figure in that form, and ``insight_metrics`` groups the ones that have to be
+read together, listing what could *not* be established in ``gaps``. That last
+part is the point: a reader that cannot tell "checked, none found" from "never
+looked" will confidently write the wrong sentence.
 """
 from __future__ import annotations
 
@@ -42,6 +52,12 @@ from kaigyou_core.analysis import (
     resolve_mesh_size,
 )
 from kaigyou_core.db import column_exists, table_exists
+from kaigyou_core.measures import (
+    READING_GUIDE,
+    build_insights,
+    build_measures,
+    scope_summary,
+)
 from kaigyou_core import specialties as vocab
 from kaigyou_core.scoring import (
     ScoringModel,
@@ -51,7 +67,7 @@ from kaigyou_core.scoring import (
 )
 
 #: Bumped when the shape changes in a way that would break a reader.
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 
 #: Rows returned for the list sections. Enough to characterise a trade area,
 #: bounded so that one request cannot return every clinic in Tokyo. The count
@@ -380,95 +396,10 @@ def _stations(conn: psycopg.Connection, lat: float, lng: float,
 
 
 
-#: Metrics whose position in the local distribution is worth knowing, mapped to
-#: the mesh_scores column that holds the same figure for every mesh.
-_RANKED_METRICS = {
-    "population": "population",
-    "age_0_14": "age_0_14",
-    "age_65_plus": "age_65_plus",
-    "households": "households",
-    "population_growth": "population_growth",
-    "dental_clinics": "facility_count",
-    "population_per_clinic": "population_per_facility",
-    "land_price_yen_per_sqm": "land_price_yen_per_sqm",
-    # そのプロファイルが競合として数えた標榜科目の件数。プロファイルを絞って
-    # いないときは mesh_scores 側が NULL なので、この行は自然に落ちます。
-    "specialty_clinics": "facility_specialty_count",
-}
-
 #: Which competitor to measure the distance to. The total inside a radius says
 #: how many; this says how close, which is a different fact and often the
 #: sharper one -- twenty clinics inside 158m is a description no total gives.
 _COMPETITOR_RANKS = (1, 3, 5, 10, 20)
-
-
-def _percentiles(conn: psycopg.Connection, metrics: dict[str, Any], *,
-                 profile: str, radius_m: int, prefecture_code: str,
-                 municipality_name: str | None) -> dict[str, Any] | None:
-    """Where this point sits in the distribution of every mesh around it.
-
-    The single most useful thing this dataset can add, and the one a reader
-    cannot work out for itself. That Ginza's land is expensive is common
-    knowledge; that its 1km resident population sits at the 30th percentile of
-    Tokyo while its clinic count and its land price both sit at the 100th is
-    not, and it is the whole shape of the place in three numbers.
-
-    Compared against mesh_scores, which holds the same figures for every
-    scored mesh, so the comparison is like with like -- same radius, same
-    catchment shape, same source. Percentile means "share of meshes at or
-    below this value", so 30 reads as "lower than 70% of Tokyo".
-    """
-    if not table_exists(conn, "mesh_scores"):
-        return None
-
-    columns = []
-    params: list[Any] = []
-    for name, column in _RANKED_METRICS.items():
-        value = metrics.get(name if name in metrics else _RANKED_METRICS[name])
-        if value is None:
-            continue
-        if not column_exists(conn, "mesh_scores", column):
-            continue
-        columns.append(f"count(*) FILTER (WHERE ms.{column} IS NOT NULL "
-                       f"AND ms.{column} <= %s) AS {name}_below")
-        columns.append(f"count(ms.{column}) AS {name}_total")
-        params.append(float(value))
-    if not columns:
-        return None
-
-    def scope(where: str, extra: list[Any]) -> dict[str, Any] | None:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT count(*)::int AS meshes, {', '.join(columns)}
-                FROM mesh_scores ms
-                JOIN population_mesh pm ON pm.id = ms.mesh_id
-                WHERE ms.profile = %s AND ms.radius_m = %s AND {where}
-                """,
-                params + [profile, radius_m] + extra)
-            row = cur.fetchone()
-        if not row or not row["meshes"]:
-            return None
-        out: dict[str, Any] = {"compared_against_meshes": row["meshes"]}
-        for name in _RANKED_METRICS:
-            total = row.get(f"{name}_total")
-            if not total:
-                continue
-            out[name] = round(100.0 * row[f"{name}_below"] / total)
-        return out
-
-    result: dict[str, Any] = {
-        "radius_m": radius_m,
-        "profile": profile,
-        "definition": ("その値以下のメッシュの割合（%）。30 なら「7割のメッシュより低い」。"
-                       "同一半径・同一データで算出したメッシュ分布との比較。"),
-        "prefecture": scope("pm.prefecture_code = %s", [prefecture_code]),
-    }
-    if municipality_name:
-        result["municipality"] = scope(
-            "pm.prefecture_code = %s AND ms.area_label = %s",
-            [prefecture_code, municipality_name])
-    return result
 
 
 def _competitor_distances(conn: psycopg.Connection, lat: float, lng: float,
@@ -703,6 +634,22 @@ def _hours_block(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _supplementary_definitions() -> dict[str, dict[str, str]]:
+    """measures が自分で説明しない欄だけの定義。
+
+    schema 2.0 から、各指標は自分の ``definition`` / ``unit`` / ``source`` /
+    ``data_year`` を持ちます。同じ説明をここにも置くと、片方だけ直したときに
+    2 つの説明が食い違い、どちらが正しいか読み手には分かりません。
+    """
+    from kaigyou_core.measures import MEASURE_SPECS
+
+    covered = {spec["metric"] for spec in MEASURE_SPECS.values()} | set(MEASURE_SPECS)
+    # 名前がずれているもの（データセット側の呼び名）も除きます。
+    covered |= {"age_0_14", "age_15_64", "age_65_plus", "population_growth",
+                "dental_clinics", "population_per_clinic"}
+    return {key: value for key, value in DEFINITIONS.items() if key not in covered}
+
+
 def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: int, *,
                   catchment: str = DEFAULT_CATCHMENT,
                   category: str = DEFAULT_CATEGORY,
@@ -796,6 +743,19 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     municipality = _municipality(conn, lat, lng)
     land = land_prices_near(conn, lat, lng, radius_m, limit=MAX_LAND_POINTS)
 
+    # 比較はメッシュ分布に対して行うので、分布が作られた半径で測ります。2km の
+    # 商圏を 1km で測ったメッシュと比べると、同じ名前の別の量を比べることに
+    # なります。どの半径で比べたかは measurement_basis に出します。
+    measures, benchmark_notes = build_measures(
+        conn, comparison_metrics,
+        profile=model.profile_name, radius_m=comparison_radius,
+        prefecture_code=prefecture_code,
+        prefecture_label=prefecture_name(conn, prefecture_code),
+        municipality=(municipality or {}).get("name"),
+        specialty=specialty,
+        specialty_label=vocab.label(specialty) if specialty else None)
+    insights = build_insights(measures, cfg.insights_config())
+
     tables = ["population_mesh", "mesh_business", "facilities", "stations",
               "municipalities", "land_prices"]
     provenance = prov.for_tables(conn, tables)
@@ -818,6 +778,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
 
     return {
         "schema_version": SCHEMA_VERSION,
+        # この文書の読み方と、この文書では答えられないこと。
+        "reading_guide": READING_GUIDE,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "query": {
             "lat": lat, "lng": lng, "radius_m": radius_m,
@@ -843,6 +805,25 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             **({"geometry": (catchment_geojson(conn, lat, lng, radius_m, catchment)
                              or {}).get("geometry")} if include_geometry else {}),
         },
+        # 各統計を、比較対象・percentile・順位・増減つきで 1 件ずつ。
+        # 読み手が最初に当たる場所。
+        "measures": {
+            "measurement_basis": {
+                "radius_m": comparison_radius,
+                "catchment": catchment,
+                "profile": model.profile_name,
+                "compared_against": "同一都道府県の採点済みメッシュ（同一半径・同一商圏形状）",
+                "note": ("比較対象のメッシュ分布は半径 "
+                         f"{comparison_radius}m で作られています。"
+                         f"要求された半径（{radius_m}m）と異なる場合、実数は要求半径、"
+                         "比較は上記半径のものです。"),
+            },
+            # 比較対象の説明はここに 1 回だけ。各 benchmark は type で参照します。
+            "benchmark_scopes": scope_summary(measures),
+            "items": [m.as_dict() for m in measures],
+        },
+        # 同時に見るべき指標の組。結論は含まず、揃わなかったものを gaps に出します。
+        "insight_metrics": insights,
         "demand": {
             # A total hides its own shape; this is how the residents are laid
             # out inside the catchment.
@@ -898,11 +879,6 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         # 用途地域・容積率・建蔽率。The constraint the rest of the figures sit
         # inside, and the only section here that is about what may be built.
         "regulation": _zoning(conn, lat, lng, radius_m),
-        # Where this point sits among the meshes around it.
-        "relative_position": _percentiles(
-            conn, comparison_metrics, profile=model.profile_name,
-            radius_m=comparison_radius, prefecture_code=prefecture_code,
-            municipality_name=(municipality or {}).get("name")),
         "scores": {
             "normalization_scope": scope,
             "by_profile": scores,
@@ -912,9 +888,15 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         "data_quality": {
             "unavailable_datasets": unavailable,
             "notes": notes,
+            # 算出できなかった比較と、その理由。percentile が欠けている指標を
+            # 「平凡だった」と読まれないために、欠けた理由を必ず添えます。
+            "benchmark_notes": benchmark_notes,
             "caveats": _dataset_caveats(),
         },
-        "definitions": DEFINITIONS,
+        # measures に入らない欄（産業構成・標榜科目・診療時間など）の定義。
+        # measures 側の各指標は自分の definition と source を持っているので、
+        # 同じ説明を 2 か所に置きません。
+        "definitions": _supplementary_definitions(),
         "provenance": provenance,
         "disclaimer": disclaimer,
         "score_disclaimer": score_disclaimer,
