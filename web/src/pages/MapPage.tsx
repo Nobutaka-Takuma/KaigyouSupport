@@ -699,6 +699,16 @@ export function MapPage() {
                 </div>
               </div>
 
+              {showExport && (
+                <DatasetExport
+                  lat={analysis.location.lat}
+                  lng={analysis.location.lng}
+                  radius={radius}
+                  profile={profile}
+                  catchment={catchment}
+                />
+              )}
+
               {analysis.warnings.map((w) => (
                 <p key={w} className="warn-inline">
                   {w}
@@ -710,16 +720,6 @@ export function MapPage() {
               <h3>人口・競合</h3>
               <CatchmentNote analysis={analysis} />
               <PopulationTable analysis={analysis} />
-
-              {showExport && (
-                <DatasetExport
-                  lat={analysis.location.lat}
-                  lng={analysis.location.lng}
-                  radius={radius}
-                  profile={profile}
-                  catchment={catchment}
-                />
-              )}
 
               <ProfileComparison analysis={analysis} />
 

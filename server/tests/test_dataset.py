@@ -359,3 +359,20 @@ def test_the_clipboard_copy_is_compact_and_the_file_is_readable():
 def test_the_export_reports_its_size():
     """So the reader knows what they are about to paste."""
     assert "KB" in _EXPORT.read_text(encoding="utf-8")
+
+
+def test_the_export_panel_opens_where_the_button_is():
+    """A toggle 600px above the thing it toggles reads as a dead button.
+
+    The panel was rendering the whole time, below the scores, the population
+    table and the land prices -- off the bottom of the screen. Clicking did
+    nothing visible, which is the same as not working.
+    """
+    page = (Path(__file__).resolve().parents[2] / "web" / "src" / "pages" /
+            "MapPage.tsx").read_text(encoding="utf-8")
+    actions = page.index("panel__actions")
+    export = page.index("<DatasetExport")
+    scores = page.index("<ScorePanel")
+    assert actions < export < scores, (
+        "the export panel must render between the button and the scores, "
+        "not below the whole panel")
