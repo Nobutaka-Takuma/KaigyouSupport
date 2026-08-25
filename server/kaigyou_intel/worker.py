@@ -16,7 +16,7 @@ import psycopg
 
 from kaigyou_intel import client as llm
 from kaigyou_intel import jobs
-from kaigyou_intel.steps import step1_features, step2_research
+from kaigyou_intel.steps import step1_features, step2_research, step3_demand
 
 #: 実装済みのステップ。ここに無い番号に来たら止めます。「未実装なので飛ばす」
 #: をやると、材料が無いまま最終レポートが書かれます。
@@ -27,6 +27,7 @@ from kaigyou_intel.steps import step1_features, step2_research
 RUNNERS: dict[int, Callable[[Any], Any]] = {
     1: step1_features.run,
     2: step2_research.run,
+    3: step3_demand.run,
 }
 
 
@@ -92,7 +93,14 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
             raise StepNotImplemented(
                 "STEP1 の出力がありません。STEP2 は STEP1 の PATTERN を調べる段です。")
         return step2_research.build_input(step1_output, job["base_data"])
-    # pragma: no cover - STEP3 以降を足すときにここへ分岐を書きます
+    if number == 3:
+        step1_output = jobs.step_output(conn, job["id"], 1)
+        step2_output = jobs.step_output(conn, job["id"], 2)
+        if not step1_output or not step2_output:
+            raise StepNotImplemented(
+                "STEP1 と STEP2 の出力が揃っていません。STEP3 は両方を使う段です。")
+        return step3_demand.build_input(step1_output, step2_output, job["base_data"])
+    # pragma: no cover - STEP4 を足すときにここへ分岐を書きます
     raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
 
 

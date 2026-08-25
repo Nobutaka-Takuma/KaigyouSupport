@@ -419,13 +419,8 @@ def test_an_unimplemented_step_is_left_pending_not_marked_failed(conn, dataset):
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
-    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
-    jobs.finish_step(conn, job_id, 1, {"facts": []}, {})
+    unimplemented = _complete_the_implemented_steps(conn, job_id)
 
-    jobs.start_step(conn, job_id, 2, {}, {"prompt_version": "v", "model": "m"})
-    jobs.finish_step(conn, job_id, 2, {"external_facts": []}, {})
-
-    unimplemented = min(n for n in (3, 4) if n not in worker.RUNNERS)
     with pytest.raises(worker.StepNotImplemented):
         worker.run_step(conn, job_id, unimplemented)
 
@@ -987,10 +982,7 @@ def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset):
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
-    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
-    jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
-    jobs.start_step(conn, job_id, 2, {}, {"prompt_version": "v", "model": "m"})
-    jobs.finish_step(conn, job_id, 2, {"external_facts": []}, {})
+    _complete_the_implemented_steps(conn, job_id)
     assert jobs.claim_specific(conn, job_id) == job_id  # ここで running になる
 
     try:
@@ -1002,7 +994,7 @@ def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset):
 
         # 止まっていたステップを実装した体で、自動的に待ち行列へ戻ること。
         blocked_at = jobs.next_step(conn, job_id)
-        assert jobs.requeue_unblocked(conn, {1, 2}) == 0, "まだ実装していない"
+        assert jobs.requeue_unblocked(conn, set(worker.RUNNERS)) == 0, "まだ実装していない"
         assert jobs.requeue_unblocked(conn, {blocked_at}) >= 1
         assert jobs.get_job(conn, job_id)["status"] == "queued"
     finally:
@@ -1049,6 +1041,24 @@ def test_a_failed_job_is_not_picked_up_again_on_its_own(conn, dataset, monkeypat
 
 def _boom(_payload):
     raise RuntimeError("模擬的な失敗")
+
+
+def _complete_the_implemented_steps(conn, job_id: str) -> int:
+    """実装済みのステップを埋めて、最初の未実装ステップ番号を返す。
+
+    番号を直に書くと、STEP を実装するたびにテストが落ちます。落ちるのは
+    正しいのですが、理由が「未実装が未実装でなくなった」だけのときは、
+    ここが自動で追随したほうがいい。
+    """
+    from kaigyou_intel import jobs, worker
+
+    for number in sorted(worker.RUNNERS):
+        jobs.start_step(conn, job_id, number, {},
+                        {"prompt_version": "v", "model": "m"})
+        jobs.finish_step(conn, job_id, number, _step1_for_step2(), {})
+    unimplemented = jobs.next_step(conn, job_id)
+    assert unimplemented is not None, "全ステップ実装済みならこのテストは不要です"
+    return unimplemented
 
 
 def _drop_job(job_id: str) -> None:
@@ -1131,3 +1141,131 @@ def test_cache_tokens_are_recorded_and_priced(conn, dataset):
     # 入力 $2 + 読み出し $0.2 + 書き込み $2.5
     assert _step_cost(step) == pytest.approx(4.7)
     conn.rollback()
+
+
+# ------------------------------------------------------------------ STEP3
+def _step3_output(**overrides) -> "Step3Output":
+    from kaigyou_intel.schemas import (
+        DemandInsight, DemandMechanism, PatientSegment, Step3Output)
+
+    data = {
+        "demand_mechanisms": [DemandMechanism(
+            id="M001", title="昼間人口が常住人口を大きく上回る",
+            chain=["昼間従業者数が常住人口を大きく上回る",
+                   "就業者は平日日中をこの地区で過ごす",
+                   "受診も勤務地周辺で行われる",
+                   "平日日中の歯科受診需要が常住人口の規模を超えて発生する"],
+            evidence=["F001", "C002"], confidence="medium")],
+        "patient_segments": [PatientSegment(
+            id="S001", name="周辺勤務者", evidence=["F001"], mechanism_id="M001",
+            importance="high", confidence="medium", note=None)],
+        "insights": [DemandInsight(
+            id="I001", statement="常住人口の規模で需要を測ると過小評価になる",
+            evidence=["M001", "S001"])],
+        "not_supported": ["広域流入患者：来院範囲を示すデータが無い"],
+    }
+    data.update(overrides)
+    return Step3Output(**data)
+
+
+def test_a_segment_without_a_mechanism_is_rejected():
+    """要件 §14：患者属性を並べる作業ではありません。
+
+    どの筋道でも説明できない層は、観察ではなく思いつきです。
+    """
+    from kaigyou_intel.schemas import PatientSegment, verify_step3
+
+    output = _step3_output(patient_segments=[PatientSegment(
+        id="S001", name="高齢者", evidence=["F001"], mechanism_id="M404",
+        importance="high", confidence="low")])
+    problems = verify_step3(output, {"F001"}, {"C002"})
+    assert any("M404" in p.problem for p in problems)
+
+
+def test_step3_evidence_must_come_from_the_earlier_steps():
+    from kaigyou_intel.schemas import verify_step3
+
+    output = _step3_output()
+    problems = verify_step3(output, {"F001"}, set())
+    assert any("C002" in p.problem for p in problems)
+    assert verify_step3(output, {"F001"}, {"C002"}) == []
+
+
+def test_a_mechanism_must_be_a_chain_not_a_restatement():
+    """「駅前だから患者が来る」を書けなくする。
+
+    段を 3 つ以上必須にしているので、一足飛びの説明はスキーマで落ちます。
+    空文字で段を埋めるほうも塞ぎます。
+    """
+    from pydantic import ValidationError
+
+    from kaigyou_intel.schemas import DemandMechanism, verify_step3
+
+    with pytest.raises(ValidationError):
+        DemandMechanism(id="M001", title="駅前だから患者が来る",
+                        chain=["駅前である", "患者が来る"],
+                        evidence=["F001", "F002"], confidence="high")
+
+    hollow = _step3_output(demand_mechanisms=[DemandMechanism(
+        id="M001", title="t", chain=["駅前である", "  ", "患者が来る"],
+        evidence=["F001", "C002"], confidence="high")])
+    problems = verify_step3(hollow, {"F001"}, {"C002"})
+    assert any("空の段" in p.problem for p in problems)
+
+
+def test_step3_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
+    from kaigyou_intel.steps import step3_demand
+
+    captured: dict[str, object] = {}
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None):
+        captured.update(step_number=step_number, schema=schema, tools=tools,
+                        system=system)
+        return llm.Result(parsed=_step3_output(),
+                          usage=llm.Usage(input_tokens=9, output_tokens=9), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step3_demand.build_input(
+        {"facts": [{"id": "F001"}], "patterns": []},
+        {"external_facts": [{"id": "C002"}], "hypotheses": []},
+        dataset)
+    output, usage, sources = step3_demand.run(payload)
+
+    assert captured["tools"] is None, "STEP3 で外部検索をさせてはいけない（要件 §38）"
+    assert output["patient_segments"][0]["mechanism_id"] == "M001"
+    assert sources == []
+
+
+def test_step3_refuses_evidence_it_was_never_given(dataset, monkeypatch):
+    from kaigyou_intel.steps import step3_demand
+
+    monkeypatch.setattr(llm, "ask", lambda **kw: llm.Result(
+        parsed=_step3_output(), usage=llm.Usage(), model="m"))
+    payload = step3_demand.build_input(
+        {"facts": [{"id": "F001"}], "patterns": []},
+        {"external_facts": [], "hypotheses": []}, dataset)
+    with pytest.raises(step3_demand.StepFailed, match="C002"):
+        step3_demand.run(payload)
+
+
+def test_step3_input_needs_both_earlier_steps(conn, dataset):
+    """STEP2 の結論が無いまま需要分析をさせると、外部事実のない推論になります。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
+
+    job = jobs.get_job(conn, job_id, include_base_data=True)
+    with pytest.raises(worker.StepNotImplemented, match="STEP1 と STEP2"):
+        worker.build_input(conn, job, 3)
+    conn.rollback()
+
+
+def test_step3_is_not_asked_to_predict():
+    """禁止事項。売上・患者数・成功確率の予測はこのシステムの目的外です。"""
+    text = cfg.prompt_text("step3_demand.md")
+    assert "売上・患者数・成功確率の予測" in text
+    assert "UNSUPPORTED" in text, "反証された仮説を根拠に使わせない指示が要ります"

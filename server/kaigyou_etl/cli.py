@@ -376,6 +376,9 @@ def _print_step_output(number: int, output: dict) -> None:
     if number == 2:
         _print_step2(output)
         return
+    if number == 3:
+        _print_step3(output)
+        return
     if number != 1:
         import json as _j
         print("    " + _j.dumps(output, ensure_ascii=False)[:600])
@@ -440,6 +443,40 @@ def _print_step2(output: dict) -> None:
     if output.get("unanswered"):
         print("\n    調べたが確認できなかったこと")
         for entry in output["unanswered"]:
+            print(f"      - {entry}")
+
+
+def _print_step3(output: dict) -> None:
+    mechanisms = output.get("demand_mechanisms") or []
+    segments = output.get("patient_segments") or []
+
+    print(f"\n    需要形成メカニズム（{len(mechanisms)}件）")
+    for item in mechanisms:
+        print(f"      {item.get('id')} {item.get('title')}"
+              f"  confidence={item.get('confidence')}")
+        for i, step in enumerate(item.get("chain") or []):
+            print(f"            {'└→' if i else '  '} {step}")
+        print(f"            根拠: {' + '.join(item.get('evidence') or [])}")
+
+    print(f"\n    患者セグメント（{len(segments)}件）")
+    for item in segments:
+        print(f"      {item.get('id')} [{item.get('importance')}] {item.get('name')}"
+              f"  confidence={item.get('confidence')}")
+        print(f"            筋道: {item.get('mechanism_id')}"
+              f"  根拠: {' + '.join(item.get('evidence') or [])}")
+        if item.get("note"):
+            print(f"            補足: {item['note']}")
+
+    if output.get("insights"):
+        print("\n    横断して見えること")
+        for item in output["insights"]:
+            print(f"      {item.get('id')} {item.get('statement')}")
+            print(f"            根拠: {' + '.join(item.get('evidence') or [])}")
+
+    if output.get("not_supported"):
+        # 要件 §13。「書かれていない層」は「検討して該当なし」ではありません。
+        print("\n    根拠が無いため出さなかった患者層")
+        for entry in output["not_supported"]:
             print(f"      - {entry}")
 
 

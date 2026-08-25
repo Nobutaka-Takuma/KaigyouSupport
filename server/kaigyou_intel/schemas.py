@@ -215,3 +215,114 @@ def verify_step2(output: Step2Output, allowed_pattern_ids: set[str],
                     where=f"hypotheses[{hypothesis.id}].evidence",
                     problem=f"存在しない EXTERNAL FACT を参照しています: {ref!r}"))
     return problems
+
+
+# ------------------------------------------------------------------ STEP3
+class PatientSegment(BaseModel):
+    """この場所に存在すると推定される患者層 1 つ（要件 §13）。
+
+    ``evidence`` は STEP1 の FACT（F###）と STEP2 の EXTERNAL FACT（C###）の id。
+    根拠を挙げられないセグメントは出しません。要件 §13 の「データに根拠がない
+    セグメントを無理に生成しない」は、ここを空にできない形で守ります。
+    """
+
+    id: str = Field(description="S001 のような通し番号")
+    name: str = Field(description="患者層の名前。例：周辺勤務者、子育て世帯")
+    evidence: list[str] = Field(
+        description="根拠にした FACT / EXTERNAL FACT の id。1 つ以上", min_length=1)
+    mechanism_id: str = Field(
+        description="この患者層を説明する DEMAND MECHANISM の id")
+    importance: Importance
+    confidence: Confidence
+    note: str | None = Field(
+        default=None, description="限定条件があれば。無ければ空でよい")
+
+
+class DemandMechanism(BaseModel):
+    """需要が形成される筋道（要件 §14）。
+
+    ``chain`` は「地域構造 → 生活行動 → 需要形成 → 歯科需要」の各段を 1 要素
+    ずつ。3 段以上を必須にしているのは、「駅前だから患者が来る」のような
+    一足飛びの説明を書けなくするためです。属性の言い換えは筋道ではありません。
+    """
+
+    id: str = Field(description="M001 のような通し番号")
+    title: str = Field(description="この筋道を 1 文で")
+    chain: list[str] = Field(
+        description="地域構造 → 生活行動 → 需要形成 → 歯科需要。各段を1要素ずつ",
+        min_length=3)
+    evidence: list[str] = Field(
+        description="根拠にした FACT / EXTERNAL FACT の id。2 つ以上", min_length=2)
+    confidence: Confidence
+
+
+class DemandInsight(BaseModel):
+    """複数の筋道・患者層を横断して見えること。"""
+
+    id: str = Field(description="I001 のような通し番号")
+    statement: str
+    evidence: list[str] = Field(
+        description="根拠にした FACT / EXTERNAL FACT / SEGMENT / MECHANISM の id。2 つ以上",
+        min_length=2)
+
+
+class Step3Output(BaseModel):
+    """STEP3（需要形成・患者分析）の出力（要件 §15）。"""
+
+    patient_segments: list[PatientSegment] = Field(default_factory=list)
+    demand_mechanisms: list[DemandMechanism] = Field(default_factory=list)
+    insights: list[DemandInsight] = Field(default_factory=list)
+    #: 根拠が足りず出さなかった患者層。要件 §13 を「出さなかった」側から残します。
+    not_supported: list[str] = Field(
+        default_factory=list,
+        description="想定はできるが、データに根拠が無いので出さなかった患者層")
+
+
+def verify_step3(output: Step3Output, fact_ids: set[str],
+                 external_ids: set[str]) -> list[TraceProblem]:
+    """患者層と筋道が、実在の事実を指しているか（要件 §25）。
+
+    STEP3 は初めて手元のデータと外部事実の両方を持つ段です。参照先が 2 系統に
+    増えるので、どちらでもない id（作った id、前段に無い id）が混ざりやすい。
+    """
+    problems: list[TraceProblem] = []
+    known = fact_ids | external_ids
+
+    def check(where: str, refs: list[str], extra: set[str] = frozenset()) -> None:
+        for ref in refs:
+            if ref not in known and ref not in extra:
+                problems.append(TraceProblem(
+                    where=where,
+                    problem=f"存在しない根拠を参照しています: {ref!r}"))
+
+    mechanism_ids: set[str] = set()
+    for mechanism in output.demand_mechanisms:
+        if mechanism.id in mechanism_ids:
+            problems.append(TraceProblem(
+                where=f"demand_mechanisms[{mechanism.id}]",
+                problem="MECHANISM の id が重複しています"))
+        mechanism_ids.add(mechanism.id)
+        check(f"demand_mechanisms[{mechanism.id}].evidence", mechanism.evidence)
+        if any(not step.strip() for step in mechanism.chain):
+            problems.append(TraceProblem(
+                where=f"demand_mechanisms[{mechanism.id}].chain",
+                problem="空の段があります。筋道は各段を言葉で埋めてください"))
+
+    segment_ids: set[str] = set()
+    for segment in output.patient_segments:
+        if segment.id in segment_ids:
+            problems.append(TraceProblem(
+                where=f"patient_segments[{segment.id}]",
+                problem="SEGMENT の id が重複しています"))
+        segment_ids.add(segment.id)
+        check(f"patient_segments[{segment.id}].evidence", segment.evidence)
+        if segment.mechanism_id not in mechanism_ids:
+            problems.append(TraceProblem(
+                where=f"patient_segments[{segment.id}]",
+                problem=("需要形成メカニズムが解決しません: "
+                         f"{segment.mechanism_id!r}")))
+
+    for insight in output.insights:
+        check(f"insights[{insight.id}].evidence", insight.evidence,
+              segment_ids | mechanism_ids)
+    return problems
