@@ -581,3 +581,141 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   color: var(--muted);
   background: var(--surface-muted, #f9fafb);
 }
+
+/* ------------------------------------------- 商圏インテリジェンス（4段のLLM分析） */
+.analysis {
+  margin: 1.25rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 10px;
+  background: var(--panel-alt, #fafbfc);
+}
+.analysis__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.analysis__head h3 { margin: 0; font-size: 1rem; }
+.analysis__head button {
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid #2b6cb0;
+  background: #2b6cb0;
+  color: #fff;
+  cursor: pointer;
+}
+.analysis__head button:disabled { opacity: 0.6; cursor: default; }
+.analysis__lead { margin: 0.5rem 0 0; font-size: 0.82rem; color: #5a6472; }
+.analysis__token { display: block; margin-top: 0.7rem; font-size: 0.82rem; }
+.analysis__token input {
+  display: block;
+  width: 100%;
+  margin: 0.25rem 0;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 6px;
+}
+.analysis__token small { color: #6b7280; }
+.analysis__error { color: #b02a37; font-size: 0.85rem; }
+.analysis__warn {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.6rem;
+  border-left: 3px solid #d97706;
+  background: #fffbeb;
+  font-size: 0.82rem;
+}
+.analysis__status { margin: 0.75rem 0 0.4rem; font-size: 0.88rem; }
+.analysis__steps { list-style: none; margin: 0; padding: 0; }
+.analysis__step {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed var(--line, #e5e9ef);
+  font-size: 0.85rem;
+  flex-wrap: wrap;
+}
+.analysis__step-name { flex: 1 1 12rem; }
+.analysis__step-status { font-variant-numeric: tabular-nums; color: #6b7280; }
+.analysis__step--running .analysis__step-status { color: #2b6cb0; font-weight: 600; }
+.analysis__step--completed .analysis__step-status { color: #1a7f37; }
+.analysis__step--failed .analysis__step-status { color: #b02a37; }
+.analysis__step-error { flex: 1 1 100%; color: #b02a37; }
+.analysis__usage { margin: 0.5rem 0 0; font-size: 0.8rem; color: #6b7280; }
+
+/* -------------------------------------------------------------- レポート */
+.report { margin-top: 1rem; }
+.report__summary {
+  padding: 0.7rem 0.8rem;
+  border-left: 3px solid #2b6cb0;
+  background: #fff;
+  font-size: 0.9rem;
+  line-height: 1.65;
+}
+.report__tabs { display: flex; gap: 0.35rem; margin: 0.8rem 0 0.6rem; flex-wrap: wrap; }
+.report__tabs button {
+  padding: 0.32rem 0.7rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.report__tabs button.is-active { background: #2b6cb0; border-color: #2b6cb0; color: #fff; }
+.report__download { margin-left: auto; }
+.report__decision dl { margin: 0; }
+.report__decision dl > div {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: 0.6rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--line, #e5e9ef);
+}
+.report__decision dt { font-weight: 600; font-size: 0.84rem; }
+.report__decision dd { margin: 0; font-size: 0.86rem; line-height: 1.6; }
+.report__decision h4 { margin: 0.9rem 0 0.3rem; font-size: 0.88rem; }
+.report__decision ul { margin: 0; padding-left: 1.1rem; font-size: 0.86rem; line-height: 1.6; }
+.report__confidence { margin-top: 0.8rem; font-size: 0.82rem; color: #6b7280; }
+.report__body section { margin-bottom: 1rem; }
+.report__body h4 { margin: 0 0 0.35rem; font-size: 0.9rem; }
+.report__block { margin: 0 0 0.5rem; font-size: 0.86rem; line-height: 1.65; }
+.report__tag {
+  display: inline-block;
+  margin-right: 0.45rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: #eef2f7;
+  color: #43506b;
+  font-size: 0.72rem;
+  font-weight: 600;
+  vertical-align: 0.05rem;
+}
+.report__block--INSIGHT .report__tag,
+.report__block--IMPLICATION .report__tag { background: #e6f0fb; color: #1c4e80; }
+.report__block--ACTION .report__tag { background: #e7f5ec; color: #1a7f37; }
+.report__refs { margin-left: 0.4rem; }
+.report__refs code {
+  margin-right: 0.2rem;
+  padding: 0 0.25rem;
+  border-radius: 3px;
+  background: #f2f4f7;
+  color: #6b7280;
+  font-size: 0.72rem;
+}
+.report__sources ul { list-style: none; margin: 0; padding: 0; font-size: 0.84rem; }
+.report__sources li { padding: 0.3rem 0; border-bottom: 1px solid var(--line, #e5e9ef); }
+.report__source-type {
+  display: inline-block;
+  min-width: 5.5rem;
+  color: #6b7280;
+  font-size: 0.75rem;
+}
+.report__source-note { margin-top: 0.6rem; font-size: 0.8rem; color: #6b7280; }
+.report__disclaimer { margin-top: 1rem; font-size: 0.76rem; color: #6b7280; line-height: 1.6; }
+
+@media (max-width: 640px) {
+  .report__decision dl > div { grid-template-columns: 1fr; gap: 0.15rem; }
+  .analysis__head button { width: 100%; }
+}

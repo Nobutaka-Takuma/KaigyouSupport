@@ -1546,3 +1546,75 @@ def test_the_cost_line_does_not_look_like_it_lost_the_input(capsys, conn, datase
     printed = capsys.readouterr().out
     assert "入力 42,002 tok" in printed
     assert "キャッシュ書 42,000" in printed
+
+
+# ------------------------------------------------------------ API と UI
+def test_starting_an_analysis_is_refused_on_a_public_host_without_a_secret(monkeypatch):
+    """分析1件でLLMの課金が発生します。公開URLに認証なしで置けません。
+
+    警告を出して通すのでは、気づいたときには請求が来ています。
+    """
+    from fastapi import HTTPException
+
+    from kaigyou_api.routers.intel import _authorise
+
+    monkeypatch.delenv("KAIGYOU_ANALYSIS_TOKEN", raising=False)
+    monkeypatch.setenv("VERCEL", "1")
+    with pytest.raises(HTTPException) as caught:
+        _authorise(None)
+    assert caught.value.status_code == 503
+
+    monkeypatch.setenv("KAIGYOU_ANALYSIS_TOKEN", "s3cret")
+    with pytest.raises(HTTPException) as caught:
+        _authorise("wrong")
+    assert caught.value.status_code == 401
+    _authorise("s3cret")  # 一致すれば通る
+
+
+def test_the_local_machine_does_not_need_a_secret(monkeypatch):
+    """手元では設定なしで動かせること。開発のたびに秘密を作らせない。"""
+    from kaigyou_api.routers.intel import _authorise
+
+    for var in ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME", "K_SERVICE",
+                "KAIGYOU_ANALYSIS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    _authorise(None)
+
+
+def test_the_progress_endpoint_reports_what_it_cost(conn, dataset):
+    """要件 §34。画面に出す金額と端末に出す金額を同じ表から出します。"""
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v",
+                                              "model": "claude-sonnet-5"})
+        jobs.finish_step(conn, job_id, 1, {"facts": []}, {
+            "input_tokens": 2, "output_tokens": 1_000_000, "web_searches": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 1_000_000})
+
+        body = TestClient(app).get(f"/api/analysis/{job_id}").json()
+        # キャッシュに入ったぶんを引いたまま出すと「入力 2」になります。
+        assert body["usage"]["input_tokens"] == 1_000_002
+        assert body["usage"]["cache_write_tokens"] == 1_000_000
+        # 入力 $2.5（書き込み1.25倍）+ 出力 $10
+        assert body["usage"]["estimated_cost_usd"] == pytest.approx(12.5, abs=0.01)
+        assert body["status_note"], "待っている人に、何を待っているのかを言う"
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_cost_estimate_is_not_understated_when_a_model_is_unknown():
+    """一部だけの合計を総額として見せない。実際より安いと思われます。"""
+    from kaigyou_intel.pricing import total_cost
+
+    assert total_cost([]) == 0.0
+    assert total_cost([{"model": "claude-sonnet-5", "input_tokens": 1_000_000}]) == 2.0
+    assert total_cost([
+        {"model": "claude-sonnet-5", "input_tokens": 1_000_000},
+        {"model": "未知のモデル", "input_tokens": 1_000_000},
+    ]) is None

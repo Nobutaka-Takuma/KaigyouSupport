@@ -346,29 +346,14 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-#: 1M トークンあたりの単価（入力, 出力）。実測の使用量から概算を出すためだけに
-#: 使います。請求の正解はコンソール側です。
-_PRICES = {
-    "claude-sonnet-5": (2.0, 10.0),
-    "claude-opus-5": (5.0, 25.0),
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-haiku-4-5": (1.0, 5.0),
-    "claude-fable-5": (10.0, 50.0),
-}
-
-
-#: キャッシュの単価は入力に対する倍率。読み出しは安く、書き込みは少し高い。
-_CACHE_READ_RATE, _CACHE_WRITE_RATE = 0.1, 1.25
-
-
 def _step_cost(step: dict) -> float | None:
-    price = _PRICES.get(step.get("model") or "")
-    if not price:
-        return None
-    return ((step.get("input_tokens") or 0) / 1e6 * price[0]
-            + (step.get("cache_read_tokens") or 0) / 1e6 * price[0] * _CACHE_READ_RATE
-            + (step.get("cache_write_tokens") or 0) / 1e6 * price[0] * _CACHE_WRITE_RATE
-            + (step.get("output_tokens") or 0) / 1e6 * price[1])
+    """単価表は kaigyou_intel.pricing に 1 つだけ置いています。
+
+    CLI と API で別々に持つと、端末と画面で違う金額が出ます。
+    """
+    from kaigyou_intel.pricing import step_cost
+
+    return step_cost(step)
 
 
 def _print_step_cost_line(step: dict) -> None:

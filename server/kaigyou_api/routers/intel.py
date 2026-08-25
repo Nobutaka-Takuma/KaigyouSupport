@@ -27,6 +27,7 @@ from kaigyou_core.db import table_exists
 from kaigyou_core.scoring import ScoringModel
 from kaigyou_intel import client as llm
 from kaigyou_intel import jobs
+from kaigyou_intel.pricing import total_cost
 from kaigyou_intel.projection import base_data_hash, to_jsonable
 
 router = APIRouter()
@@ -141,13 +142,34 @@ def get_analysis(job_id: str,
         "report_available": report is not None,
         "trace_ok": report["trace_ok"] if report else None,
         # 要件 §34。1レポートいくらだったのかを、後から数えられるように。
+        # キャッシュに入ったぶんは input_tokens から抜けるので、足して出します。
+        # 引かずに出すと「入力 2 トークン」になり、数え損ねたように見えます。
         "usage": {
-            "input_tokens": sum(s["input_tokens"] or 0 for s in steps),
+            "input_tokens": sum((s["input_tokens"] or 0)
+                                + (s["cache_read_tokens"] or 0)
+                                + (s["cache_write_tokens"] or 0) for s in steps),
+            "cache_read_tokens": sum(s["cache_read_tokens"] or 0 for s in steps),
+            "cache_write_tokens": sum(s["cache_write_tokens"] or 0 for s in steps),
             "output_tokens": sum(s["output_tokens"] or 0 for s in steps),
             "web_searches": sum(s["web_searches"] or 0 for s in steps),
+            "estimated_cost_usd": total_cost(steps),
         },
         "llm_configured": llm.is_configured(),
+        # worker が動いていないと queued のまま止まります。画面で待つ人に、
+        # 何を待っているのかが分かるように、状態の意味を添えます。
+        "status_note": _STATUS_NOTE.get(job["status"]),
     }
+
+
+#: 状態の意味。UI で出すためのもので、判定には使いません。
+_STATUS_NOTE = {
+    "queued": "worker の順番待ちです。worker が動いていないと進みません。",
+    "running": "実行中です。Web検索を伴うため数分かかります。",
+    "blocked": "未実装のステップに当たって止まっています。失敗ではありません。",
+    "failed": "途中で失敗しました。原因を直してから、そのステップだけやり直せます。",
+    "completed": "完了しました。",
+    "cancelled": "取り下げ済みです。",
+}
 
 
 @router.post("/analysis/{job_id}/steps/{step_number}/retry",

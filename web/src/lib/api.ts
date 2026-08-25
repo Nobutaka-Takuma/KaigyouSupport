@@ -6,6 +6,9 @@
  * including the "we could not get this" answers.
  */
 import type {
+  AnalysisCreated,
+  AnalysisReport,
+  AnalysisStatus,
   CandidateAnalysis,
   ClinicDetail,
   CompareResponse,
@@ -30,14 +33,23 @@ export class ApiError extends Error {
   }
 }
 
-async function get<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
+async function request<T>(
+  method: "GET" | "POST",
+  path: string,
+  params: Record<string, unknown> = {},
+  token?: string,
+): Promise<T> {
   const url = new URL(`${BASE}/api${path}`, window.location.origin);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== "") {
       url.searchParams.set(key, String(value));
     }
   }
-  const res = await fetch(url.toString());
+  // 分析の開始はLLMの課金を伴うので、サーバが共有シークレットを要求すること
+  // があります。持っているときだけ送る。
+  const headers: Record<string, string> = {};
+  if (token) headers["X-Analysis-Token"] = token;
+  const res = await fetch(url.toString(), { method, headers });
   if (!res.ok) {
     let detail = res.statusText;
     let hint: string | undefined;
@@ -52,6 +64,9 @@ async function get<T>(path: string, params: Record<string, unknown> = {}): Promi
   }
   return res.json() as Promise<T>;
 }
+
+const get = <T,>(path: string, params: Record<string, unknown> = {}) =>
+  request<T>("GET", path, params);
 
 export const api = {
   meta: () => get<Meta>("/meta"),
@@ -134,4 +149,32 @@ export const api = {
     profile?: string;
     prefecture_code?: string;
   }) => get<CompareResponse>("/compare", params),
+
+  /**
+   * 商圏インテリジェンス。ここで分析は走りません。
+   *
+   * 4ステップとWeb検索は1リクエストに収まらないので、APIはJobを作るだけで、
+   * 実行はワークステーション側のworkerです。UIはその進捗を見に行きます。
+   */
+  analysis: {
+    create: (
+      params: {
+        lat: number;
+        lng: number;
+        radius: number;
+        catchment?: "circle" | "walk";
+        profile?: string;
+        location_name?: string;
+      },
+      token?: string,
+    ) => request<AnalysisCreated>("POST", "/analysis", params, token),
+
+    status: (jobId: string) => get<AnalysisStatus>(`/analysis/${jobId}`),
+
+    report: (jobId: string) => get<AnalysisReport>(`/analysis/${jobId}/report`),
+
+    retryFrom: (jobId: string, step: number, token?: string) =>
+      request<{ restarted_from: number }>(
+        "POST", `/analysis/${jobId}/steps/${step}/retry`, {}, token),
+  },
 };

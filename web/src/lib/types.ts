@@ -366,3 +366,106 @@ export interface SpecialtyList {
   specialties: SpecialtyOption[];
   note?: string;
 }
+
+// --------------------------------------------------- 商圏インテリジェンス
+export interface AnalysisStep {
+  step_number: number;
+  step_name: string;
+  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  error_message?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  web_searches?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
+  model?: string | null;
+  prompt_version?: string | null;
+}
+
+export interface AnalysisCreated {
+  job_id: string;
+  status: string;
+  steps: AnalysisStep[];
+  worker_required: boolean;
+  note: string;
+}
+
+export interface AnalysisStatus {
+  job: {
+    id: string;
+    status: string;
+    location_name?: string | null;
+    latitude: number;
+    longitude: number;
+    radius_m: number;
+    error_message?: string | null;
+  };
+  steps: AnalysisStep[];
+  source_count: number;
+  report_available: boolean;
+  trace_ok: boolean | null;
+  usage: {
+    input_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    output_tokens: number;
+    web_searches: number;
+    /** 概算。単価の分からないモデルが混じると null。 */
+    estimated_cost_usd: number | null;
+  };
+  llm_configured: boolean;
+  status_note?: string | null;
+}
+
+/** 根拠つきの1文。§25 の追跡はこの id を辿る。 */
+export interface Evidenced {
+  statement: string;
+  evidence: string[];
+}
+
+export interface ReportBlock {
+  tag: "FACT" | "BENCHMARK" | "PATTERN" | "WHY" | "INSIGHT" | "IMPLICATION" | "ACTION";
+  text: string;
+  evidence?: string[];
+}
+
+export interface ReportSection {
+  number: number;
+  title: string;
+  blocks: ReportBlock[];
+}
+
+export interface ReportJson {
+  executive_summary: string;
+  decision: {
+    primary_patients: Evidenced;
+    secondary_patients: Evidenced;
+    avoid_competing_on: Evidenced;
+    acquisition_area: Evidenced;
+    reason_to_visit: Evidenced;
+    clinic_model: Evidenced;
+    advantages: Evidenced[];
+    risks: Evidenced[];
+    confidence: "high" | "medium" | "low";
+  };
+  sections: ReportSection[];
+  actions: Evidenced[];
+}
+
+export interface AnalysisSource {
+  pattern_id: string | null;
+  url: string;
+  title: string | null;
+  source_type: string | null;
+  retrieved_at?: string | null;
+}
+
+export interface AnalysisReport {
+  report_json: ReportJson;
+  report_markdown: string | null;
+  trace_ok: boolean | null;
+  trace_problems: { where: string; problem: string }[] | null;
+  created_at: string;
+  sources: AnalysisSource[];
+  disclaimer: string;
+}

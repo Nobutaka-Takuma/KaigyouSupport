@@ -20,6 +20,7 @@ import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
 import { DatasetExport } from "../components/DatasetExport";
+import { AnalysisPanel } from "../components/AnalysisPanel";
 import { SpecialtyPanel, SpecialtyProfiles } from "../components/SpecialtyPanel";
 
 //: Last resort only -- used on a first ever visit, before the API has said
@@ -763,6 +764,16 @@ export function MapPage() {
               ))}
 
               <ScorePanel analysis={analysis} />
+
+              {/* スコアは相対値まで。ここから先（なぜそうなのか、誰を狙うか）
+                  は4段のLLM分析の仕事なので、スコアのすぐ下に置く。 */}
+              <AnalysisPanel
+                lat={analysis.location.lat}
+                lng={analysis.location.lng}
+                radius={radius}
+                profile={profile}
+                catchment={catchment}
+              />
 
               <h3>人口・競合</h3>
               <CatchmentNote analysis={analysis} />
