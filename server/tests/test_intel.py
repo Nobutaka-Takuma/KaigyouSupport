@@ -612,15 +612,9 @@ def test_a_refusal_is_reported_rather_than_read_as_an_empty_answer(monkeypatch):
         usage = type("U", (), {"input_tokens": 10, "output_tokens": 0})()
         model = "claude-sonnet-5"
 
-    class _Client:
-        class messages:
-            @staticmethod
-            def parse(**kwargs):
-                m = _Message()
-                m.parsed_output = None
-                return m
-
-    monkeypatch.setattr(llm, "_client", lambda: _Client())
+    message = _Message()
+    message.parsed_output = None
+    monkeypatch.setattr(llm, "_client", lambda: _stub_client(message))
     with pytest.raises(llm.Refused, match="cyber"):
         llm.ask(step_number=1, system="s", user="u", schema=Step1Output)
 
@@ -678,31 +672,78 @@ def test_step1_sends_no_tools_and_step2_sends_web_search():
         assert "tools" not in build_request(step_number, "s", "u")
 
 
-def test_the_structured_call_passes_the_schema_as_output_format(monkeypatch):
-    """parse() の呼び方を固定する。"""
-    from kaigyou_intel import client as llm
+def _stub_client(message, seen: dict | None = None):
+    """SDK の呼び出し口だけを模した最小のクライアント。
 
-    seen: dict[str, object] = {}
+    ストリームの context manager までは真似ます。ここを省いて ``ask`` ごと
+    差し替えたせいで、送信する本体を一度も見ないまま
+    ``ModelMetaclass is not JSON serializable`` を出荷しました。
+    """
+    import contextlib
+
+    class _Stream:
+        @staticmethod
+        def get_final_message():
+            return message
 
     class _Client:
         class messages:
             @staticmethod
-            def parse(**kwargs):
-                seen.update(kwargs)
-                message = type("M", (), {})()
-                message.parsed_output = _output()
-                message.content, message.stop_reason = [], "end_turn"
-                message.usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
-                message.model = "claude-sonnet-5"
-                return message
+            @contextlib.contextmanager
+            def stream(**kwargs):
+                if seen is not None:
+                    seen.update(kwargs)
+                yield _Stream()
 
-    monkeypatch.setattr(llm, "_client", lambda: _Client())
+    return _Client()
+
+
+def test_the_structured_call_passes_the_schema_as_output_format(monkeypatch):
+    """呼び方を固定する。
+
+    スキーマは型のまま ``output_format`` へ。``output_config.format`` に
+    自分で入れると、型がそのまま送信されて落ちます。
+    """
+    from kaigyou_intel import client as llm
+
+    seen: dict[str, object] = {}
+    message = type("M", (), {})()
+    message.parsed_output = _output()
+    message.content, message.stop_reason = [], "end_turn"
+    message.usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
+    message.model = "claude-sonnet-5"
+
+    monkeypatch.setattr(llm, "_client", lambda: _stub_client(message, seen))
     llm.ask(step_number=1, system="s", user="u", schema=Step1Output)
 
     assert seen["output_format"] is Step1Output
     assert "format" not in seen["output_config"]
     json.dumps({k: v for k, v in seen.items() if k != "output_format"},
                ensure_ascii=False)
+
+
+def test_every_call_is_streamed(monkeypatch):
+    """SDK は「10 分を超えうる操作」を非ストリームで呼ぶと送信前に落とします。
+
+    その境目は max_tokens で決まります。実測：16,000 → 24,000 に上げた途端、
+    ValueError: Streaming is required for operations that may take longer than
+    10 minutes。ストリームなら上限を気にせず上げられます。
+    """
+    from kaigyou_intel import client as llm
+
+    message = type("M", (), {})()
+    message.parsed_output = None
+    message.content, message.stop_reason = [], "end_turn"
+    message.usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
+    message.model = "claude-sonnet-5"
+
+    client = _stub_client(message)
+    assert not hasattr(client.messages, "parse"), (
+        "parse() を使うと max_tokens しだいで送信前に落ちます")
+    monkeypatch.setattr(llm, "_client", lambda: client)
+    # スキーマ有り・無しのどちらもストリームで通ること。
+    llm.ask(step_number=1, system="s", user="u", schema=Step1Output)
+    llm.ask(step_number=2, system="s", user="u")
 
 
 def test_the_step_output_can_be_read_without_an_http_client():

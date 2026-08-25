@@ -177,18 +177,21 @@ def ask(*, step_number: int, system: str, user: str,
     request = build_request(step_number, system, user, tools=tools,
                             web_search=web_search)
 
+    # 常にストリームで受けます。SDK は「10 分を超えうる操作」を非ストリームで
+    # 呼ぶと送信前に ValueError を投げ、その境目は max_tokens で決まります。
+    # 実測：max_tokens を 16,000 から 24,000 に上げた途端、STEP1 が
+    #   ValueError: Streaming is required for operations that may take longer
+    #   than 10 minutes
+    # で落ちました。ストリームなら上限を気にせず上げられます。
     if schema is not None and "tools" not in request:
-        # 構造化出力。ツールを併用しないときはこれがいちばん素直です。
-        # schema は **型のまま** output_format に渡します。SDK が JSON Schema へ
-        # 変換して output_config.format にマージします。自分で
+        # 構造化出力。schema は **型のまま** output_format に渡します。SDK が
+        # JSON Schema へ変換して output_config.format にマージします。自分で
         # output_config へ入れると、型がそのまま送信されて落ちます。
-        message = client.messages.parse(output_format=schema, **request)
-        parsed = message.parsed_output
-    else:
-        # 大きな max_tokens は HTTP タイムアウトに当たるのでストリームで受けます。
-        with client.messages.stream(**request) as stream:
-            message = stream.get_final_message()
-        parsed = None
+        request = {**request, "output_format": schema}
+    with client.messages.stream(**request) as stream:
+        message = stream.get_final_message()
+    # output_format を渡さなかったときは None。text ブロックに付きます。
+    parsed = getattr(message, "parsed_output", None)
 
     # 拒否は例外ではなく HTTP 200 で返ります。content を読む前に確かめないと、
     # 空の応答を「モデルが何も見つけなかった」と取り違えます。
