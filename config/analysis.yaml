@@ -112,8 +112,16 @@ steps:
     prompt_version: step3-v1.0
     web_search: false
   4:
-    name: 経営判断・レポート生成
+    name: 経営判断
     prompt: step4_strategy.md
     prompt_version: step4-v1.0
     # 要件 §16：STEP4 では新しい外部事実を追加しない。
+    web_search: false
+  5:
+    # STEP4 までは根拠を辿れる形（タグと id）で作ります。それは検算のための
+    # 形であって、人が読むための形ではありません。顧客に渡す文書はここで
+    # 起こし直します。書き直しであって、書き足しではありません。
+    name: 顧客提出用レポート
+    prompt: step5_client_report.md
+    prompt_version: step5-v1.0
     web_search: false

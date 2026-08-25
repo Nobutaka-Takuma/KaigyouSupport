@@ -389,6 +389,9 @@ def _print_step_output(number: int, output: dict) -> None:
     if number == 4:
         _print_step4(output)
         return
+    if number == 5:
+        _print_step5(output)
+        return
     if number != 1:
         import json as _j
         print("    " + _j.dumps(output, ensure_ascii=False)[:600])
@@ -528,6 +531,33 @@ def _print_step4(output: dict) -> None:
         print("\n    次に取るべき行動")
         for action in output["actions"]:
             print(f"      - {action.get('statement')}")
+
+
+def _print_step5(output: dict) -> None:
+    """顧客に渡す文書。端末では骨格だけ見せて、全文は --report に譲ります。"""
+    verdict = output.get("verdict") or {}
+    print(f"\n    {output.get('title')}")
+    print(f"\n    評価: {verdict.get('label')}")
+    for line in str(verdict.get("statement", "")).splitlines():
+        print(f"      {line}")
+    if verdict.get("counterpoint"):
+        print(f"      外れるとしたら: {verdict['counterpoint']}")
+
+    print("\n    章立て")
+    for section in output.get("sections") or []:
+        print(f"      - {section.get('heading')}"
+              + (f"  … {section['takeaway']}" if section.get("takeaway") else ""))
+
+    support = output.get("support_needed") or []
+    print(f"\n    開業に必要なこと（{len(support)}件）")
+    for item in support:
+        print(f"      [{item.get('category')}] {item.get('item')}")
+
+    if output.get("questions_for_the_client"):
+        print("\n    面談で確認したいこと")
+        for q in output["questions_for_the_client"]:
+            print(f"      - {q}")
+    print("\n    全文: python -m kaigyou_etl analyze --report")
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:

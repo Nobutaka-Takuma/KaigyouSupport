@@ -18,7 +18,7 @@ from kaigyou_intel import client as llm
 from kaigyou_intel import jobs
 from kaigyou_intel import report
 from kaigyou_intel.steps import (
-    step1_features, step2_research, step3_demand, step4_strategy)
+    step1_features, step2_research, step3_demand, step4_strategy, step5_client)
 
 #: 実装済みのステップ。ここに無い番号に来たら止めます。「未実装なので飛ばす」
 #: をやると、材料が無いまま最終レポートが書かれます。
@@ -31,6 +31,7 @@ RUNNERS: dict[int, Callable[[Any], Any]] = {
     2: step2_research.run,
     3: step3_demand.run,
     4: step4_strategy.run,
+    5: step5_client.run,
 }
 
 
@@ -79,6 +80,8 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     if sources:
         jobs.save_sources(conn, job_id, number, None, sources)
     if number == max(RUNNERS):
+        # 保存するのは最終段の出力です。STEP4 の形は根拠を辿るためのもので、
+        # 顧客に渡す文書ではありません。
         # 最終段。レポートは Markdown にして保存します。免責とデータ時点は
         # ここで付けるので、LLM が書き忘れても落ちません。
         report.save(conn, job_id, output, job["base_data"])
@@ -120,6 +123,14 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
                 f"{'・'.join(missing)} の出力がありません。"
                 "レポートは前 3 段の結論だけで書きます。")
         return step4_strategy.build_input(*outputs, job["base_data"])
+    if number == 5:
+        step3_output = jobs.step_output(conn, job["id"], 3)
+        step4_output = jobs.step_output(conn, job["id"], 4)
+        if not step3_output or not step4_output:
+            raise StepNotImplemented(
+                "STEP3・STEP4 の出力がありません。顧客向けレポートは、"
+                "その結論を書き直す段です。")
+        return step5_client.build_input(step3_output, step4_output, job["base_data"])
     raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
 
 
@@ -174,6 +185,13 @@ def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
         return 1
 
     with connect() as conn:
+        # 段を増やしたとき、既にある Job には行がありません。足しておかないと
+        # 「全部終わった」と読まれて、増やした段が黙って飛ばされます。
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM analysis_jobs "
+                        "WHERE status IN ('queued','blocked','failed','completed')")
+            for row in cur.fetchall():
+                jobs.ensure_steps(conn, str(row["id"]))
         # 未実装で止まっていた Job を、実装済みになっていれば拾い直します。
         # 「実装したあとにどのジョブを再開するか」を人が覚えている必要は
         # 無いはずです。
@@ -183,6 +201,7 @@ def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
 
     if job_id is not None:
         with connect() as conn:
+            jobs.ensure_steps(conn, job_id)
             claimed = jobs.claim_specific(conn, job_id)
             if claimed is None:
                 say(f"ジョブ {job_id} は見つからないか、取り下げ済みです。")

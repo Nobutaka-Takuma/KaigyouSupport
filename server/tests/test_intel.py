@@ -37,16 +37,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ------------------------------------------------------------------ 設定
-def test_the_four_steps_are_configured_with_their_prompts():
+def test_every_step_is_configured_with_its_prompt():
     """実装済みのステップには、プロンプトの実体があること。
 
     未実装のぶんは名前だけ先に置いてあります。実装した番号を RUNNERS に足すと、
     このテストがその番号のプロンプトを要求します。
     """
+    from kaigyou_intel.jobs import STEP_NAMES
     from kaigyou_intel.worker import RUNNERS
 
     config = cfg.analysis_config()
-    assert set(config["steps"]) == {1, 2, 3, 4}
+    assert set(config["steps"]) == set(STEP_NAMES)
     for number, step in config["steps"].items():
         assert step["prompt_version"], f"step{number} に prompt_version がありません"
         if number not in RUNNERS:
@@ -70,7 +71,7 @@ def test_only_step2_may_search_the_web():
     """
     steps = cfg.analysis_config()["steps"]
     assert steps[2]["web_search"] is True
-    for number in (1, 3, 4):
+    for number in (1, 3, 4, 5):
         assert steps[number].get("web_search") is False, (
             f"STEP{number} で Web 検索が有効になっています")
 
@@ -373,13 +374,13 @@ def conn():
         pytest.skip(f"database unavailable: {exc}")
 
 
-def test_a_new_job_has_all_four_steps_pending(conn, dataset):
+def test_a_new_job_has_every_step_pending(conn, dataset):
     from kaigyou_intel import jobs
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
     steps = jobs.get_steps(conn, job_id)
-    assert [s["step_number"] for s in steps] == [1, 2, 3, 4]
+    assert [s["step_number"] for s in steps] == sorted(jobs.STEP_NAMES)
     assert all(s["status"] == "pending" for s in steps)
     assert jobs.next_step(conn, job_id) == 1
     conn.rollback()
@@ -1009,7 +1010,7 @@ def test_a_finished_job_is_marked_completed(conn, dataset, monkeypatch):
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
-    for number in (1, 2, 3, 4):
+    for number in sorted(jobs.STEP_NAMES):
         jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
         jobs.finish_step(conn, job_id, number, {"n": number}, {})
     jobs.claim_specific(conn, job_id)
@@ -1801,3 +1802,184 @@ def test_the_output_ceiling_leaves_room_for_the_whole_report():
     実際に出た分だけなので、上げても高くなりません。
     """
     assert cfg.analysis_config()["model"]["max_tokens"] >= 48000
+
+
+# ------------------------------------------------------------------ STEP5
+def _step5_output(**overrides) -> "Step5Output":
+    from kaigyou_intel.schemas import (
+        Judgement, NarrativeSection, Step5Output, SupportItem)
+
+    data = {
+        "title": "銀座4丁目 商圏分析レポート",
+        "summary": "常住人口13,268人に対し歯科医院は186院あり、"
+                   "住民だけを相手にする立地ではありません。",
+        "verdict": Judgement(
+            label="条件付きで有望",
+            statement="昼間人口が常住人口を大きく上回るため、勤務者を主に据えれば"
+                      "条件は揃っています。",
+            basis=["M001", "F010"],
+            counterpoint="勤務者の受診が勤務地周辺で行われていない場合、"
+                         "この前提が崩れます。"),
+        "why_here": "約49万人が昼間この地区で働いており、駅までは101mです。",
+        "sections": [
+            NarrativeSection(heading="住民と就業者", body="本文。", takeaway="要点",
+                             evidence=["F001"]),
+            NarrativeSection(heading="競合の厚み", body="本文。", evidence=["F010"]),
+            NarrativeSection(heading="立地の条件", body="本文。"),
+        ],
+        "support_needed": [SupportItem(
+            item="平日夜間まで回せる人員体制",
+            why="勤務者を主に据えると、受診は勤務前後に寄ります。",
+            evidence=["M001"], category="人員")],
+        "questions_for_the_client": ["想定している診療時間の上限は何時までか"],
+        "judgement_note": "数値は公的統計です。「条件が揃っている」という評価は"
+                          "本レポートの判断であり、開業の成否を示すものではありません。",
+    }
+    data.update(overrides)
+    return Step5Output(**data)
+
+
+_STEP5_IDS = {"F001", "F010", "M001"}
+_STEP5_NUMBERS = {"13268", "186", "494517", "101"}
+
+
+def test_a_readable_report_passes():
+    from kaigyou_intel.schemas import verify_step5
+
+    assert verify_step5(_step5_output(), _STEP5_IDS, _STEP5_NUMBERS) == []
+
+
+def test_rounding_for_readability_is_allowed():
+    """「494,517人」と書けとは言えません。読み物として渡す文書です。
+
+    「約49万人」は正しい書き方で、落としてはいけない。
+    """
+    from kaigyou_intel.schemas import invented_numbers
+
+    known = {"494517", "13268", "0.279", "71.43"}
+    assert invented_numbers("約49万人が働き、住民は約1.3万人です。", known) == []
+    assert invented_numbers("構成比は27.9%、1院あたり71.4人。", known) == []
+    assert invented_numbers("2020年から2025年、3つの理由で", known) == []
+
+
+def test_a_number_that_was_never_in_the_data_is_caught():
+    """散文にすると、数字はいくらでも滑らかに増やせます。
+
+    「約5万人」は、元が13,268でも494,517でも文としては通ります。だから
+    照合します。
+    """
+    from kaigyou_intel.schemas import invented_numbers
+
+    known = {"494517", "13268"}
+    assert invented_numbers("約5万人が働いています。", known) == ["5万"]
+    assert invented_numbers("年間3,200人の来院が見込めます。", known) == ["3,200"]
+
+
+def test_step5_refuses_a_number_it_was_not_given():
+    from kaigyou_intel.schemas import verify_step5
+
+    output = _step5_output(why_here="約5万人がこの地区で働いています。")
+    problems = verify_step5(output, _STEP5_IDS, _STEP5_NUMBERS)
+    assert any("5万" in p.problem for p in problems)
+
+
+def test_step5_still_may_not_predict():
+    """評価（「条件が揃っている」）と予測（「儲かる」）は別のものです。
+
+    価値判断は書けますが、売上・患者数・成功確率は書けません。
+    """
+    from kaigyou_intel.schemas import verify_step5
+
+    output = _step5_output(summary="この立地の年商は良好と見込まれます。")
+    assert any("年商" in p.problem
+               for p in verify_step5(output, _STEP5_IDS, _STEP5_NUMBERS))
+
+
+def test_the_judgement_is_marked_as_a_judgement():
+    """価値判断を許すなら、どこからが判断かを読み手に見せる必要があります。"""
+    from pydantic import ValidationError
+
+    from kaigyou_intel.schemas import Judgement
+
+    # counterpoint が無い判断は通しません。書けないなら根拠が薄いということです。
+    with pytest.raises(ValidationError):
+        Judgement(label="有望", statement="良い立地です", basis=["F001"])
+    # judgement_note も必須。
+    with pytest.raises(ValidationError):
+        _step5_output(judgement_note=None)
+
+
+def test_the_client_report_reads_as_prose_not_as_tagged_facts(dataset):
+    """[FACT] が20個並んだ文書は、読み手に「自分で要約してください」と
+    言っているのと同じです。"""
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    assert "**[FACT]**" not in markdown
+    assert "## なぜこの立地か" in markdown
+    assert "## この立地で開業するために必要なこと" in markdown
+    assert "### 人員" in markdown, "支援の要件は分類して出す"
+    assert "## 面談で確認したいこと" in markdown
+    assert "## このレポートにおける評価の位置づけ" in markdown
+    # 根拠の id は残す。読み飛ばせる形で本文の末尾に。
+    assert "〔M001, F010〕" in markdown
+    # 付録と免責はこれまでどおり。
+    assert "## 付録：商圏の基礎数値" in markdown and "## 免責" in markdown
+
+
+def test_the_working_format_is_still_rendered_when_there_is_no_client_report(dataset):
+    """STEP5 が無いジョブ（古いもの）も読めること。"""
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    assert "**[FACT]**" in markdown
+
+
+def test_step5_needs_the_two_steps_before_it(conn, dataset):
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    job = jobs.get_job(conn, job_id, include_base_data=True)
+    with pytest.raises(worker.StepNotImplemented, match="STEP3・STEP4"):
+        worker.build_input(conn, job, 5)
+    conn.rollback()
+
+
+def test_an_existing_job_gains_the_new_step(conn, dataset):
+    """段を増やしたとき、既にある Job には行がありません。
+
+    行が無いと next_step は「全部終わった」と読み、増やした段が黙って
+    飛ばされます。作り直さずに続きから流せること。
+    """
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM analysis_steps WHERE job_id = %s AND step_number = 5",
+                    (job_id,))
+    for number in (1, 2, 3, 4):
+        jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
+        jobs.finish_step(conn, job_id, number, {"n": number}, {})
+    # 4 段だったころに完走した Job の状態。
+    jobs.release_job(conn, job_id, "completed")
+    try:
+        assert jobs.next_step(conn, job_id) is None, "行が無いので終わったように見える"
+        assert jobs.ensure_steps(conn, job_id) == 1
+        assert jobs.next_step(conn, job_id) == 5
+        assert jobs.get_job(conn, job_id)["status"] == "queued"
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_client_report_keeps_its_own_title(dataset):
+    """顧客に渡す文書なので、こちらが決めた定型より、その商圏について
+    書かれた見出しのほうが読み手に向いています。"""
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    assert markdown.startswith("# 銀座4丁目 商圏分析レポート")
+    # 表題が無い（STEP4 止まり）ときは定型に戻ること。
+    plain = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    assert plain.startswith("# 商圏分析レポート：")

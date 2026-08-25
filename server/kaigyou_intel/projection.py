@@ -273,6 +273,34 @@ def for_step4(step1: Mapping[str, Any], step2: Mapping[str, Any],
     }
 
 
+def for_step5(step4: Mapping[str, Any], step3: Mapping[str, Any],
+              dataset: Mapping[str, Any]) -> dict[str, Any]:
+    """STEP5（顧客提出用レポート）の入力。
+
+    書き直しであって、書き足しではありません。だから渡すのは STEP4 の結論と、
+    文中で引ける数値の出どころだけです。基礎データ全部を戻すと、STEP4 が
+    採らなかった数字が本文に湧きます。
+
+    STEP3 の需要形成メカニズムは残します。「なぜここか」を散文で書くとき、
+    筋道がそこにしか無いためです。
+    """
+    measures = dataset.get("measures") or {}
+    return {
+        "location": dataset.get("location"),
+        "query": dataset.get("query"),
+        "step4": step4,
+        "demand_mechanisms": step3.get("demand_mechanisms"),
+        "patient_segments": step3.get("patient_segments"),
+        # 文中で引ける数値。丸めて書いてよいので、元の値だけ渡します。
+        "measures": [_measure(m, keep_benchmarks=False)
+                     for m in (measures.get("items") or [])],
+        "competition": _competition_summary(dataset),
+        "access": _access_summary(dataset),
+        "cost": _cost_summary(dataset),
+        "data_quality": dataset.get("data_quality"),
+    }
+
+
 def allowed_numbers(payload: Mapping[str, Any]) -> set[str]:
     """入力に実際に現れる数値の集合。
 

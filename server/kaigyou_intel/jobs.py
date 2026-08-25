@@ -18,7 +18,11 @@ STEP_NAMES = {
     1: "商圏特徴抽出",
     2: "外部コンテクスト調査",
     3: "需要形成・患者分析",
-    4: "経営判断・レポート生成",
+    4: "経営判断",
+    # STEP4 までは根拠を辿れる形（タグと id）で作ります。それは検算のための
+    # 形であって、人が読むための形ではありません。顧客に渡す文書は、そこから
+    # 起こし直します。
+    5: "顧客提出用レポート",
 }
 
 
@@ -65,6 +69,30 @@ def get_job(conn: psycopg.Connection, job_id: str,
         cur.execute(f"SELECT {columns} FROM analysis_jobs WHERE id = %s", (job_id,))
         row = cur.fetchone()
     return dict(row) if row else None
+
+
+def ensure_steps(conn: psycopg.Connection, job_id: str) -> int:
+    """足りないステップの空枠を足す。
+
+    段を増やしたとき、既にある Job には行がありません。行が無いと next_step は
+    「全部終わった」と読み、増やした段が黙って飛ばされます。worker の起動時に
+    ここを通すので、作り直さなくても続きから流れます。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT step_number FROM analysis_steps WHERE job_id = %s",
+                    (job_id,))
+        have = {int(r["step_number"]) for r in cur.fetchall()}
+        missing = [n for n in STEP_NAMES if n not in have]
+        for number in missing:
+            cur.execute(
+                "INSERT INTO analysis_steps (job_id, step_number, step_name, status) "
+                "VALUES (%s, %s, %s, 'pending')", (job_id, number, STEP_NAMES[number]))
+        if missing:
+            cur.execute(
+                "UPDATE analysis_jobs SET status = 'queued', completed_at = NULL "
+                "WHERE id = %s AND status = 'completed'", (job_id,))
+    conn.commit()
+    return len(missing)
 
 
 def get_steps(conn: psycopg.Connection, job_id: str) -> list[dict[str, Any]]:

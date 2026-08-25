@@ -37,32 +37,20 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
                                  location.get("municipality_name")) if x)
     name = location.get("name") or place or \
         f"{location.get('lat')},{location.get('lng')}"
-    lines: list[str] = [f"# 商圏分析レポート：{name}", ""]
+    # STEP5 が付けた表題を優先します。顧客に渡す文書なので、こちらが決めた
+    # 定型より、その商圏について書かれた見出しのほうが読み手に向いています。
+    heading = str(output.get("title") or "").strip() or f"商圏分析レポート：{name}"
+    lines: list[str] = [f"# {heading}", ""]
 
     where = f"{location.get('lat')}, {location.get('lng')}"
     if query.get("radius_m"):
         lines += [f"地点 {where} / 半径 {query['radius_m']:,}m"
                   f" / プロファイル {query.get('active_profile', '-')}", ""]
 
-    lines += ["## 結論", "", output.get("executive_summary", ""), ""]
-    lines += _decision_block(output.get("decision") or {})
-
-    for section in sorted(output.get("sections") or [],
-                          key=lambda s: s.get("number", 0)):
-        lines += [f"## {section.get('number')}. {section.get('title')}", ""]
-        for block in section.get("blocks") or []:
-            refs = block.get("evidence") or []
-            tail = f"  〔{', '.join(refs)}〕" if refs else ""
-            lines.append(f"**[{block.get('tag')}]** {block.get('text')}{tail}")
-            lines.append("")
-
-    if output.get("actions"):
-        lines += ["## 次に取るべき行動", ""]
-        for action in output["actions"]:
-            refs = action.get("evidence") or []
-            tail = f"  〔{', '.join(refs)}〕" if refs else ""
-            lines.append(f"- {action.get('statement')}{tail}")
-        lines.append("")
+    # STEP5（顧客提出用）があればそちらを本文にします。STEP4 の形は根拠を
+    # 辿るためのもので、人が読む文書ではありません。
+    lines += (_client_body(output) if _is_client_report(output)
+              else _working_body(output))
 
     lines += _figures_block(dataset)
     lines += _sources_block(sources)
@@ -209,6 +197,86 @@ def _cost_figures(dataset: Mapping[str, Any]) -> list[str]:
          d.get("survey_year")] for d in divisions])
     if cost.get("note"):
         lines += [str(cost["note"]), ""]
+    return lines
+
+
+def _is_client_report(output: Mapping[str, Any]) -> bool:
+    return "verdict" in output and "support_needed" in output
+
+
+def _refs(item: Mapping[str, Any]) -> str:
+    """根拠の id。散文の中では小さく添えます。
+
+    §25 の追跡はここを通ります。読み物としては邪魔ですが、消すと
+    「その話はどこから来たのか」を辿れなくなります。行末に置いて、
+    読み飛ばせる形にしてあります。"""
+    ids = item.get("evidence") or item.get("basis") or []
+    return f"  〔{', '.join(ids)}〕" if ids else ""
+
+
+def _client_body(output: Mapping[str, Any]) -> list[str]:
+    """顧客に渡す本文。散文で、結論から。"""
+    verdict = output.get("verdict") or {}
+    lines = ["## この立地について", "", output.get("summary", ""), ""]
+
+    if verdict:
+        lines += [f"### 評価：{verdict.get('label', '')}", "",
+                  str(verdict.get("statement", "")) + _refs(verdict), ""]
+        if verdict.get("counterpoint"):
+            lines += ["**この判断が外れるとしたら**　"
+                      + str(verdict["counterpoint"]), ""]
+
+    if output.get("why_here"):
+        lines += ["## なぜこの立地か", "", output["why_here"], ""]
+
+    for section in output.get("sections") or []:
+        lines += [f"## {section.get('heading')}", ""]
+        if section.get("takeaway"):
+            lines += [f"> {section['takeaway']}", ""]
+        lines += [str(section.get("body", "")) + _refs(section), ""]
+
+    support = output.get("support_needed") or []
+    if support:
+        lines += ["## この立地で開業するために必要なこと", ""]
+        by_category: dict[str, list[Mapping[str, Any]]] = {}
+        for item in support:
+            by_category.setdefault(str(item.get("category") or "その他"), []).append(item)
+        for category, items in by_category.items():
+            lines += [f"### {category}", ""]
+            for item in items:
+                lines += [f"**{item.get('item')}**", "",
+                          str(item.get("why", "")) + _refs(item), ""]
+
+    questions = output.get("questions_for_the_client") or []
+    if questions:
+        lines += ["## 面談で確認したいこと", "",
+                  "データからは分からないが、判断に効くことです。", ""]
+        lines += [f"- {q}" for q in questions] + [""]
+
+    if output.get("judgement_note"):
+        lines += ["## このレポートにおける評価の位置づけ", "",
+                  str(output["judgement_note"]), ""]
+    return lines
+
+
+def _working_body(output: Mapping[str, Any]) -> list[str]:
+    """STEP4 の形（タグ付き）。STEP5 が無いときの控えです。"""
+    lines = ["## 結論", "", output.get("executive_summary", ""), ""]
+    lines += _decision_block(output.get("decision") or {})
+
+    for section in sorted(output.get("sections") or [],
+                          key=lambda s: s.get("number", 0)):
+        lines += [f"## {section.get('number')}. {section.get('title')}", ""]
+        for block in section.get("blocks") or []:
+            lines.append(f"**[{block.get('tag')}]** {block.get('text')}"
+                         + _refs(block))
+            lines.append("")
+
+    if output.get("actions"):
+        lines += ["## 次に取るべき行動", ""]
+        for action in output["actions"]:
+            lines.append(f"- {action.get('statement')}" + _refs(action))
+        lines.append("")
     return lines
 
 

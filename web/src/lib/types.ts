@@ -458,6 +458,25 @@ export interface ReportJson {
   actions: Evidenced[];
 }
 
+/** STEP5：顧客に渡す文書。散文で、タグは無い。 */
+export interface ClientReportJson {
+  title: string;
+  summary: string;
+  verdict: {
+    label: string;
+    statement: string;
+    basis: string[];
+    counterpoint: string;
+  };
+  why_here: string;
+  sections: { heading: string; body: string; takeaway?: string | null;
+              evidence?: string[] }[];
+  support_needed: { item: string; why: string; category: string;
+                    evidence?: string[] }[];
+  questions_for_the_client: string[];
+  judgement_note: string;
+}
+
 export interface AnalysisSource {
   pattern_id: string | null;
   url: string;
@@ -467,7 +486,8 @@ export interface AnalysisSource {
 }
 
 export interface AnalysisReport {
-  report_json: ReportJson;
+  /** 最終段の出力。STEP5 まで走ったジョブは ClientReportJson。 */
+  report_json: ClientReportJson | ReportJson;
   report_markdown: string | null;
   trace_ok: boolean | null;
   trace_problems: { where: string; problem: string }[] | null;

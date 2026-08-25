@@ -7,6 +7,8 @@ FACT が実在の measure を指しているか、PATTERN の evidence が実在
 """
 from __future__ import annotations
 
+import math
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -483,11 +485,206 @@ def _forbidden_predictions(output: Step4Output) -> list[TraceProblem]:
     （プロジェクトの前提）。プロンプトで禁じたうえで、出力でも落とします。
     お願いだけで守られることに賭けない。
     """
+    return _forbidden_predictions_in(output.model_dump_json())
+
+
+# ------------------------------------------------------------------ STEP5
+#
+# STEP4 までは根拠を辿れる形（タグと id）で作ります。それは検算のための形で
+# あって、人が読むための形ではありません。[FACT] が20個並んだ文書は、読み手に
+# 「自分で要約してください」と言っているのと同じです。
+#
+# ここで顧客に渡す文書に起こし直します。書き手は開業支援の担当者、読み手は
+# 開業を考えている歯科医師。知りたいのは「なぜここか」と「何が要るか」です。
+
+#: 評価の強さ。**予測ではありません。** 「有望」は「儲かる」ではなく、
+#: 「データ上、条件が揃っている」という意味です。
+VerdictLabel = Literal["有望", "条件付きで有望", "慎重に検討", "推奨しない"]
+
+
+class Judgement(BaseModel):
+    """価値判断。データそのものではないので、そう分かる形で持ちます。"""
+
+    label: VerdictLabel
+    statement: str = Field(description="そう判断する理由を 2〜3 文で")
+    basis: list[str] = Field(
+        description="根拠にした F### / C### / S### / M### / I### の id", min_length=1)
+    counterpoint: str = Field(
+        description="この判断が外れるとしたら何が原因か。書けないなら判断が弱い")
+
+
+class NarrativeSection(BaseModel):
+    """散文の1章。タグは付けません。読み物として通して読める形にします。"""
+
+    heading: str
+    body: str = Field(description="段落。箇条書きの羅列にしない")
+    #: 章の要点。読み飛ばす人のための行で、本文の代わりではありません。
+    takeaway: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+
+
+class SupportItem(BaseModel):
+    """この立地で開業するために要る支援 1 件。
+
+    このレポートを配るのは開業支援の事業者です。「良い立地です」で終わる文書は、
+    その人たちの仕事の役に立ちません。何を用意する必要があるのかまで書きます。
+    """
+
+    item: str = Field(description="必要なこと。例：平日夜間まで回せる人員体制")
+    why: str = Field(description="この商圏の何がそれを要求するのか")
+    evidence: list[str] = Field(default_factory=list)
+    #: 物件 / 設備 / 人員 / 資金 / 手続き / 集患 のどれか。
+    category: Literal["物件", "設備", "人員", "資金", "手続き", "集患"]
+
+
+class Step5Output(BaseModel):
+    """STEP5（顧客提出用レポート）の出力。"""
+
+    title: str
+    #: 開業を考えている歯科医師が最初に読む数文。結論から書きます。
+    summary: str = Field(description="3〜5 文。判断と、その理由の骨格")
+    verdict: Judgement
+    #: なぜこの物件か。ここがレポートの背骨です。
+    why_here: str = Field(description="この立地を選ぶ理由を、筋道として散文で")
+    sections: list[NarrativeSection] = Field(min_length=3)
+    support_needed: list[SupportItem] = Field(min_length=1)
+    #: 面談で確かめること。データからは分からないが、判断に効くもの。
+    questions_for_the_client: list[str] = Field(default_factory=list)
+    #: 価値判断がどこに入っているかの明示。省略できません。
+    judgement_note: str = Field(
+        description="どこまでがデータで、どこからが評価かを 1〜2 文で")
+
+
+def verify_step5(output: Step5Output, known_ids: set[str],
+                 known_numbers: set[str]) -> list[TraceProblem]:
+    """書き直しであって、書き足しではないこと。
+
+    散文にすると、数字はいくらでも滑らかに増やせます。「約5万人」「およそ3倍」
+    は、元の数字と少し違っていても文としては通ります。だから、本文に出てくる
+    数値が**前の段に実在したもの**かを機械的に確かめます。
+
+    ``known_numbers`` は projection.allowed_numbers が集めた集合です。完全な
+    検出ではありませんが、いちばん起きやすい捏造（丸めながらの書き換え）は
+    捕まえられます。
+    """
     problems: list[TraceProblem] = []
-    haystack = output.model_dump_json()
-    for word in FORBIDDEN_PREDICTIONS:
-        if word in haystack:
+
+    for where, refs in _step5_references(output):
+        for ref in refs:
+            if ref not in known_ids:
+                problems.append(TraceProblem(
+                    where=where, problem=f"存在しない根拠を参照しています: {ref!r}"))
+
+    for where, text in _step5_prose(output):
+        for number in invented_numbers(text, known_numbers):
             problems.append(TraceProblem(
-                where="report",
-                problem=f"予測にあたる語が含まれています: {word!r}"))
+                where=where,
+                problem=f"前の段に無い数値です: {number}"))
+
+    problems.extend(_forbidden_predictions_in(output.model_dump_json()))
     return problems
+
+
+def _step5_references(output: Step5Output) -> list[tuple[str, list[str]]]:
+    out = [("verdict", output.verdict.basis)]
+    out += [(f"sections[{i}]", s.evidence) for i, s in enumerate(output.sections)]
+    out += [(f"support_needed[{i}]", s.evidence)
+            for i, s in enumerate(output.support_needed)]
+    return out
+
+
+def _step5_prose(output: Step5Output) -> list[tuple[str, str]]:
+    out = [("summary", output.summary), ("why_here", output.why_here),
+           ("verdict", output.verdict.statement + " " + output.verdict.counterpoint)]
+    for i, section in enumerate(output.sections):
+        out.append((f"sections[{i}]", section.body + " " + (section.takeaway or "")))
+    for i, item in enumerate(output.support_needed):
+        out.append((f"support_needed[{i}]", item.item + " " + item.why))
+    out += [(f"questions[{i}]", q)
+            for i, q in enumerate(output.questions_for_the_client)]
+    return out
+
+
+#: 本文から数値を拾う正規表現。桁区切り・小数・「万」「億」に対応します。
+#: 「約5万人」を 5 として見逃すと、いちばん起きやすい書き換えが素通りします。
+_NUMBER = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(万|億)?")
+
+#: 数値として拾っても意味のないもの。「2020年」「1つ目」「3つの理由」のような、
+#: 文章の部品として出てくる小さい整数と年です。ここを弾かないと、正しい文が
+#: 捏造として落ちます。単位（万・億）が付くものは除きます。
+_HARMLESS = {float(n) for n in range(0, 101)} | {float(y) for y in range(1900, 2101)}
+
+_SCALE = {"万": 10_000.0, "億": 100_000_000.0}
+
+
+def invented_numbers(text: str, known: set[str]) -> list[str]:
+    """本文にあって、入力に無かった数値。
+
+    完全な検出ではありません。狙いは「丸めながらの書き換え」で、これがいちばん
+    起きやすく、いちばん気づかれません（「13,268人」が「約1.3万人」になるのは
+    構いませんが、「約2万人」になったら別の数字です）。
+
+    割合は %表記 と 小数 のどちらでも書けるので、100 倍・100 分の1 も同じ数と
+    して扱います。ここを厳しくすると、正しい「27.9%」が落ちます。
+    """
+    numbers = {float(k) for k in known if _is_number(k)}
+    found: list[str] = []
+    for match in _NUMBER.finditer(text or ""):
+        raw, suffix = match.group(1).rstrip("."), match.group(2)
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            continue
+        if suffix:
+            value *= _SCALE[suffix]
+        elif value in _HARMLESS:
+            continue
+        if _matches(value, numbers, _significant_digits(raw)):
+            continue
+        found.append(raw + (suffix or ""))
+    return found
+
+
+def _significant_digits(raw: str) -> int:
+    """書かれた桁数。「49万」は2桁、「13,268」は5桁。"""
+    digits = raw.replace(",", "").replace(".", "").lstrip("0")
+    return max(1, len(digits))
+
+
+def _matches(value: float, numbers: set[float], digits: int) -> bool:
+    """同じ数と見なせるか。
+
+    **書かれた桁数まで丸めて**比べます。読み物として渡す文書で
+    「494,517人」と書けとは言えません。「約49万人」は正しい書き方で、
+    落としてはいけない。一方「約5万人」は別の数で、これは落とします。
+
+    割合は %表記 と 小数 のどちらでも書けるので、100 倍・100 分の1 も
+    同じ数として扱います。ここを厳しくすると、正しい「27.9%」が落ちます。
+    """
+    for candidate in (value, value / 100.0, value * 100.0):
+        for known in numbers:
+            rounded = _round_to(known, digits)
+            if abs(candidate - rounded) <= max(abs(candidate), 1.0) * 1e-9:
+                return True
+    return False
+
+
+def _round_to(value: float, digits: int) -> float:
+    if value == 0:
+        return 0.0
+    exponent = math.floor(math.log10(abs(value)))
+    return round(value, -(exponent - digits + 1))
+
+
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _forbidden_predictions_in(haystack: str) -> list[TraceProblem]:
+    return [TraceProblem(where="report",
+                         problem=f"予測にあたる語が含まれています: {word!r}")
+            for word in FORBIDDEN_PREDICTIONS if word in haystack]

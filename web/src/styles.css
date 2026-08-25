@@ -751,3 +751,45 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ----------------------------------------- 顧客提出用レポート（散文） */
+.report__verdict {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  background: #2b6cb0;
+  color: #fff;
+  font-size: 0.78rem;
+}
+.report__prose { font-size: 0.88rem; line-height: 1.85; }
+.report__prose h4 {
+  margin: 1.1rem 0 0.35rem;
+  font-size: 0.92rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--line, #e5e9ef);
+}
+.report__prose p { margin: 0 0 0.7rem; }
+.report__prose ul { margin: 0 0 0.7rem; padding-left: 1.2rem; }
+.report__takeaway {
+  margin: 0 0 0.4rem !important;
+  padding: 0.35rem 0.6rem;
+  border-left: 3px solid #2b6cb0;
+  background: #f4f8fd;
+  font-weight: 600;
+}
+.report__counterpoint {
+  padding: 0.45rem 0.6rem;
+  background: #fffbeb;
+  border-left: 3px solid #d97706;
+}
+.report__support { margin-bottom: 0.8rem; }
+.report__support strong { display: block; }
+.report__support p { margin: 0.15rem 0 0; }
+.report__judgement-note {
+  margin-top: 1.2rem !important;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line, #e5e9ef);
+  font-size: 0.8rem;
+  color: #6b7280;
+}
