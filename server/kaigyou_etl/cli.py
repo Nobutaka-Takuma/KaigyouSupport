@@ -288,6 +288,64 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     return cmd_status(argparse.Namespace(json=False))
 
 
+def cmd_new_analysis(args: argparse.Namespace) -> int:
+    """分析ジョブを1件作る。
+
+    API にも同じ入口（POST /api/analysis）がありますが、こちらは HTTP
+    クライアントが要りません。PowerShell の `curl` は Invoke-WebRequest の
+    別名で -X を受け付けないなど、環境ごとの作法の違いが最初の障害になります。
+    このプロジェクトの操作は全部 `python -m kaigyou_etl` で済むので、
+    ジョブ作成も同じ入口に置きます。
+    """
+    from kaigyou_api.deps import DISCLAIMER
+    from kaigyou_core.analysis import (
+        DEFAULT_CATEGORY,
+        default_prefecture,
+        prefecture_at,
+        resolve_mesh_size,
+    )
+    from kaigyou_core.dataset import build_dataset
+    from kaigyou_core.scoring import ScoringModel
+    from kaigyou_intel import jobs
+    from kaigyou_intel.projection import base_data_hash, to_jsonable
+
+    scoring = cfg.scoring_config()
+    profile = args.profile or scoring.get("active_profile")
+    model = ScoringModel(scoring, profile)
+
+    with connect() as conn:
+        prefecture_code = default_prefecture(conn, prefecture_at(conn, args.lat, args.lng))
+        mesh_size_m = resolve_mesh_size(conn, None, prefecture_code)
+        print(f"基礎データを作成しています（{prefecture_code} / メッシュ {mesh_size_m}m）...")
+        dataset = to_jsonable(build_dataset(
+            conn, args.lat, args.lng, args.radius,
+            prefecture_code=prefecture_code, mesh_size_m=mesh_size_m,
+            profile=profile,
+            max_clinics=int((cfg.analysis_config().get("limits") or {})
+                            .get("max_clinics_in_projection", 20)),
+            disclaimer=DISCLAIMER))
+
+        job_id = jobs.create_job(
+            conn, lat=args.lat, lng=args.lng, radius_m=args.radius,
+            dataset=dataset, base_hash=base_data_hash(dataset),
+            business_type=DEFAULT_CATEGORY, location_name=args.name, profile=profile)
+
+    population = ((dataset.get("demand") or {}).get("residents") or {}) \
+        .get("by_radius", {}).get(str(args.radius), {}).get("population")
+    clinics = ((dataset.get("competition") or {}).get("clinics_in_radius") or {}).get("count")
+    print(f"ジョブを作成しました: {job_id}")
+    print(f"  地点        {args.lat}, {args.lng} / 半径 {args.radius}m"
+          + (f" / {args.name}" if args.name else ""))
+    print(f"  プロファイル {profile}")
+    if population is not None:
+        print(f"  商圏人口    {population:,} 人 / 歯科医院 {clinics} 件")
+    print()
+    print("次のどちらかを実行してください:")
+    print("  python -m kaigyou_etl analyze --dry-run step1.txt   # 送信内容の確認（課金なし）")
+    print("  python -m kaigyou_etl analyze --once                # STEP1 を実行（要 APIキー）")
+    return EXIT_OK
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     """商圏インテリジェンスの worker。
 
@@ -305,11 +363,24 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         # 課金する前に、何が送られるかを見るための道具。API は叩きません。
         with connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id FROM analysis_jobs WHERE status IN "
-                            "('queued','running','failed') ORDER BY created_at LIMIT 1")
-                row = cur.fetchone()
+                if args.job:
+                    cur.execute("SELECT id, location_name FROM analysis_jobs WHERE id = %s",
+                                (args.job,))
+                    row, waiting = cur.fetchone(), 1
+                else:
+                    # worker が次に拾うのと同じ順（古い順）。「送られる内容」を
+                    # 見るための道具なので、実際に送られるものを見せます。
+                    cur.execute(
+                        "SELECT id, location_name FROM analysis_jobs "
+                        "WHERE status IN ('queued','running','failed') "
+                        "ORDER BY created_at LIMIT 1")
+                    row = cur.fetchone()
+                    cur.execute("SELECT count(*) AS n FROM analysis_jobs "
+                                "WHERE status IN ('queued','running','failed')")
+                    waiting = cur.fetchone()["n"]
             if row is None:
-                print("待っているジョブがありません。先に POST /api/analysis で作成してください。")
+                print("待っているジョブがありません。")
+                print("  python -m kaigyou_etl new-analysis --lat 35.6717 --lng 139.7650")
                 return EXIT_OK
             job_id = str(row["id"])
             job = _jobs.get_job(conn, job_id, include_base_data=True)
@@ -319,11 +390,16 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         system = cfg.prompt_text(settings["prompt"])
         body = _json.dumps(payload, ensure_ascii=False, indent=1)
 
+        if waiting > 1 and not args.job:
+            print(f"待っているジョブ {waiting} 件のうち、worker が次に拾うものを表示します。"
+                  "（--job <id> で指定できます）")
         out = Path(args.dry_run)
         out.write_text(f"===== system ({settings['prompt_version']}) =====\n"
                        f"{system}\n\n===== user =====\n{body}\n", encoding="utf-8")
         size = len(system.encode()) + len(body.encode())
-        print(f"ジョブ {job_id} / STEP1 に送る内容を書き出しました: {out}")
+        label = f"ジョブ {job_id}" + (f"（{row['location_name']}）"
+                                       if row.get("location_name") else "")
+        print(f"{label} / STEP1 に送る内容を書き出しました: {out}")
         print(f"  モデル      {settings['model']}（effort={settings['effort']}）")
         print(f"  入力サイズ  {size:,} bytes  ≒ {size // 2:,} トークン前後（日本語の概算）")
         print(f"  Web検索     {'あり' if settings['web_search'] else 'なし'}")
@@ -526,6 +602,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "（tblT001141H22.txt なら 22）")
     p.set_defaults(func=cmd_load_local)
 
+    p = sub.add_parser("new-analysis", help="商圏分析ジョブを1件作る")
+    p.add_argument("--lat", type=float, required=True)
+    p.add_argument("--lng", type=float, required=True)
+    p.add_argument("--radius", type=int, default=1000, help="商圏半径（m）")
+    p.add_argument("--name", default=None, help="レポートに載せる地点名")
+    p.add_argument("--profile", default=None,
+                   help="スコアリングプロファイル（省略時は active_profile）")
+    p.set_defaults(func=cmd_new_analysis)
+
     p = sub.add_parser("analyze", help="商圏インテリジェンスの worker を動かす")
     p.add_argument("--once", action="store_true",
                    help="待っているジョブを1件処理して終了する")
@@ -533,6 +618,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ジョブが無いときの待ち時間（秒）")
     p.add_argument("--dry-run", metavar="FILE",
                    help="APIを呼ばずに、STEP1へ送る内容をファイルへ書き出す")
+    p.add_argument("--job", metavar="ID", default=None,
+                   help="対象のジョブID（省略時は worker が次に拾うもの）")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")

@@ -396,3 +396,32 @@ def test_step1_refuses_an_output_whose_references_do_not_resolve(dataset, monkey
 
     with pytest.raises(step1_features.StepFailed, match="F404"):
         step1_features.run(dataset)
+
+
+# ----------------------------------------------- PowerShell から使えること
+def test_a_job_can_be_created_without_an_http_client():
+    """ジョブ作成が CLI にもあること。
+
+    PowerShell の `curl` は Invoke-WebRequest の別名で -X を受け付けません。
+    このプロジェクトの操作は全部 `python -m kaigyou_etl` で済むので、
+    ジョブ作成だけ HTTP クライアントを要求すると、そこが最初の障害になります。
+    """
+    import argparse
+
+    from kaigyou_etl.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["new-analysis", "--lat", "35.6717", "--lng", "139.765",
+                              "--name", "銀座4丁目", "--profile", "pediatric"])
+    assert isinstance(args, argparse.Namespace)
+    assert (args.lat, args.lng, args.radius) == (35.6717, 139.765, 1000)
+    assert args.func.__name__ == "cmd_new_analysis"
+
+
+def test_the_dry_run_can_target_one_job():
+    """作った直後のジョブを見たいことがある。worker の順番とは別。"""
+    from kaigyou_etl.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["analyze", "--dry-run", "step1.txt", "--job", "abc-123"])
+    assert args.dry_run == "step1.txt" and args.job == "abc-123"

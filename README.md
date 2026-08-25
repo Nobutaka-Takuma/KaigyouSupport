@@ -942,6 +942,56 @@ Demand が90以上になる」**という報告です。
 
 ---
 
+## 商圏インテリジェンス・エンジン（Phase 1〜2）
+
+`/api/dataset` の基礎JSONを入力に、4ステップの推論を経て1本のレポートにする
+オーケストレーション。**現在は STEP1（商圏特徴抽出）まで**実装済みです。
+
+### 使い方（すべて PowerShell で完結します）
+
+```powershell
+python -m kaigyou_etl migrate                       # 017（4テーブル）
+pip install anthropic
+
+# 1. ジョブを作る（HTTPクライアント不要）
+python -m kaigyou_etl new-analysis --lat 35.6717 --lng 139.7650 --name "銀座4丁目" --profile pediatric
+
+# 2. 送信内容を確認する（APIを呼ばない＝課金なし）
+python -m kaigyou_etl analyze --dry-run step1.txt
+
+# 3. 実行する
+$env:ANTHROPIC_API_KEY = 'sk-ant-...'
+python -m kaigyou_etl analyze --once
+```
+
+`python -m kaigyou_etl doctor` が、テーブル・パッケージ・APIキーのどれが
+足りないかを分けて報告します。直し方がそれぞれ違うためです。
+
+> **PowerShell の `curl` は使えません。** `Invoke-WebRequest` の別名で、
+> `-X POST` を受け付けません。HTTP から叩きたい場合は `curl.exe`（実体のcurl）か
+> `Invoke-RestMethod -Method Post` を使ってください。上の CLI ならその問題は
+> ありません。
+
+### API
+
+| エンドポイント | 内容 |
+|---|---|
+| `POST /api/analysis` | ジョブ作成（`new-analysis` と同じ） |
+| `GET /api/analysis/{job_id}` | 進捗・各ステップの出力・トークン使用量 |
+| `POST /api/analysis/{job_id}/steps/{n}/retry` | そのステップ以降をやり直す |
+| `GET /api/analysis/{job_id}/report` | 最終レポート（STEP4 実装後） |
+
+分析は Vercel では動きません。worker はワークステーションで動かします
+（4ステップ＋Web検索はサーバレス関数の実行時間に収まらないため）。
+
+### まだ無いもの
+
+STEP2〜4、UIのボタン、レポート画面。仕様書の Phase 3 以降です。
+STEP1 の出力を見てプロンプトを固めてから進めます。
+
+
+---
+
 ## API
 
 | エンドポイント | 内容 |
