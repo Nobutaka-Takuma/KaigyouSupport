@@ -25,7 +25,7 @@ from kaigyou_core.analysis import (
     prefecture_name,
     facility_counts,
     land_prices_near,
-    load_distributions,
+    resolve_distributions,
     resolve_mesh_size,
     walk_network_status,
 )
@@ -35,7 +35,6 @@ from kaigyou_core.scoring import (
     ScoringModel,
     augment_specialty_metrics,
     competition_specialties,
-    scope_key,
 )
 
 router = APIRouter()
@@ -103,8 +102,8 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     metrics = analyze_point(conn, lat, lng, radius_m, category, mesh_size_m, catchment)
     # 科目で絞った件数と比率。どの科目が要るかはプロファイルの設定が決めます。
     augment_specialty_metrics(metrics, competition_specialties(cfg.scoring_config()))
-    scope = scope_key(mesh_size_m, radius_m, prefecture_code)
-    distributions = load_distributions(conn, scope)
+    scope, distributions = resolve_distributions(
+        conn, mesh_size_m, radius_m, prefecture_code, cfg.scoring_config())
     scores = model.score(metrics, distributions)
 
     # Every configured profile, from the same metrics. The catchment sweep is
@@ -225,6 +224,9 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         "land_price_points": metrics.get("land_price_points"),
         "land_price_basis": metrics.get("land_price_basis"),
         "scores": scores,
+        # どの集合から作った目盛りで採点したか。県によって違うことがあるので、
+        # 90点が何を意味するかを読み手が確かめられるように返します。
+        "normalization_scope": scope,
         "scores_by_profile": other_profiles,
         "warnings": warnings,
     }

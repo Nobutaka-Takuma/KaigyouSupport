@@ -234,3 +234,104 @@ def test_a_profile_can_add_an_input_without_touching_code():
     model = _model({"establishments": 1.0})
     assert model.demand({"establishments": 1000},
                         _dists("establishments", p05=10, p95=1000)).value == 100
+
+
+# ---------------------------------------------------- 目盛りを作る集合
+#
+# 「静岡の市街地はどこにピンを置いても Demand が90以上になる」という報告への
+# 回帰テスト。合成した農村県で測ると、人口が 30,737〜70,792 人（2.3倍）ある
+# 市街地 24 件が、全部ちょうど 100 点になっていました。県全域を目盛りにすると
+# p95 が市街地の下限より低いところに来るためで、点数は出ているのに地点を
+# 選ぶ手掛かりにはなりません。
+
+def _scale(values, low_q=0.05, high_q=0.95):
+    ordered = sorted(values)
+
+    def pick(q):
+        return ordered[min(len(ordered) - 1, max(0, round(q * (len(ordered) - 1))))]
+
+    return pick(low_q), pick(high_q)
+
+
+def _place(value, low, high):
+    return max(0.0, min(100.0, 100.0 * (value - low) / (high - low)))
+
+
+def test_a_scale_made_from_farmland_cannot_separate_town_centres():
+    """病理そのもの。県全域を目盛りにすると、市街地が全部上限に張り付く。"""
+    # 実験に使った合成県と同じ比率（農村 438 : 市街地 24 = 462 メッシュ）。
+    # 市街地が全体の 5% しかないので、p95 が市街地の下限のところに来ます。
+    rural = [200 + i * 4 for i in range(438)]          # 農村・山林
+    towns = [30000 + i * 1700 for i in range(24)]      # 人口が 2.3 倍違う市街地
+    low, high = _scale(rural + towns)
+
+    assert high <= min(towns), "p95 が市街地の下限より下に来ていない（前提が崩れている）"
+    scored = [_place(v, low, high) for v in towns]
+    assert min(scored) == 100.0 and max(scored) == 100.0, (
+        "この集合では市街地が全部上限に張り付くはず（それが直したい症状）")
+
+
+def test_a_scale_made_from_candidate_sites_separates_them():
+    """目盛りを候補地から作れば、同じ市街地に差が付く。"""
+    towns = [30000 + i * 1700 for i in range(24)]
+    low, high = _scale(towns)
+
+    scored = [_place(v, low, high) for v in towns]
+    assert max(scored) - min(scored) > 30, "候補地どうしで差が付いていない"
+
+
+def test_the_reference_set_is_the_catchments_that_have_a_clinic():
+    """候補地の選び方に閾値を置かない。誰も山の中では開業していない。"""
+    from kaigyou_etl.scores import _reference_rows
+
+    rows = [{"facility_count": 0, "population": 300} for _ in range(400)]
+    rows += [{"facility_count": 2, "population": 30000} for _ in range(60)]
+
+    scale_rows, reference, fallback = _reference_rows(rows, "with_clinics", minimum=50)
+    assert reference == "with_clinics" and fallback is False
+    assert len(scale_rows) == 60
+    assert all(r["facility_count"] > 0 for r in scale_rows)
+
+
+def test_too_few_candidates_falls_back_and_says_so():
+    """候補地が少なすぎる県では目盛りを作れない。黙って作らない。"""
+    from kaigyou_etl.scores import _reference_rows
+
+    rows = [{"facility_count": 0, "population": 300} for _ in range(400)]
+    rows += [{"facility_count": 1, "population": 9000} for _ in range(5)]
+
+    scale_rows, reference, fallback = _reference_rows(rows, "with_clinics", minimum=50)
+    assert (reference, fallback) == ("all", True)
+    assert len(scale_rows) == 405
+
+
+def test_the_scale_used_is_part_of_the_scope_key():
+    """目盛りの作り方が違えば、同じ90点でも別のことを指す。だから鍵に入れる。
+
+    入れないと、県全域で作った目盛りを候補地基準の得点に黙って使えてしまい、
+    しかも数字はもっともらしいままです。
+    """
+    from kaigyou_core.scoring import scope_key
+
+    assert scope_key(500, 1000, "13", "with_clinics") != scope_key(500, 1000, "13", "all")
+    assert scope_key(500, 1000, "13", "with_clinics").endswith(":with_clinics")
+
+
+def test_an_input_at_the_end_of_the_scale_is_reported_as_such():
+    """上限に達した入力は、そこから先の違いを捨てている。同点は「測れていない」。"""
+    model = ScoringModel({
+        "profiles": {"p": {"demand_weights": {"population": 1.0}}},
+        "normalization": {"method": "minmax_p05_p95", "clamp": [0, 100],
+                          "min_weight_coverage": 0.5},
+    }, "p")
+    distributions = {"population": Distribution(
+        metric="population", p05=1000.0, p95=20000.0, sample_count=500)}
+
+    ceiling = model.demand({"population": 90000}, distributions)
+    assert ceiling.value == 100.0
+    assert ceiling.saturated == ["population"]
+    assert "見分けられません" in ceiling.as_dict()["saturated_note"]
+
+    middle = model.demand({"population": 10000}, distributions)
+    assert middle.saturated == []
+    assert "saturated" not in middle.as_dict()

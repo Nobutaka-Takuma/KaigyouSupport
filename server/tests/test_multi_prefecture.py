@@ -188,8 +188,10 @@ def test_scoring_a_prefecture_leaves_another_prefectures_ranking_alone(db, tmp_p
         finally:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM mesh_scores WHERE radius_m = %s", (model_radius,))
+                # scope の末尾には目盛りの作り方（:with_clinics 等）が付くので、
+                # 前方一致では拾えません。
                 cur.execute("DELETE FROM metric_distributions WHERE scope LIKE %s",
-                            (f"%pref{OTHER_PREFECTURE}",))
+                            (f"%pref{OTHER_PREFECTURE}%",))
                 cur.execute("DELETE FROM metric_distributions WHERE scope LIKE %s",
                             (f"%r{model_radius}%",))
             conn.commit()

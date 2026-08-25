@@ -46,7 +46,7 @@ from kaigyou_core.analysis import (
     catchment_geojson,
     default_prefecture,
     land_prices_near,
-    load_distributions,
+    resolve_distributions,
     prefecture_at,
     prefecture_name,
     resolve_mesh_size,
@@ -63,7 +63,6 @@ from kaigyou_core.scoring import (
     ScoringModel,
     augment_specialty_metrics,
     competition_specialties,
-    scope_key,
 )
 
 #: Bumped when the shape changes in a way that would break a reader.
@@ -712,8 +711,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     comparison_metrics = (metrics if comparison_radius == radius_m else
                           analyze_point(conn, lat, lng, comparison_radius, category,
                                         mesh_size_m or 1000, catchment, specialty))
-    scope = scope_key(mesh_size_m or 1000, radius_m, prefecture_code)
-    distributions = load_distributions(conn, scope)
+    scope, distributions = resolve_distributions(
+        conn, mesh_size_m or 1000, radius_m, prefecture_code, scoring_config)
 
     scores = []
     for name in (scoring_config.get("profiles") or {}):
@@ -889,6 +888,11 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         "regulation": _zoning(conn, lat, lng, radius_m),
         "scores": {
             "normalization_scope": scope,
+            "normalization_reference": scope.rsplit(":", 1)[-1],
+            "normalization_reference_note": (
+                "得点の目盛りをどの集合から作ったか。with_clinics は「県内で歯科医院が"
+                "実在する商圏」。県全域から作ると、農村が大半の県では市街地がどこでも"
+                "上限に張り付きます。"),
             "by_profile": scores,
             "note": ("スコアは同一都道府県内のメッシュ分布に対する相対値です。"
                      "暫定モデルであり、実績データによる較正は行っていません。"),

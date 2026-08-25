@@ -33,6 +33,7 @@ from kaigyou_core.scoring import (
     competition_specialties,
     derived_metrics,
     distributions_from_rows,
+    normalization_reference,
     scope_key,
     specialty_count_metric,
 )
@@ -77,7 +78,10 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
     # プロファイルの設定が決めるので、ここで設定から引いてきます。
     pairs = competition_specialties(config)
     metrics = list(DISTRIBUTION_METRICS) + derived_metrics(config)
+    reference = normalization_reference(config)
+    min_reference = int((config.get("normalization") or {}).get("min_reference_sample", 50))
     summary: dict[str, Any] = {"radii": radii, "mesh_size_m": mesh_size_m,
+                               "normalization_reference": reference,
                                "specialty_metrics": derived_metrics(config), "scopes": {}}
 
     for radius in radii:
@@ -89,11 +93,22 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
                                progress=progress)
         for row in rows:
             augment_specialty_metrics(row, pairs)
-        scope = scope_key(mesh_size_m, radius, prefecture_code)
+
+        # 目盛りを作る集合。県全域から作ると、農村が大半を占める県では p95 が
+        # 市街地の下限より低いところに来て、市街地がどこでも上限に張り付きます
+        # （合成した農村県では、人口が 2.3 倍違う市街地 24 件が全部ちょうど
+        # 100 点になりました）。開業地を選ぶ人が比べたいのは候補地どうしです。
+        scale_rows, used_reference, fallback = _reference_rows(
+            rows, reference, min_reference)
+        if fallback and progress:
+            progress(f"  注意: 歯科医院のある商圏が{len(scale_rows)}件しかないため、"
+                     f"目盛りは人口のある商圏すべてから作ります"
+                     f"（{min_reference}件以上で候補地のみに切り替わります）。")
+        scope = scope_key(mesh_size_m, radius, prefecture_code, used_reference)
         written = 0
         for metric in metrics:
             values = sorted(
-                float(r[metric]) for r in rows
+                float(r[metric]) for r in scale_rows
                 if r.get(metric) is not None
             )
             if len(values) < 2:
@@ -122,9 +137,33 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
                     {"metric": metric, "scope": scope, **stats},
                 )
             written += 1
-        summary["scopes"][scope] = {"meshes": len(rows), "metrics": written}
+        summary["scopes"][scope] = {
+            "meshes_swept": len(rows),
+            "meshes_in_scale": len(scale_rows),
+            "reference": used_reference,
+            "metrics": written,
+        }
     conn.commit()
     return summary
+
+
+
+def _reference_rows(rows: Sequence[Mapping[str, Any]], reference: str,
+                    minimum: int) -> tuple[list[Mapping[str, Any]], str, bool]:
+    """正規化の目盛りを作る行を選ぶ。
+
+    ``with_clinics`` は「歯科医院が実在する商圏」。閾値をひとつも置かずに、
+    山林と生活圏を分けられます（誰も山の中では開業していないので）。
+    候補地が少なすぎる県では目盛りが作れないので、全件に戻して、戻したことを
+    呼び出し元に返します。黙って戻すと、県によって意味の違う目盛りが同じ名前で
+    並ぶことになります。
+    """
+    if reference != "with_clinics":
+        return list(rows), "all", False
+    candidates = [r for r in rows if (r.get("facility_count") or 0) > 0]
+    if len(candidates) < minimum:
+        return list(rows), "all", True
+    return candidates, "with_clinics", False
 
 
 def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
@@ -150,11 +189,24 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     models = ([ScoringModel(config, name) for name in profiles] if profiles
               else [ScoringModel(config, profile)])
     radius = radius_m or models[0].mesh_scoring_radius_m
-    scope = scope_key(mesh_size_m, radius, prefecture_code)
+    reference = normalization_reference(config)
+    scope = scope_key(mesh_size_m, radius, prefecture_code, reference)
 
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM metric_distributions WHERE scope = %s", (scope,))
         distributions = distributions_from_rows(cur.fetchall())
+    if not distributions:
+        # 候補地が少ない県では refresh-stats が all に落としています。同じ
+        # 判断をここでも繰り返すより、書かれている方を探すほうが確実です。
+        for alternative in ("all", "with_clinics"):
+            fallback_scope = scope_key(mesh_size_m, radius, prefecture_code, alternative)
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM metric_distributions WHERE scope = %s",
+                            (fallback_scope,))
+                distributions = distributions_from_rows(cur.fetchall())
+            if distributions:
+                scope = fallback_scope
+                break
     if not distributions:
         raise RuntimeError(
             f"no normalisation statistics for scope {scope}; run refresh-stats first"

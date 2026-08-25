@@ -134,14 +134,25 @@ class ComponentScore:
     parts: dict[str, float | None] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
     note: str | None = None
+    #: 目盛りの上端・下端に張り付いた入力。ここに名前があるということは、
+    #: その指標では**この地点と、もっと大きい/小さい地点の区別が付いていない**
+    #: ということです。同点は「同じくらい」ではなく「測れていない」なので、
+    #: 黙って並べません。
+    saturated: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "value": None if self.value is None else round(self.value, 1),
             "parts": {k: (None if v is None else round(v, 1)) for k, v in self.parts.items()},
             "missing": self.missing,
             "note": self.note,
         }
+        if self.saturated:
+            out["saturated"] = self.saturated
+            out["saturated_note"] = (
+                "この指標は目盛りの端に達しています。これより大きい（小さい）地点と"
+                "同じ点数になるため、この成分では地点間の差を見分けられません。")
+        return out
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -269,7 +280,18 @@ class ScoringModel:
         note = None
         if value is None and any(v is not None for v in parts.values()):
             note = "算出に必要な指標が不足しているため未算出"
-        return ComponentScore(value, parts, missing, note)
+        return ComponentScore(value, parts, missing, note, self._saturated(parts))
+
+    def _saturated(self, parts: Mapping[str, float | None]) -> list[str]:
+        """目盛りの端に達した入力の名前。
+
+        端に達した入力は、そこから先の違いを捨てています。農村が大半の県で
+        県全域を目盛りにすると市街地が全部上限に張り付く、というのがまさに
+        これで、点数は出ているのに地点を選ぶ手掛かりにはなりません。
+        """
+        low, high = self.clamp
+        return sorted(k for k, v in parts.items()
+                      if v is not None and (v >= high - 1e-9 or v <= low + 1e-9))
 
     def competition(self, m: Mapping[str, Any],
                     distributions: Mapping[str, Distribution]) -> ComponentScore:
@@ -380,7 +402,7 @@ class ScoringModel:
         note = None
         if value is None and any(v is not None for v in parts.values()):
             note = "算出に必要な指標が不足しているため未算出"
-        return ComponentScore(value, parts, missing, note)
+        return ComponentScore(value, parts, missing, note, self._saturated(parts))
 
     def cost(self, m: Mapping[str, Any],
              distributions: Mapping[str, Distribution]) -> ComponentScore:
@@ -489,6 +511,10 @@ class ScoringModel:
                      else round(components["cost"].value, 1)),
             "overall": None if overall is None else round(overall, 1),
             "unavailable_components": unavailable,
+            # どの成分が目盛りの端に達しているか。ここに名前が並ぶ地点どうしは、
+            # 点数が同じでも「同じくらい」ではなく「区別できていない」。
+            "saturated_components": sorted(
+                k for k, c in components.items() if c.saturated),
             # Named separately from "missing": these are why there is no
             # overall score at all, rather than one computed without them.
             "missing_required_components": required,
@@ -514,5 +540,24 @@ def distributions_from_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Dist
     return out
 
 
-def scope_key(mesh_size_m: int, radius_m: int, prefecture_code: str) -> str:
-    return f"mesh:{mesh_size_m}:r{radius_m}:pref{prefecture_code}"
+#: 正規化の目盛りを、どの集合から作ったか。
+#:
+#:   all           人口のある商圏すべて
+#:   with_clinics  歯科医院が実在する商圏だけ（＝候補になりうる場所）
+#:
+#: 目盛りを作る集合が違えば、同じ 90 点でも別のことを指します。だから鍵に
+#: 入れます。入れないと、片方で作った目盛りをもう片方の得点に黙って使えて
+#: しまい、しかも数字はもっともらしいままです。
+NORMALIZATION_REFERENCES = ("all", "with_clinics")
+DEFAULT_NORMALIZATION_REFERENCE = "with_clinics"
+
+
+def normalization_reference(config: Mapping[str, Any]) -> str:
+    value = str((config.get("normalization") or {}).get(
+        "reference", DEFAULT_NORMALIZATION_REFERENCE))
+    return value if value in NORMALIZATION_REFERENCES else DEFAULT_NORMALIZATION_REFERENCE
+
+
+def scope_key(mesh_size_m: int, radius_m: int, prefecture_code: str,
+              reference: str = DEFAULT_NORMALIZATION_REFERENCE) -> str:
+    return f"mesh:{mesh_size_m}:r{radius_m}:pref{prefecture_code}:{reference}"

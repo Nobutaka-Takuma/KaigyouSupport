@@ -18,6 +18,7 @@ from kaigyou_core.scoring import (
     augment_specialty_metrics,
     competition_specialties,
     distributions_from_rows,
+    normalization_reference,
     scope_key,
 )
 
@@ -411,6 +412,25 @@ def facility_counts(conn: psycopg.Connection, lat: float, lng: float,
         return {int(r["radius_m"]): r["facility_count"] for r in cur.fetchall()}
 
 
+def resolve_distributions(conn: psycopg.Connection, mesh_size_m: int, radius_m: int,
+                          prefecture_code: str,
+                          config: Mapping[str, Any]) -> tuple[str, dict[str, Distribution]]:
+    """設定の目盛りを探し、無ければ実際に書かれている方を使う。
+
+    目盛りは「歯科医院が実在する商圏」から作るのが既定ですが、候補地が
+    少ない県では refresh-stats が全件に落とします。設定どおりの鍵だけを見て
+    「未計算」と答えると、実際には目盛りがあるのにスコアが出ません。
+    どちらを使ったかは呼び出し元が応答に載せます。
+    """
+    preferred = normalization_reference(config)
+    for reference in (preferred, "all", "with_clinics"):
+        scope = scope_key(mesh_size_m, radius_m, prefecture_code, reference)
+        distributions = load_distributions(conn, scope)
+        if distributions:
+            return scope, distributions
+    return scope_key(mesh_size_m, radius_m, prefecture_code, preferred), {}
+
+
 def load_distributions(conn: psycopg.Connection, scope: str) -> dict[str, Distribution]:
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM metric_distributions WHERE scope = %s", (scope,))
@@ -424,8 +444,8 @@ def score_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     """Analyse a point and score it against the observed mesh distribution."""
     metrics = analyze_point(conn, lat, lng, radius_m, facility_category, mesh_size_m)
     augment_specialty_metrics(metrics, competition_specialties(model.config))
-    scope = scope_key(mesh_size_m, radius_m, prefecture_code)
-    distributions = load_distributions(conn, scope)
+    scope, distributions = resolve_distributions(
+        conn, mesh_size_m, radius_m, prefecture_code, model.config)
     scores = model.score(metrics, distributions)
     scores["normalization_scope"] = scope
     scores["normalization_sample_count"] = max(
