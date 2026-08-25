@@ -933,3 +933,93 @@ def test_a_search_that_could_not_run_is_not_reported_as_nothing_found(monkeypatc
     payload = step2_research.build_input(_step1_for_step2(), {"location": {}})
     with pytest.raises(step2_research.StepFailed, match="Web検索が実行できません"):
         step2_research.run(payload)
+
+
+# --------------------------------------------------- 止まったジョブを再開できる
+def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset):
+    """実測：銀座のジョブが running のまま残り、0 件が出続けました。
+
+    claim_job は queued しか見ません。走り終わった Job の状態を戻していないと、
+    二度と拾われないまま「待っているジョブはありません」になります。
+    """
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
+    jobs.start_step(conn, job_id, 2, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 2, {"external_facts": []}, {})
+    assert jobs.claim_specific(conn, job_id) == job_id  # ここで running になる
+
+    try:
+        assert worker.run_job(conn, job_id) == "blocked"
+        # 未実装で止まったのは失敗ではないので、queued に戻します。queued は
+        # claim_job が拾う唯一の状態なので、実装した次の実行が続きから拾えます。
+        assert jobs.get_job(conn, job_id)["status"] == "queued"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_finished_job_is_marked_completed(conn, dataset, monkeypatch):
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    for number in (1, 2, 3, 4):
+        jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
+        jobs.finish_step(conn, job_id, number, {"n": number}, {})
+    jobs.claim_specific(conn, job_id)
+
+    try:
+        assert worker.run_job(conn, job_id) == "completed"
+        job = jobs.get_job(conn, job_id)
+        assert job["status"] == "completed" and job["completed_at"] is not None
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_failed_job_is_not_picked_up_again_on_its_own(conn, dataset, monkeypatch):
+    """壊れたまま自動で拾い直すと、同じ失敗に何度も課金されます。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.claim_specific(conn, job_id)
+    monkeypatch.setattr(worker, "RUNNERS", {1: _boom})
+
+    try:
+        assert worker.run_job(conn, job_id) == "failed"
+        # failed は claim_job の対象外。壊れたまま自動で拾い直すと、同じ失敗に
+        # 何度も課金されます。
+        assert jobs.get_job(conn, job_id)["status"] == "failed"
+        # 人が名指しすれば再開できること。ここが無いと詰みます。
+        assert jobs.claim_specific(conn, job_id) == job_id
+    finally:
+        _drop_job(job_id)
+
+
+def _boom(_payload):
+    raise RuntimeError("模擬的な失敗")
+
+
+def _drop_job(job_id: str) -> None:
+    """このテストが commit した行を片づける。
+
+    jobs の関数は自分で commit します（worker が落ちても状態が残るように）。
+    そのぶん、テスト側は rollback では消せません。
+    """
+    from kaigyou_core.db import connect
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM analysis_jobs WHERE id = %s", (job_id,))
+        conn.commit()
+
+
+def test_retrying_from_a_step_is_available_from_the_command_line():
+    """PowerShell から止まったジョブを再開できること。"""
+    from kaigyou_etl.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["analyze", "--job", "abc", "--retry", "1"])
+    assert (args.job, args.retry) == ("abc", 1)

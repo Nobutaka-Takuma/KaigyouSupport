@@ -128,6 +128,47 @@ def claim_job(conn: psycopg.Connection) -> str | None:
     return str(row["id"]) if row else None
 
 
+def claim_specific(conn: psycopg.Connection, job_id: str) -> str | None:
+    """この Job を、状態にかかわらず動かす。
+
+    ``claim_job`` は queued しか拾いません。それは worker の自動運転として
+    正しいのですが、止まった Job を人が再開する手段が無いと詰みます。
+    失敗した Job を勝手に拾い直すと、壊れたまま何度も課金されるので、
+    「人が id を指定したときだけ」という形にしてあります。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_jobs SET status = 'running', error_message = NULL, "
+            "started_at = COALESCE(started_at, now()) "
+            "WHERE id = %s AND status <> 'cancelled' RETURNING id", (job_id,))
+        row = cur.fetchone()
+    conn.commit()
+    return str(row["id"]) if row else None
+
+
+def release_job(conn: psycopg.Connection, job_id: str, outcome: str,
+                message: str | None = None) -> None:
+    """走り終わった Job の状態を戻す。
+
+    これが無いと Job は running のまま残り、``claim_job`` は queued しか
+    見ないので二度と拾われません。実測：銀座のジョブが running のまま残り、
+    ``analyze --once`` が「0 件を処理しました」と言い続けました。
+
+    ``blocked``（未実装のステップに当たった）は queued に戻します。失敗では
+    ないので、そのステップを実装した次の実行がそのまま続きから拾います。
+    ``failed`` は failed のままにします。壊れたまま自動で拾い直すと、
+    同じ失敗に何度も課金されます。
+    """
+    status = {"completed": "completed", "blocked": "queued"}.get(outcome, "failed")
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_jobs SET status = %s, error_message = %s, "
+            "completed_at = CASE WHEN %s = 'completed' THEN now() ELSE completed_at END "
+            "WHERE id = %s",
+            (status, (message or "")[:4000] or None, status, job_id))
+    conn.commit()
+
+
 def start_step(conn: psycopg.Connection, job_id: str, number: int,
                payload: Mapping[str, Any], settings: Mapping[str, Any]) -> None:
     with conn.cursor() as cur:

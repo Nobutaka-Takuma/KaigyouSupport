@@ -578,9 +578,32 @@ def cmd_analyze(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return EXIT_ERROR
 
-    if args.once:
-        handled = serve(connect, once=True, progress=print)
-        print(f"{handled} 件を処理しました。")
+    target = args.job
+    if args.retry is not None:
+        # やり直す前に、対象を確定させます。指定が無ければいちばん新しいもの。
+        with connect() as conn:
+            if target is None:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM analysis_jobs "
+                                "ORDER BY created_at DESC LIMIT 1")
+                    row = cur.fetchone()
+                if row is None:
+                    print("ジョブがありません。")
+                    return EXIT_OK
+                target = str(row["id"])
+            _jobs.reset_step(conn, target, args.retry)
+        print(f"ジョブ {target} を STEP{args.retry} からやり直します"
+              f"（STEP{args.retry} 以降の出力は消えました）。")
+
+    if args.once or target:
+        handled = serve(connect, once=True, job_id=target, progress=print)
+        if handled:
+            print(f"{handled} 件を処理しました。")
+            return EXIT_OK
+        # 「0 件」だけだと、待っているジョブが無いのか、あるのに拾えないのかが
+        # 分かりません。実測：失敗した Job が残ったまま 0 件が出続けました。
+        print("0 件を処理しました。")
+        _explain_why_nothing_ran()
         return EXIT_OK
 
     print("worker を起動しました。Ctrl+C で終了します。")
@@ -589,6 +612,39 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\n終了しました。")
     return EXIT_OK
+
+
+def _explain_why_nothing_ran() -> None:
+    """待っているジョブが無い理由を、状態別に言う。
+
+    worker は queued しか拾いません（失敗した Job を自動で拾い直すと、
+    壊れたまま何度も課金されるため）。拾われない Job があるなら、
+    再開の仕方まで書きます。
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT status, count(*) AS n, max(created_at) AS latest,
+                   (array_agg(id ORDER BY created_at DESC))[1] AS newest
+            FROM analysis_jobs GROUP BY status
+        """)
+        rows = {r["status"]: r for r in cur.fetchall()}
+
+    if not rows:
+        print("  ジョブがありません。")
+        print("    python -m kaigyou_etl new-analysis --lat 35.6717 --lng 139.7650")
+        return
+    stuck = [rows[s] for s in ("failed", "running") if s in rows]
+    if not stuck:
+        summary = "、".join(f"{s} {r['n']}件" for s, r in rows.items())
+        print(f"  待っているジョブがありません（{summary}）。")
+        return
+    for row in stuck:
+        label = {"failed": "失敗したまま", "running": "実行中のまま"}[row["status"]]
+        print(f"  {label}のジョブが {row['n']} 件あります。"
+              "worker は queued のものだけを自動で拾います。")
+        print(f"    再開:     python -m kaigyou_etl analyze --job {row['newest']}")
+        print(f"    やり直し: python -m kaigyou_etl analyze --job {row['newest']} --retry 1")
+        print(f"    取り下げ: python -m kaigyou_etl analyze --cancel {row['newest']}")
 
 
 def cmd_generate_sample(_args: argparse.Namespace) -> int:
@@ -785,7 +841,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", metavar="FILE",
                    help="APIを呼ばずに、STEP1へ送る内容をファイルへ書き出す")
     p.add_argument("--job", metavar="ID", default=None,
-                   help="対象のジョブID（省略時はいちばん新しいもの）")
+                   help="対象のジョブID（省略時はいちばん新しいもの）。"
+                        "指定するとそのジョブを状態にかかわらず実行します")
+    p.add_argument("--retry", type=int, metavar="STEP", default=None,
+                   help="このステップからやり直す（それ以降の出力は消えます）")
     p.add_argument("--list", action="store_true", help="ジョブの一覧を表示する")
     p.add_argument("--show", nargs="?", const="", metavar="ID",
                    help="各ステップの出力を読める形で表示（省略時は最新のジョブ）")

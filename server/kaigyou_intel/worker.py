@@ -96,12 +96,17 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
 
 def run_job(conn: psycopg.Connection, job_id: str,
             progress: Callable[[str], None] | None = None) -> str:
-    """1 ジョブを、進める限り進める。"""
+    """1 ジョブを、進める限り進める。
+
+    どの抜け方をしても最後に ``release_job`` を通します。通さないと Job は
+    running のまま残り、``claim_job`` は queued しか見ないので二度と拾われません。
+    """
     say = progress or (lambda _m: None)
     while True:
         number = jobs.next_step(conn, job_id)
         if number is None:
             say(f"  {job_id}: 全ステップ完了")
+            jobs.release_job(conn, job_id, "completed")
             return "completed"
         settings = llm.step_settings(number)
         say(f"  {job_id}: STEP{number} {settings['name']} …")
@@ -109,36 +114,53 @@ def run_job(conn: psycopg.Connection, job_id: str,
             run_step(conn, job_id, number)
         except StepNotImplemented as exc:
             say(f"    停止: {exc}")
+            # 失敗ではないので queued に戻します。そのステップを実装した
+            # 次の実行が、そのまま続きから拾います。
+            jobs.release_job(conn, job_id, "blocked", str(exc))
             return "blocked"
         except Exception as exc:  # noqa: BLE001
             say(f"    失敗: {type(exc).__name__}: {exc}")
-            say(f"    直したら: python -m kaigyou_etl analyze --once"
+            say(f"    直したら: python -m kaigyou_etl analyze --once --job {job_id}"
                 f"  （STEP{number} からやり直します。済んだステップは残ります）")
+            jobs.release_job(conn, job_id, "failed", f"STEP{number}: {exc}")
             return "failed"
 
 
 def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
-          poll_seconds: float = 5.0,
+          poll_seconds: float = 5.0, job_id: str | None = None,
           progress: Callable[[str], None] | None = None) -> int:
     """待っているジョブを拾って回し続ける。
 
     接続は関数で受け取ります。長時間動かすので、都度つなぎ直せるほうが
     ネットワークの切断に強い。
+
+    ``job_id`` を指定すると、その 1 件だけを状態にかかわらず動かします。
+    失敗した Job を自動で拾い直さないぶん、人が名指しで再開する道が要ります。
     """
     say = progress or (lambda _m: None)
     if not llm.is_configured():
         say("ANTHROPIC_API_KEY が未設定です。分析は実行できません。")
         return 1
 
+    if job_id is not None:
+        with connect() as conn:
+            claimed = jobs.claim_specific(conn, job_id)
+            if claimed is None:
+                say(f"ジョブ {job_id} は見つからないか、取り下げ済みです。")
+                return 0
+            say(f"ジョブ {claimed} を開始します")
+            run_job(conn, claimed, progress=say)
+        return 1
+
     handled = 0
     while True:
         with connect() as conn:
-            job_id = jobs.claim_job(conn)
-            if job_id is not None:
-                say(f"ジョブ {job_id} を開始します")
-                run_job(conn, job_id, progress=say)
+            claimed = jobs.claim_job(conn)
+            if claimed is not None:
+                say(f"ジョブ {claimed} を開始します")
+                run_job(conn, claimed, progress=say)
                 handled += 1
         if once:
             return handled
-        if job_id is None:
+        if claimed is None:
             time.sleep(poll_seconds)
