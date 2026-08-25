@@ -622,3 +622,28 @@ def test_the_structured_call_passes_the_schema_as_output_format(monkeypatch):
     assert "format" not in seen["output_config"]
     json.dumps({k: v for k, v in seen.items() if k != "output_format"},
                ensure_ascii=False)
+
+
+def test_the_step_output_can_be_read_without_an_http_client():
+    """STEP の出力を読む手段があること。
+
+    プロンプトを直すかどうかの判断はここを読んでするので、JSON を
+    そのまま出すのでは足りません。
+    """
+    from kaigyou_etl.cli import build_parser
+
+    args = build_parser().parse_args(["analyze", "--show"])
+    assert args.show == ""          # 省略時は最新のジョブ
+    args = build_parser().parse_args(["analyze", "--show", "abc-123"])
+    assert args.show == "abc-123"
+
+
+def test_the_cost_is_computed_from_the_recorded_usage():
+    """使用量は保存してあるので、後から数えられること（要件 §34）。"""
+    from kaigyou_etl.cli import _step_cost
+
+    cost = _step_cost({"model": "claude-sonnet-5",
+                       "input_tokens": 43102, "output_tokens": 3201})
+    assert cost == pytest.approx(43102 / 1e6 * 2 + 3201 / 1e6 * 10)
+    # 知らないモデルなら黙って 0 を返さない。
+    assert _step_cost({"model": "unknown", "input_tokens": 1}) is None

@@ -346,6 +346,58 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+#: 1M トークンあたりの単価（入力, 出力）。実測の使用量から概算を出すためだけに
+#: 使います。請求の正解はコンソール側です。
+_PRICES = {
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-fable-5": (10.0, 50.0),
+}
+
+
+def _step_cost(step: dict) -> float | None:
+    price = _PRICES.get(step.get("model") or "")
+    if not price:
+        return None
+    return ((step.get("input_tokens") or 0) / 1e6 * price[0]
+            + (step.get("output_tokens") or 0) / 1e6 * price[1])
+
+
+def _print_step_output(number: int, output: dict) -> None:
+    """ステップの出力を畳んで見せる。STEP1 以外はまだ JSON のまま。"""
+    if number != 1:
+        import json as _j
+        print("    " + _j.dumps(output, ensure_ascii=False)[:600])
+        return
+
+    facts = output.get("facts") or []
+    patterns = output.get("patterns") or []
+    print(f"\n    FACT（{len(facts)}件）")
+    for fact in facts:
+        place = ""
+        if fact.get("position_label"):
+            place = f"  {fact['position_label']}（{fact.get('benchmark_type', '')}）"
+        print(f"      {fact.get('id')}  {fact.get('statement')}")
+        print(f"            [{fact.get('measure_key')}]{place}")
+
+    print(f"\n    PATTERN（{len(patterns)}件）")
+    for pattern in patterns:
+        print(f"      {pattern.get('id')} [{pattern.get('importance')}] "
+              f"{pattern.get('title')}")
+        print(f"            根拠: {' + '.join(pattern.get('evidence') or [])}")
+        if pattern.get("evidence_summary"):
+            print(f"            要約: {pattern['evidence_summary']}")
+        for question in pattern.get("research_questions") or []:
+            print(f"            調査: {question}")
+
+    if output.get("not_determinable"):
+        print("\n    基礎データからは判断できなかったこと")
+        for item in output["not_determinable"]:
+            print(f"      - {item}")
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     """商圏インテリジェンスの worker。
 
@@ -377,6 +429,42 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             mark = " ←次に実行" if r["status"] == "queued" and r is rows[-1] else ""
             print(f"{when:16s} {r['status']:10s} {name:14s} {r['id']}{mark}")
         print("\nworker は古い順に処理します。不要なものは --cancel <id> で取り下げてください。")
+        return EXIT_OK
+
+    if args.show is not None:
+        # STEP の出力を人が読める形で出す。プロンプトを直すかどうかの判断は
+        # ここを読んでするので、JSON をそのまま出すより畳んで見せます。
+        with connect() as conn:
+            with conn.cursor() as cur:
+                if args.show:
+                    cur.execute("SELECT id, location_name FROM analysis_jobs "
+                                "WHERE id = %s", (args.show,))
+                else:
+                    cur.execute("SELECT id, location_name FROM analysis_jobs "
+                                "ORDER BY created_at DESC LIMIT 1")
+                row = cur.fetchone()
+            if row is None:
+                print("ジョブが見つかりません。")
+                return EXIT_OK
+            job_id = str(row["id"])
+            steps = _jobs.get_steps(conn, job_id)
+
+        name = row["location_name"] or job_id[:8]
+        print(f"ジョブ {job_id}（{name}）")
+        for step in steps:
+            if step["status"] != "completed":
+                print(f"\n  STEP{step['step_number']} {step['step_name']}: "
+                      f"{step['status']}"
+                      + (f" — {step['error_message'][:120]}"
+                         if step["error_message"] else ""))
+                continue
+            price = _step_cost(step)
+            print(f"\n  STEP{step['step_number']} {step['step_name']}  "
+                  f"{step['model']} / {step['prompt_version']}")
+            print(f"    入力 {step['input_tokens'] or 0:,} tok / "
+                  f"出力 {step['output_tokens'] or 0:,} tok"
+                  + (f"  ≒ ${price:.3f}" if price else ""))
+            _print_step_output(step["step_number"], step["output_json"] or {})
         return EXIT_OK
 
     if args.cancel:
@@ -660,6 +748,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--job", metavar="ID", default=None,
                    help="対象のジョブID（省略時はいちばん新しいもの）")
     p.add_argument("--list", action="store_true", help="ジョブの一覧を表示する")
+    p.add_argument("--show", nargs="?", const="", metavar="ID",
+                   help="各ステップの出力を読める形で表示（省略時は最新のジョブ）")
     p.add_argument("--cancel", metavar="ID", default=None,
                    help="ジョブを取り下げる（all で待機中すべて）")
     p.set_defaults(func=cmd_analyze)
