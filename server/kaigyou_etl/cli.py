@@ -371,6 +371,28 @@ def _step_cost(step: dict) -> float | None:
             + (step.get("output_tokens") or 0) / 1e6 * price[1])
 
 
+def _print_step_cost_line(step: dict) -> None:
+    """使ったトークンと概算。
+
+    キャッシュに入ったぶんは input_tokens から抜けます。そこを足さずに出すと
+    「入力 2 tok」になり、数え損ねたように見えます（実測、STEP3）。費用の
+    計算は合っていたので、表示だけの問題でした。
+    """
+    read = step.get("cache_read_tokens") or 0
+    written = step.get("cache_write_tokens") or 0
+    counted = (step.get("input_tokens") or 0) + read + written
+    detail = []
+    if written:
+        detail.append(f"キャッシュ書 {written:,}")
+    if read:
+        detail.append(f"キャッシュ読 {read:,}")
+    price = _step_cost(step)
+    print(f"    入力 {counted:,} tok"
+          + (f"（{' / '.join(detail)}）" if detail else "")
+          + f" / 出力 {step.get('output_tokens') or 0:,} tok"
+          + (f"  ≒ ${price:.3f}" if price else ""))
+
+
 def _print_step_output(number: int, output: dict) -> None:
     """ステップの出力を畳んで見せる。未実装のステップはまだ JSON のまま。"""
     if number == 2:
@@ -378,6 +400,9 @@ def _print_step_output(number: int, output: dict) -> None:
         return
     if number == 3:
         _print_step3(output)
+        return
+    if number == 4:
+        _print_step4(output)
         return
     if number != 1:
         import json as _j
@@ -480,6 +505,46 @@ def _print_step3(output: dict) -> None:
             print(f"      - {entry}")
 
 
+_DECISION_FIELDS = (("主要患者", "primary_patients"),
+                    ("主要に置かない層", "secondary_patients"),
+                    ("競争しない領域", "avoid_competing_on"),
+                    ("患者獲得エリア", "acquisition_area"),
+                    ("来院理由", "reason_to_visit"),
+                    ("医院モデル", "clinic_model"))
+
+
+def _print_step4(output: dict) -> None:
+    print("\n    結論")
+    for line in (output.get("executive_summary") or "").splitlines():
+        print(f"      {line}")
+
+    decision = output.get("decision") or {}
+    print(f"\n    開業方針  confidence={decision.get('confidence')}")
+    for label, key in _DECISION_FIELDS:
+        item = decision.get(key) or {}
+        print(f"      {label}: {item.get('statement')}")
+        print(f"            根拠: {' + '.join(item.get('evidence') or [])}")
+
+    for label, key in (("開業上のメリット", "advantages"), ("リスク", "risks")):
+        entries = decision.get(key) or []
+        print(f"\n    {label}（{len(entries)}件）")
+        for item in entries:
+            print(f"      - {item.get('statement')}")
+            print(f"            根拠: {' + '.join(item.get('evidence') or [])}")
+
+    sections = output.get("sections") or []
+    print(f"\n    レポート本文（{len(sections)}章）"
+          "  ※全文は --report で読めます")
+    for section in sorted(sections, key=lambda s: s.get("number", 0)):
+        tags = " → ".join(b.get("tag", "") for b in section.get("blocks") or [])
+        print(f"      {section.get('number')}. {section.get('title')}  [{tags}]")
+
+    if output.get("actions"):
+        print("\n    次に取るべき行動")
+        for action in output["actions"]:
+            print(f"      - {action.get('statement')}")
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     """商圏インテリジェンスの worker。
 
@@ -540,15 +605,36 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                       + (f" — {step['error_message'][:120]}"
                          if step["error_message"] else ""))
                 continue
-            price = _step_cost(step)
             print(f"\n  STEP{step['step_number']} {step['step_name']}  "
                   f"{step['model']} / {step['prompt_version']}")
-            cached = step.get("cache_read_tokens") or 0
-            print(f"    入力 {step['input_tokens'] or 0:,} tok / "
-                  f"出力 {step['output_tokens'] or 0:,} tok"
-                  + (f" / キャッシュ読 {cached:,} tok" if cached else "")
-                  + (f"  ≒ ${price:.3f}" if price else ""))
+            _print_step_cost_line(step)
             _print_step_output(step["step_number"], step["output_json"] or {})
+        return EXIT_OK
+
+    if args.report is not None:
+        from kaigyou_intel import report as _report
+
+        with connect() as conn:
+            with conn.cursor() as cur:
+                if args.report:
+                    cur.execute("SELECT id FROM analysis_jobs WHERE id = %s",
+                                (args.report,))
+                else:
+                    cur.execute("SELECT id FROM analysis_jobs "
+                                "ORDER BY created_at DESC LIMIT 1")
+                row = cur.fetchone()
+            if row is None:
+                print("ジョブが見つかりません。")
+                return EXIT_OK
+            markdown = _report.markdown_for(conn, str(row["id"]))
+        if markdown is None:
+            print("レポートはまだありません。STEP4 まで完了させてください。")
+            return EXIT_OK
+        if args.out:
+            Path(args.out).write_text(markdown, encoding="utf-8")
+            print(f"書き出しました: {args.out}")
+        else:
+            print(markdown)
         return EXIT_OK
 
     if args.cancel:
@@ -899,6 +985,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "指定するとそのジョブを状態にかかわらず実行します")
     p.add_argument("--retry", type=int, metavar="STEP", default=None,
                    help="このステップからやり直す（それ以降の出力は消えます）")
+    p.add_argument("--report", nargs="?", const="", metavar="ID",
+                   help="レポート（Markdown）を表示する（省略時は最新のジョブ）")
+    p.add_argument("--out", metavar="FILE", default=None,
+                   help="--report の書き出し先")
     p.add_argument("--list", action="store_true", help="ジョブの一覧を表示する")
     p.add_argument("--show", nargs="?", const="", metavar="ID",
                    help="各ステップの出力を読める形で表示（省略時は最新のジョブ）")

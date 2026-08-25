@@ -407,7 +407,8 @@ def test_a_failed_step_does_not_erase_the_completed_ones(conn, dataset):
     conn.rollback()
 
 
-def test_an_unimplemented_step_is_left_pending_not_marked_failed(conn, dataset):
+def test_an_unimplemented_step_is_left_pending_not_marked_failed(
+        conn, dataset, monkeypatch):
     """未実装は失敗ではない。
 
     最初の実装は STEP2 を failed で記録していました。画面には赤い「失敗」と
@@ -419,7 +420,8 @@ def test_an_unimplemented_step_is_left_pending_not_marked_failed(conn, dataset):
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
-    unimplemented = _complete_the_implemented_steps(conn, job_id)
+    unimplemented = _pretend_the_last_step_is_unimplemented(monkeypatch)
+    _complete_the_steps_before(conn, job_id, unimplemented)
 
     with pytest.raises(worker.StepNotImplemented):
         worker.run_step(conn, job_id, unimplemented)
@@ -972,7 +974,7 @@ def test_a_search_that_could_not_run_is_not_reported_as_nothing_found(monkeypatc
 
 
 # --------------------------------------------------- 止まったジョブを再開できる
-def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset):
+def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset, monkeypatch):
     """実測：銀座のジョブが running のまま残り、0 件が出続けました。
 
     claim_job は queued しか見ません。走り終わった Job の状態を戻していないと、
@@ -982,7 +984,8 @@ def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset):
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
-    _complete_the_implemented_steps(conn, job_id)
+    unimplemented = _pretend_the_last_step_is_unimplemented(monkeypatch)
+    _complete_the_steps_before(conn, job_id, unimplemented)
     assert jobs.claim_specific(conn, job_id) == job_id  # ここで running になる
 
     try:
@@ -1043,22 +1046,28 @@ def _boom(_payload):
     raise RuntimeError("模擬的な失敗")
 
 
-def _complete_the_implemented_steps(conn, job_id: str) -> int:
-    """実装済みのステップを埋めて、最初の未実装ステップ番号を返す。
+def _pretend_the_last_step_is_unimplemented(monkeypatch) -> int:
+    """最後のステップを未実装ということにして、その番号を返す。
 
-    番号を直に書くと、STEP を実装するたびにテストが落ちます。落ちるのは
-    正しいのですが、理由が「未実装が未実装でなくなった」だけのときは、
-    ここが自動で追随したほうがいい。
+    4 段とも実装済みになったので、未実装の扱いは実物では作れません。ですが
+    「未実装で止まった Job をどうするか」は仕組みの話で、次に段を足すときにも
+    要ります。RUNNERS を差し替えて、その状況だけを作ります。
     """
-    from kaigyou_intel import jobs, worker
+    from kaigyou_intel import worker
 
-    for number in sorted(worker.RUNNERS):
-        jobs.start_step(conn, job_id, number, {},
+    number = max(worker.RUNNERS)
+    monkeypatch.setattr(
+        worker, "RUNNERS", {k: v for k, v in worker.RUNNERS.items() if k != number})
+    return number
+
+
+def _complete_the_steps_before(conn, job_id: str, number: int) -> None:
+    from kaigyou_intel import jobs
+
+    for step in range(1, number):
+        jobs.start_step(conn, job_id, step, {},
                         {"prompt_version": "v", "model": "m"})
-        jobs.finish_step(conn, job_id, number, _step1_for_step2(), {})
-    unimplemented = jobs.next_step(conn, job_id)
-    assert unimplemented is not None, "全ステップ実装済みならこのテストは不要です"
-    return unimplemented
+        jobs.finish_step(conn, job_id, step, _step1_for_step2(), {})
 
 
 def _drop_job(job_id: str) -> None:
@@ -1269,3 +1278,222 @@ def test_step3_is_not_asked_to_predict():
     text = cfg.prompt_text("step3_demand.md")
     assert "売上・患者数・成功確率の予測" in text
     assert "UNSUPPORTED" in text, "反証された仮説を根拠に使わせない指示が要ります"
+
+
+# ------------------------------------------------------------------ STEP4
+def _evidenced(text="s", refs=("F001",)):
+    from kaigyou_intel.schemas import Evidenced
+
+    return Evidenced(statement=text, evidence=list(refs))
+
+
+def _step4_output(**overrides) -> "Step4Output":
+    from kaigyou_intel.schemas import (
+        REPORT_SECTIONS, BusinessDecision, ReportBlock, ReportSection, Step4Output)
+
+    data = {
+        "executive_summary": "常住人口では説明できない供給を、勤務者需要が支えている。",
+        "decision": BusinessDecision(
+            primary_patients=_evidenced("周辺勤務者", ["S001"]),
+            secondary_patients=_evidenced("居住小児は主要に置かない", ["F005"]),
+            avoid_competing_on=_evidenced("小児歯科の標榜数では競わない", ["F014"]),
+            acquisition_area=_evidenced("銀座駅から徒歩圏の通勤動線", ["M001"]),
+            reason_to_visit=_evidenced("勤務時間の前後に通える診療時間", ["F015"]),
+            clinic_model=_evidenced("平日夜間まで開ける成人中心の医院", ["M001"]),
+            advantages=[_evidenced("昼間人口が常住人口を大きく上回る", ["F010"])],
+            risks=[_evidenced("地価が都内上位0.2%", ["F017"])],
+            confidence="medium"),
+        "sections": [
+            ReportSection(number=i + 1, title=title,
+                          blocks=[ReportBlock(tag="FACT", text="t",
+                                              evidence=["F001"])])
+            for i, title in enumerate(REPORT_SECTIONS)],
+        "actions": [_evidenced("平日夜間の診療体制を決める", ["M001"])],
+    }
+    data.update(overrides)
+    return Step4Output(**data)
+
+
+_STEP4_IDS = {"F001", "F005", "F010", "F014", "F015", "F017", "S001", "M001"}
+
+
+def test_a_clean_report_passes():
+    from kaigyou_intel.schemas import verify_step4
+
+    assert verify_step4(_step4_output(), _STEP4_IDS) == []
+
+
+def test_the_report_keeps_the_required_chapters():
+    """要件 §18：章立てはモデルに決めさせません。
+
+    毎回違う章立てで出てくると、2地点を並べて読めなくなります。
+    """
+    from kaigyou_intel.schemas import verify_step4
+
+    output = _step4_output()
+    output.sections = output.sections[:5]
+    assert any("§18" in p.problem for p in verify_step4(output, _STEP4_IDS))
+
+
+def test_a_chapter_that_puts_the_conclusion_before_the_evidence_is_caught():
+    """要件 §19：全部のタグを入れる必要はありませんが、入れた分は順を保つこと。
+
+    ACTION のあとに FACT が来るのは、結論を書いてから根拠を足したということです。
+    """
+    from kaigyou_intel.schemas import ReportBlock, verify_step4
+
+    output = _step4_output()
+    output.sections[6].blocks = [
+        ReportBlock(tag="ACTION", text="夜間診療を検討する"),
+        ReportBlock(tag="FACT", text="昼間人口が多い", evidence=["F010"]),
+    ]
+    assert any("§19" in p.problem for p in verify_step4(output, _STEP4_IDS))
+
+
+def test_a_chapter_may_skip_tags():
+    """単なる事実の章は FACT だけでよい（要件 §19）。"""
+    from kaigyou_intel.schemas import ReportBlock, verify_step4
+
+    output = _step4_output()
+    output.sections[5].blocks = [
+        ReportBlock(tag="FACT", text="地価は14,300,000円/m2", evidence=["F017"]),
+        ReportBlock(tag="IMPLICATION", text="賃料負担は初期条件を強く縛る"),
+    ]
+    assert verify_step4(output, _STEP4_IDS) == []
+
+
+def test_the_report_cannot_cite_an_id_no_step_produced():
+    """§25：INSIGHT から FACT、そして出典まで辿れること。"""
+    from kaigyou_intel.schemas import verify_step4
+
+    output = _step4_output()
+    output.actions = [_evidenced("何かする", ["Z999"])]
+    assert any("Z999" in p.problem for p in verify_step4(output, _STEP4_IDS))
+
+
+@pytest.mark.parametrize("phrase", ["年商", "成功確率", "投資回収", "売上予測"])
+def test_a_report_that_predicts_revenue_is_refused(phrase):
+    """開業成功確率・売上・患者数の予測は、このシステムの目的外です。
+
+    プロンプトで禁じたうえで、出力でも落とします。お願いだけで守られることに
+    賭けない。
+    """
+    from kaigyou_intel.schemas import verify_step4
+
+    output = _step4_output()
+    output.executive_summary = f"この立地の{phrase}は良好と見込まれる。"
+    assert any(phrase in p.problem for p in verify_step4(output, _STEP4_IDS))
+
+
+def test_the_decision_has_a_place_for_who_not_to_compete_with():
+    """要件 §17。散文に溶かすと、抜けても気づけません。
+
+    欄として持つので、埋まっていなければスキーマが通しません。
+    """
+    from pydantic import ValidationError
+
+    from kaigyou_intel.schemas import BusinessDecision
+
+    with pytest.raises(ValidationError):
+        BusinessDecision(
+            primary_patients=_evidenced(), secondary_patients=_evidenced(),
+            acquisition_area=_evidenced(), reason_to_visit=_evidenced(),
+            clinic_model=_evidenced(), advantages=[_evidenced()],
+            risks=[_evidenced()], confidence="low")  # avoid_competing_on 欠落
+
+
+def test_the_report_markdown_always_carries_the_disclaimer_and_provenance(dataset):
+    """免責・出典・データ時点は LLM に書かせません。書き忘れの起きる場所に
+    置かないためです。"""
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    assert "## 免責" in markdown
+    assert "## データの出典と時点" in markdown
+    assert dataset["disclaimer"][:20] in markdown
+    # §17 の答えが表として載ること。
+    assert "競争しない領域" in markdown and "主要に置かない層" in markdown
+
+
+def test_the_report_lists_its_external_sources_in_priority_order(dataset):
+    """要件 §9 の優先順位で並べる。読む人が上から見て一次資料に当たれるように。"""
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+        {"url": "https://example.com/a", "title": "企業サイト", "source_type": "company"},
+        {"url": "https://www.mhlw.go.jp/b", "title": "厚労省", "source_type": "government"},
+    ])
+    assert markdown.index("厚労省") < markdown.index("企業サイト")
+
+
+def test_step4_needs_all_three_earlier_steps(conn, dataset):
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
+
+    job = jobs.get_job(conn, job_id, include_base_data=True)
+    with pytest.raises(worker.StepNotImplemented, match="STEP2・STEP3"):
+        worker.build_input(conn, job, 4)
+    conn.rollback()
+
+
+def test_the_report_is_saved_and_readable(conn, dataset):
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        markdown = report.markdown_for(conn, job_id)
+        assert markdown and "# 商圏分析レポート" in markdown
+        # 二度目は上書き（やり直しても行が増えない）。
+        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM analysis_reports WHERE job_id = %s",
+                        (job_id,))
+            assert cur.fetchone()["n"] == 1
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_report_can_be_read_from_the_command_line():
+    from kaigyou_etl.cli import build_parser
+
+    args = build_parser().parse_args(["analyze", "--report", "--out", "report.md"])
+    assert args.report == "" and args.out == "report.md"
+
+
+def test_the_report_carries_the_caveats_that_change_how_it_reads(dataset):
+    """「標榜診療科目は届出値であって診療内容ではない」は、落とすと誤読になります。
+
+    競合の数え方の但し書きが本文から消えると、標榜数をそのまま診療実態として
+    読まれます。データ側が持っている注意書きは、レポートに必ず出します。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    assert "## 読むときの注意" in markdown
+    assert "標榜" in markdown
+    # 出典と年次が指標から拾えていること（空欄のまま出さない）。
+    assert "## データの出典と時点" in markdown
+    body = markdown.split("## データの出典と時点", 1)[1].split("##", 1)[0]
+    assert body.strip(), "出典が空のまま出しています"
+
+
+def test_the_cost_line_does_not_look_like_it_lost_the_input(capsys, conn, dataset):
+    """実測：STEP3 が「入力 2 tok」と出ました。
+
+    キャッシュに入ったぶんは input_tokens から抜けます。そこを足さずに出すと、
+    数え損ねたように見えます（費用の計算は合っているのに）。
+    """
+    from kaigyou_etl.cli import _print_step_cost_line
+
+    _print_step_cost_line({"input_tokens": 2, "output_tokens": 5093,
+                           "cache_read_tokens": 0, "cache_write_tokens": 42000,
+                           "model": "claude-sonnet-5"})
+    printed = capsys.readouterr().out
+    assert "入力 42,002 tok" in printed
+    assert "キャッシュ書 42,000" in printed

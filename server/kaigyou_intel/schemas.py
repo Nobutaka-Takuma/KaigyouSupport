@@ -326,3 +326,138 @@ def verify_step3(output: Step3Output, fact_ids: set[str],
         check(f"insights[{insight.id}].evidence", insight.evidence,
               segment_ids | mechanism_ids)
     return problems
+
+
+# ------------------------------------------------------------------ STEP4
+#: 要件 §18 のレポート構成。章立てはモデルに決めさせません。毎回違う章立てで
+#: 出てくると、2 地点を並べて読めなくなります。
+REPORT_SECTIONS = (
+    "エグゼクティブサマリー", "商圏人口", "昼間人口", "交通アクセス",
+    "競合歯科医院", "地価", "商圏の特徴", "開業上のメリット", "リスク", "総合評価",
+)
+
+#: 要件 §19 の分析順序。章の中でこの順を保ちます（全部入れる必要はありません）。
+BLOCK_TAGS = ("FACT", "BENCHMARK", "PATTERN", "WHY", "INSIGHT", "IMPLICATION", "ACTION")
+
+BlockTag = Literal["FACT", "BENCHMARK", "PATTERN", "WHY", "INSIGHT",
+                   "IMPLICATION", "ACTION"]
+
+#: 出してはいけない予測。開業成功確率・売上・患者数・家賃の予測は、この
+#: システムの目的外です。プロンプトで禁じたうえで、出力でも落とします。
+FORBIDDEN_PREDICTIONS = (
+    "成功確率", "年商", "月商", "想定売上", "売上予測", "売上高", "患者数予測",
+    "来院数予測", "収支予測", "損益予測", "投資回収",
+)
+
+
+class Evidenced(BaseModel):
+    """根拠つきの 1 文。§25 の追跡はこの id を辿ります。"""
+
+    statement: str
+    evidence: list[str] = Field(
+        description="根拠にした F### / P### / C### / H### / S### / M### / I### の id",
+        min_length=1)
+
+
+class BusinessDecision(BaseModel):
+    """要件 §17 の最重要アウトプット。
+
+    「誰を主要患者とし、誰とは競争せず、どの診療圏から何を理由に患者を引っ張り、
+    どの医院モデルにするべきか」に答えます。「良い商圏」で終わらせないために、
+    答えるべき項目を欄として置いてあります。埋められない欄は書けません。
+    """
+
+    primary_patients: Evidenced = Field(description="主要患者として設定する層")
+    secondary_patients: Evidenced = Field(description="主要には置かない層と、その理由")
+    avoid_competing_on: Evidenced = Field(description="競争しない領域")
+    acquisition_area: Evidenced = Field(description="患者獲得エリア")
+    reason_to_visit: Evidenced = Field(description="患者がこの医院を選ぶ理由")
+    clinic_model: Evidenced = Field(description="医院モデル")
+    advantages: list[Evidenced] = Field(description="経営上のメリット", min_length=1)
+    risks: list[Evidenced] = Field(description="リスク", min_length=1)
+    confidence: Confidence
+
+
+class ReportBlock(BaseModel):
+    tag: BlockTag
+    text: str
+    #: FACT / BENCHMARK / PATTERN には根拠を付けます。WHY 以降は前段の
+    #: 結論を受けるので、空でも構いません。
+    evidence: list[str] = Field(default_factory=list)
+
+
+class ReportSection(BaseModel):
+    number: int = Field(description="1〜10。要件 §18 の並び")
+    title: str = Field(description="要件 §18 の章名をそのまま")
+    blocks: list[ReportBlock] = Field(min_length=1)
+
+
+class Step4Output(BaseModel):
+    """STEP4（経営判断・レポート生成）の出力（要件 §16〜§21）。"""
+
+    executive_summary: str = Field(description="3〜5 文。判断の結論から書く")
+    decision: BusinessDecision
+    sections: list[ReportSection] = Field(min_length=1)
+    actions: list[Evidenced] = Field(
+        description="次に取るべき具体的な行動", min_length=1)
+
+
+def verify_step4(output: Step4Output, known_ids: set[str]) -> list[TraceProblem]:
+    """章立て・分析順序・根拠・禁止事項（要件 §18 / §19 / §25）。"""
+    problems: list[TraceProblem] = []
+
+    def check(where: str, refs: list[str]) -> None:
+        for ref in refs:
+            if ref not in known_ids:
+                problems.append(TraceProblem(
+                    where=where, problem=f"存在しない根拠を参照しています: {ref!r}"))
+
+    titles = [s.title for s in sorted(output.sections, key=lambda s: s.number)]
+    if titles != list(REPORT_SECTIONS):
+        problems.append(TraceProblem(
+            where="sections",
+            problem=("章立てが要件 §18 と違います。"
+                     f"期待: {list(REPORT_SECTIONS)} / 実際: {titles}")))
+
+    for section in output.sections:
+        order = [BLOCK_TAGS.index(b.tag) for b in section.blocks]
+        if any(b < a for a, b in zip(order, order[1:])):
+            # 全部のタグを入れる必要はありませんが、入れた分は §19 の順に
+            # 並んでいること。ACTION のあとに FACT が来るのは、結論を書いてから
+            # 根拠を足したということです。
+            problems.append(TraceProblem(
+                where=f"sections[{section.number}]",
+                problem=("分析順序が要件 §19 と違います: "
+                         + " → ".join(b.tag for b in section.blocks))))
+        for index, block in enumerate(section.blocks):
+            check(f"sections[{section.number}].blocks[{index}]", block.evidence)
+
+    decision = output.decision
+    for name in ("primary_patients", "secondary_patients", "avoid_competing_on",
+                 "acquisition_area", "reason_to_visit", "clinic_model"):
+        check(f"decision.{name}", getattr(decision, name).evidence)
+    for name in ("advantages", "risks"):
+        for index, item in enumerate(getattr(decision, name)):
+            check(f"decision.{name}[{index}]", item.evidence)
+    for index, action in enumerate(output.actions):
+        check(f"actions[{index}]", action.evidence)
+
+    problems.extend(_forbidden_predictions(output))
+    return problems
+
+
+def _forbidden_predictions(output: Step4Output) -> list[TraceProblem]:
+    """売上・患者数・成功確率の予測が混じっていないか。
+
+    このシステムは需要の**構造**を説明するもので、予測をするものではありません
+    （プロジェクトの前提）。プロンプトで禁じたうえで、出力でも落とします。
+    お願いだけで守られることに賭けない。
+    """
+    problems: list[TraceProblem] = []
+    haystack = output.model_dump_json()
+    for word in FORBIDDEN_PREDICTIONS:
+        if word in haystack:
+            problems.append(TraceProblem(
+                where="report",
+                problem=f"予測にあたる語が含まれています: {word!r}"))
+    return problems

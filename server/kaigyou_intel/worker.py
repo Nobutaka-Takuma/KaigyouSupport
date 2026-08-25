@@ -16,7 +16,9 @@ import psycopg
 
 from kaigyou_intel import client as llm
 from kaigyou_intel import jobs
-from kaigyou_intel.steps import step1_features, step2_research, step3_demand
+from kaigyou_intel import report
+from kaigyou_intel.steps import (
+    step1_features, step2_research, step3_demand, step4_strategy)
 
 #: 実装済みのステップ。ここに無い番号に来たら止めます。「未実装なので飛ばす」
 #: をやると、材料が無いまま最終レポートが書かれます。
@@ -28,6 +30,7 @@ RUNNERS: dict[int, Callable[[Any], Any]] = {
     1: step1_features.run,
     2: step2_research.run,
     3: step3_demand.run,
+    4: step4_strategy.run,
 }
 
 
@@ -75,6 +78,10 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     })
     if sources:
         jobs.save_sources(conn, job_id, number, None, sources)
+    if number == max(RUNNERS):
+        # 最終段。レポートは Markdown にして保存します。免責とデータ時点は
+        # ここで付けるので、LLM が書き忘れても落ちません。
+        report.save(conn, job_id, output, job["base_data"])
     return output
 
 
@@ -100,7 +107,14 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
             raise StepNotImplemented(
                 "STEP1 と STEP2 の出力が揃っていません。STEP3 は両方を使う段です。")
         return step3_demand.build_input(step1_output, step2_output, job["base_data"])
-    # pragma: no cover - STEP4 を足すときにここへ分岐を書きます
+    if number == 4:
+        outputs = [jobs.step_output(conn, job["id"], n) for n in (1, 2, 3)]
+        if not all(outputs):
+            missing = [f"STEP{n}" for n, out in zip((1, 2, 3), outputs) if not out]
+            raise StepNotImplemented(
+                f"{'・'.join(missing)} の出力がありません。"
+                "レポートは前 3 段の結論だけで書きます。")
+        return step4_strategy.build_input(*outputs, job["base_data"])
     raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
 
 
