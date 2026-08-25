@@ -88,7 +88,12 @@ steps:
     web_search: false
   2:
     name: 外部コンテクスト調査
-    prompt: step2_context.md
+    # Web検索と構造化出力は同じ呼び出しでは併用できないので、STEP2 は 2 回に
+    # 分かれます。1 回目（prompt）で調べさせ、2 回目（prompt_structure）で
+    # その本文を JSON に写させます。2 回目は検索を切ります。切らないと新しい
+    # 事実が増えて、出典の照合が合わなくなります。
+    prompt: step2_research.md
+    prompt_structure: step2_structure.md
     prompt_version: step2-v1.0
     web_search: true
   3:

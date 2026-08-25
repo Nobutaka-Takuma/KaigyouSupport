@@ -38,12 +38,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ------------------------------------------------------------------ 設定
 def test_the_four_steps_are_configured_with_their_prompts():
+    """実装済みのステップには、プロンプトの実体があること。
+
+    未実装のぶんは名前だけ先に置いてあります。実装した番号を RUNNERS に足すと、
+    このテストがその番号のプロンプトを要求します。
+    """
+    from kaigyou_intel.worker import RUNNERS
+
     config = cfg.analysis_config()
     assert set(config["steps"]) == {1, 2, 3, 4}
     for number, step in config["steps"].items():
         assert step["prompt_version"], f"step{number} に prompt_version がありません"
-        assert (cfg.config_dir() / "prompts" / step["prompt"]).is_file() or number > 1, (
+        if number not in RUNNERS:
+            continue
+        assert (cfg.config_dir() / "prompts" / step["prompt"]).is_file(), (
             f"step{number} のプロンプトが見つかりません: {step['prompt']}")
+
+
+def test_the_searching_step_has_a_second_prompt_for_writing_it_down():
+    """Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は 2 本必要。"""
+    step = cfg.analysis_config()["steps"][2]
+    assert (cfg.config_dir() / "prompts" / step["prompt_structure"]).is_file()
+    assert llm.step_settings(2)["prompt_structure"] == step["prompt_structure"]
 
 
 def test_only_step2_may_search_the_web():
@@ -406,14 +422,17 @@ def test_an_unimplemented_step_is_left_pending_not_marked_failed(conn, dataset):
     jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
     jobs.finish_step(conn, job_id, 1, {"facts": []}, {})
 
-    assert 2 not in worker.RUNNERS, "STEP2 を実装したらこのテストを消してください"
+    jobs.start_step(conn, job_id, 2, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 2, {"external_facts": []}, {})
+
+    unimplemented = min(n for n in (3, 4) if n not in worker.RUNNERS)
     with pytest.raises(worker.StepNotImplemented):
-        worker.run_step(conn, job_id, 2)
+        worker.run_step(conn, job_id, unimplemented)
 
     steps = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}
-    assert steps[2]["status"] == "pending"
-    assert not steps[2]["error_message"]
-    assert jobs.next_step(conn, job_id) == 2
+    assert steps[unimplemented]["status"] == "pending"
+    assert not steps[unimplemented]["error_message"]
+    assert jobs.next_step(conn, job_id) == unimplemented
     conn.rollback()
 
 
@@ -475,7 +494,7 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
                           model="claude-opus-5")
 
     monkeypatch.setattr(llm, "ask", fake_ask)
-    output, usage, sources = step1_features.run(dataset)
+    output, usage, sources = step1_features.run(step1_features.build_input(dataset))
 
     assert captured["step_number"] == 1
     assert captured["tools"] is None, "STEP1 に道具を渡してはいけない（Web検索禁止）"
@@ -498,7 +517,7 @@ def test_step1_refuses_an_output_whose_references_do_not_resolve(dataset, monkey
         parsed=broken, usage=llm.Usage(), model="m"))
 
     with pytest.raises(step1_features.StepFailed, match="F404"):
-        step1_features.run(dataset)
+        step1_features.run(step1_features.build_input(dataset))
 
 
 # ----------------------------------------------- PowerShell から使えること
@@ -709,3 +728,208 @@ def test_the_cost_is_computed_from_the_recorded_usage():
     assert cost == pytest.approx(43102 / 1e6 * 2 + 3201 / 1e6 * 10)
     # 知らないモデルなら黙って 0 を返さない。
     assert _step_cost({"model": "unknown", "input_tokens": 1}) is None
+
+
+# ------------------------------------------------------------------ STEP2
+def _step1_for_step2() -> dict:
+    return {"patterns": [
+        {"id": "P001", "title": "子ども人口は薄いが小児歯科は多い",
+         "evidence_summary": "0〜14歳は下位3.1%、小児歯科標榜は上位9%",
+         "importance": "high",
+         "research_questions": ["この地区で2015年以降に大規模な住宅供給があったか"]},
+    ]}
+
+
+def _step2_output(**overrides) -> "Step2Output":
+    from kaigyou_intel.schemas import ExternalFact, Hypothesis, Step2Output
+
+    data = {
+        "external_facts": [ExternalFact(
+            id="C001", pattern_id="P001",
+            statement="中央区の年少人口は2015年から2020年に増加した",
+            source_url="https://www.city.chuo.lg.jp/toukei/jinkou.html",
+            source_title="中央区 人口統計", confidence="high")],
+        "hypotheses": [Hypothesis(
+            id="H001", pattern_id="P001",
+            statement="タワーマンション供給が子育て世帯を呼び込んだ",
+            status="SUPPORTED", evidence=["C001"],
+            reasoning="区の統計で年少人口の増加が確認できる", confidence="medium")],
+        "unanswered": ["小児歯科の開設年は確認できなかった"],
+    }
+    data.update(overrides)
+    return Step2Output(**data)
+
+
+def test_a_fabricated_source_url_is_caught():
+    """モデルは実在しそうな URL を書けます。実在するかは検索結果で決まります。
+
+    ここが STEP2 でいちばん重要な検算です。出典が実在しないレポートは、
+    出典が無いレポートより悪い。読む人が確かめたつもりになるからです。
+    """
+    from kaigyou_intel.schemas import verify_step2
+
+    output = _step2_output()
+    problems = verify_step2(output, {"P001"},
+                            {"https://www.city.chuo.lg.jp/kurashi/betsu.html"})
+    assert any("検索結果に無い URL" in p.problem for p in problems)
+
+
+def test_a_real_source_url_survives_the_usual_url_differences():
+    """末尾のスラッシュや www の有無で本物の出典を落とさない。"""
+    from kaigyou_intel.schemas import verify_step2
+
+    output = _step2_output()
+    assert verify_step2(output, {"P001"},
+                        {"http://city.chuo.lg.jp/toukei/jinkou.html/"}) == []
+
+
+def test_step2_references_must_resolve():
+    from kaigyou_intel.schemas import Hypothesis, verify_step2
+
+    urls = {"https://www.city.chuo.lg.jp/toukei/jinkou.html"}
+    stray = _step2_output(hypotheses=[Hypothesis(
+        id="H001", pattern_id="P404", statement="s", status="UNSUPPORTED",
+        evidence=["C404"], reasoning="r", confidence="low")])
+    problems = verify_step2(stray, {"P001"}, urls)
+    assert any("P404" in p.problem for p in problems)
+    assert any("C404" in p.problem for p in problems)
+
+
+def test_an_unsupported_hypothesis_is_kept():
+    """要件 §11：否定された仮説も保存する。
+
+    「調べたが違った」は、調べていないのとは別の情報です。落とすと STEP3 が
+    同じ筋を追い直します。
+    """
+    from kaigyou_intel.schemas import Hypothesis, verify_step2
+
+    output = _step2_output(hypotheses=[Hypothesis(
+        id="H001", pattern_id="P001", statement="再開発が原因である",
+        status="UNSUPPORTED", evidence=["C001"],
+        reasoning="区の資料では当該期間の大規模開発は確認できなかった",
+        confidence="medium")])
+    assert verify_step2(output, {"P001"},
+                        {"https://www.city.chuo.lg.jp/toukei/jinkou.html"}) == []
+    assert output.model_dump()["hypotheses"][0]["status"] == "UNSUPPORTED"
+
+
+def test_step2_searches_once_and_then_writes_it_down(monkeypatch):
+    """検索する呼び出しと、JSON に写す呼び出しを分ける。
+
+    Web検索（サーバ側ツール）と構造化出力は同じ呼び出しでは併用しません。
+    2 回目に検索を残すと、1 回目に無かった事実が増えて、出典の照合が
+    意味を失います。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    calls: list[dict] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None):
+        calls.append({"system": system, "user": user, "schema": schema,
+                      "web_search": web_search})
+        if schema is None:
+            return llm.Result(
+                parsed=None, text="中央区の年少人口は増加していました。",
+                usage=llm.Usage(input_tokens=500, output_tokens=800, web_searches=3),
+                model="claude-sonnet-5",
+                sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html",
+                          "title": "中央区 人口統計", "page_age": None},
+                         {"url": "https://www.e-stat.go.jp/x", "title": "e-Stat",
+                          "page_age": None}])
+        return llm.Result(parsed=_step2_output(),
+                          usage=llm.Usage(input_tokens=700, output_tokens=400),
+                          model="claude-sonnet-5")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(_step1_for_step2(), {"location": {"name": "銀座"}})
+    output, usage, sources = step2_research.run(payload)
+
+    assert len(calls) == 2
+    assert calls[0]["schema"] is None and calls[0]["web_search"] is None
+    assert calls[1]["schema"] is not None
+    assert calls[1]["web_search"] is False, "2 回目で検索を切っていない"
+    # 取得した URL の一覧を 2 回目に見せること。無いものを書かせないため。
+    assert "https://www.e-stat.go.jp/x" in calls[1]["user"]
+    # 上限がプロンプトに埋まっていること。
+    assert "{searches_per_pattern}" not in calls[0]["system"]
+
+    assert usage.input_tokens == 1200 and usage.output_tokens == 1200
+    assert usage.web_searches == 3
+    assert output["hypotheses"][0]["status"] == "SUPPORTED"
+
+    # 出典は「どの PATTERN を調べていて出てきたか」まで残す（§25）。
+    cited = {s["url"]: s["pattern_id"] for s in sources}
+    assert cited["https://www.city.chuo.lg.jp/toukei/jinkou.html"] == "P001"
+    assert cited["https://www.e-stat.go.jp/x"] is None, "引用されなかった出典も残す"
+
+
+def test_step2_refuses_an_output_citing_a_url_it_never_retrieved(monkeypatch):
+    from kaigyou_intel.steps import step2_research
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None):
+        if schema is None:
+            return llm.Result(parsed=None, text="調べました。", usage=llm.Usage(),
+                              model="m", sources=[{"url": "https://example.com/a"}])
+        return llm.Result(parsed=_step2_output(), usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(_step1_for_step2(), {"location": {}})
+    with pytest.raises(step2_research.StepFailed, match="検索結果に無い URL"):
+        step2_research.run(payload)
+
+
+def test_the_search_call_declares_the_web_search_tool_and_the_write_up_does_not():
+    """設定で web_search を切り替えられること。送信する本体で確かめます。"""
+    tooled = llm.build_request(2, "s", "u")
+    assert tooled["tools"][0]["type"] == llm.WEB_SEARCH_TOOL_TYPE
+    assert tooled["tools"][0]["max_uses"] == cfg.analysis_config()["limits"][
+        "max_searches_total"]
+    assert "tools" not in llm.build_request(2, "s", "u", web_search=False)
+    # 本体はそのまま JSON にできること（ModelMetaclass 事件の再発防止）。
+    json.dumps(tooled)
+
+
+def test_step2_input_is_built_from_the_stored_step1_output(conn, dataset):
+    """worker は記憶を持たない。前段の出力は DB から読む。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
+
+    job = jobs.get_job(conn, job_id, include_base_data=True)
+    payload = worker.build_input(conn, job, 2)
+    assert payload["patterns"][0]["id"] == "P001"
+    assert "measures" not in payload, "STEP2 に基礎データを渡してはいけない"
+    conn.rollback()
+
+
+def test_step2_will_not_start_before_step1_has_produced_patterns(conn, dataset):
+    """PATTERN が無い状態で検索させると、地域紹介が返ってきます。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    job = jobs.get_job(conn, job_id, include_base_data=True)
+    with pytest.raises(worker.StepNotImplemented, match="STEP1 の出力"):
+        worker.build_input(conn, job, 2)
+    conn.rollback()
+
+
+def test_a_search_that_could_not_run_is_not_reported_as_nothing_found(monkeypatch):
+    """検索が動かなかったことと、調べて見つからなかったことは別。
+
+    サーバ側ツールのエラーは例外ではなく content の中身として HTTP 200 で
+    返ります。空の結果として扱うと、「調査済み・該当なし」がレポートに残ります。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    monkeypatch.setattr(llm, "ask", lambda **kw: llm.Result(
+        parsed=None, text="検索できませんでした。", usage=llm.Usage(), model="m",
+        sources=[{"error": "max_uses_exceeded"}]))
+    payload = step2_research.build_input(_step1_for_step2(), {"location": {}})
+    with pytest.raises(step2_research.StepFailed, match="Web検索が実行できません"):
+        step2_research.run(payload)

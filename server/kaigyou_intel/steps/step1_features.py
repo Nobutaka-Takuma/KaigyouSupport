@@ -30,13 +30,15 @@ def build_input(dataset: Mapping[str, Any]) -> dict[str, Any]:
     return for_step1(dataset, cfg.analysis_config().get("projection") or {})
 
 
-def run(dataset: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
-    """基礎データから STEP1 の出力を作る。
+def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
+    """射影済みの入力から STEP1 の出力を作る。
+
+    入力は ``build_input`` が作ったものを受け取ります。ここで作り直さないのは、
+    worker が記録した入力と実際に渡した入力を同じものにするためです。
 
     返り値は (出力, 使用量, 出典)。STEP1 に出典はありませんが、他のステップと
     形を揃えておくと worker が分岐を持たずに済みます。
     """
-    payload = build_input(dataset)
     limits = cfg.analysis_config().get("limits") or {}
     settings = llm.step_settings(STEP_NUMBER)
 

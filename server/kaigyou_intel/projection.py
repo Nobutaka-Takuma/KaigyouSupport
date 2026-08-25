@@ -234,8 +234,7 @@ def for_step3(step1: Mapping[str, Any], step2: Mapping[str, Any],
     measures = dataset.get("measures") or {}
     return {
         "location": dataset.get("location"),
-        "measures": [_measure(m, keep_benchmarks)
-                     for m in (measures.get("items") or [])],
+        "measures": [_measure(m) for m in (measures.get("items") or [])],
         "primary_benchmark": measures.get("primary_benchmark"),
         "demand": dataset.get("demand"),
         "competition": _competition_summary(dataset),

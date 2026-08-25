@@ -94,6 +94,10 @@ def step_settings(step_number: int) -> dict[str, Any]:
     return {
         "name": step.get("name", f"step{step_number}"),
         "prompt": step.get("prompt"),
+        # 調べた本文を JSON に写すだけの 2 回目の呼び出しで使うプロンプト。
+        # Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は
+        # 「調べる」「書き写す」の 2 回に分かれます。
+        "prompt_structure": step.get("prompt_structure"),
         "prompt_version": step.get("prompt_version", f"step{step_number}-v0"),
         "web_search": bool(step.get("web_search")),
         "model": step.get("model") or model.get("id") or "claude-opus-5",
@@ -120,7 +124,8 @@ def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any]) -> di
 
 
 def build_request(step_number: int, system: str, user: str, *,
-                  tools: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+                  tools: Sequence[Mapping[str, Any]] | None = None,
+                  web_search: bool | None = None) -> dict[str, Any]:
     """送信する本体を組み立てる。呼び出しとは分けてあります。
 
     分けているのは検算のためです。API キーの無い環境でも、この戻り値が
@@ -145,7 +150,11 @@ def build_request(step_number: int, system: str, user: str, *,
     }
 
     declared = list(tools or [])
-    if settings["web_search"]:
+    # 既定は設定どおり。呼び出し側が False を渡せる（STEP2 の 2 回目の呼び出しは、
+    # 1 回目で調べた本文を JSON に写すだけなので、検索させると新しい事実が
+    # 増えて、出典の検算が合わなくなります）。
+    searching = settings["web_search"] if web_search is None else bool(web_search)
+    if searching:
         declared.append(_web_search_tool(config.get("limits") or {},
                                          config.get("search") or {}))
     if declared:
@@ -155,7 +164,8 @@ def build_request(step_number: int, system: str, user: str, *,
 
 def ask(*, step_number: int, system: str, user: str,
         schema: Type[T] | None = None,
-        tools: Sequence[Mapping[str, Any]] | None = None) -> Result:
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        web_search: bool | None = None) -> Result:
     """1 ステップぶんの呼び出し。
 
     ``schema`` を渡すと構造化出力で受け取り、Pydantic で検証します。
@@ -164,7 +174,8 @@ def ask(*, step_number: int, system: str, user: str,
     """
     settings = step_settings(step_number)
     client = _client()
-    request = build_request(step_number, system, user, tools=tools)
+    request = build_request(step_number, system, user, tools=tools,
+                            web_search=web_search)
 
     if schema is not None and "tools" not in request:
         # 構造化出力。ツールを併用しないときはこれがいちばん素直です。

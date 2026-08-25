@@ -366,7 +366,10 @@ def _step_cost(step: dict) -> float | None:
 
 
 def _print_step_output(number: int, output: dict) -> None:
-    """ステップの出力を畳んで見せる。STEP1 以外はまだ JSON のまま。"""
+    """ステップの出力を畳んで見せる。未実装のステップはまだ JSON のまま。"""
+    if number == 2:
+        _print_step2(output)
+        return
     if number != 1:
         import json as _j
         print("    " + _j.dumps(output, ensure_ascii=False)[:600])
@@ -396,6 +399,42 @@ def _print_step_output(number: int, output: dict) -> None:
         print("\n    基礎データからは判断できなかったこと")
         for item in output["not_determinable"]:
             print(f"      - {item}")
+
+
+#: 仮説の判定。否定された仮説も残すのが要件 §11 の要点なので、
+#: 「見つからなかった」を目立たせます。
+_STATUS_LABEL = {
+    "SUPPORTED": "裏付けあり",
+    "PARTIALLY_SUPPORTED": "部分的",
+    "UNSUPPORTED": "裏付けなし",
+}
+
+
+def _print_step2(output: dict) -> None:
+    facts = output.get("external_facts") or []
+    hypotheses = output.get("hypotheses") or []
+
+    print(f"\n    EXTERNAL FACT（{len(facts)}件）")
+    for fact in facts:
+        print(f"      {fact.get('id')} [{fact.get('pattern_id')}] {fact.get('statement')}")
+        print(f"            出典: {fact.get('source_title')}")
+        print(f"                  {fact.get('source_url')}"
+              f"  confidence={fact.get('confidence')}")
+
+    print(f"\n    HYPOTHESIS（{len(hypotheses)}件）")
+    for item in hypotheses:
+        status = _STATUS_LABEL.get(item.get("status", ""), item.get("status"))
+        print(f"      {item.get('id')} [{item.get('pattern_id')}] {status}"
+              f"  confidence={item.get('confidence')}")
+        print(f"            {item.get('statement')}")
+        print(f"            根拠: {' + '.join(item.get('evidence') or [])}")
+        if item.get("reasoning"):
+            print(f"            判定: {item['reasoning']}")
+
+    if output.get("unanswered"):
+        print("\n    調べたが確認できなかったこと")
+        for entry in output["unanswered"]:
+            print(f"      - {entry}")
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
