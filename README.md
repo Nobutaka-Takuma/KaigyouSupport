@@ -959,6 +959,10 @@ python -m kaigyou_etl new-analysis --lat 35.6717 --lng 139.7650 --name "銀座4�
 # 2. 送信内容を確認する（APIを呼ばない＝課金なし）
 python -m kaigyou_etl analyze --dry-run step1.txt
 
+# ジョブが溜まったら
+python -m kaigyou_etl analyze --list          # 一覧（worker は古い順に処理）
+python -m kaigyou_etl analyze --cancel all    # 待機中をすべて取り下げ
+
 # 3. 実行する
 $env:ANTHROPIC_API_KEY = 'sk-ant-...'
 python -m kaigyou_etl analyze --once
@@ -971,6 +975,25 @@ python -m kaigyou_etl analyze --once
 > `-X POST` を受け付けません。HTTP から叩きたい場合は `curl.exe`（実体のcurl）か
 > `Invoke-RestMethod -Method Post` を使ってください。上の CLI ならその問題は
 > ありません。
+
+### STEP1 に何を渡しているか
+
+渡すのは `/api/dataset` の出力（＝画面の「JSONで出力」と同じもの）です。
+そこから **発見に寄与しない部分だけ** を落とします。`config/analysis.yaml` の
+`projection:` で変えられます。
+
+| | 渡す | 理由 |
+|---|:---:|---|
+| `measures[].benchmarks` 6つ全部 | ✅ | **ここが核心。** 銀座の0〜14歳人口は県内では下位24.3%（typical）でも、近隣・同一区・同規模では下位2.4〜4.5%（very_low）。この食い違いこそがパターンで、代表1つでは見えません |
+| 標榜科目別の競合・診療時間の集計 | ✅ | 競合の形はここに出ます |
+| 医院一覧（名前・住所）14KB | ❌ | パターン発見に効きません（効くのは上の集計のほう） |
+| `insight_metrics` の成分の値 | ❌ | `measures` と二重になります。組み合わせと `gaps` は残します |
+
+`projection.full_dataset: true` にすると、何も削らずデータセット全体を渡します
+（比較実験用）。
+
+入力サイズの実測: 銀座・半径1km で 86KB（≒43,000トークン、Opus 5 の入力で
+$0.22 程度）、裾野・半径1km で 31KB。
 
 ### API
 
