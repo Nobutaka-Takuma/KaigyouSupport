@@ -82,6 +82,11 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
         # 最終段。レポートは Markdown にして保存します。免責とデータ時点は
         # ここで付けるので、LLM が書き忘れても落ちません。
         report.save(conn, job_id, output, job["base_data"])
+        # ファイルにも書き出します。DB の中にあることと、手元にファイルが
+        # あることは違います。追加のコマンドを要求しません。
+        path = report.write_file(conn, job_id)
+        if path is not None:
+            output = {**output, "_report_file": str(path)}
     return output
 
 
@@ -135,7 +140,9 @@ def run_job(conn: psycopg.Connection, job_id: str,
         settings = llm.step_settings(number)
         say(f"  {job_id}: STEP{number} {settings['name']} …")
         try:
-            run_step(conn, job_id, number)
+            result = run_step(conn, job_id, number)
+            if result.get("_report_file"):
+                say(f"    レポートを書き出しました: {result['_report_file']}")
         except StepNotImplemented as exc:
             say(f"    停止: {exc}")
             # 失敗ではないので queued に戻します。そのステップを実装した

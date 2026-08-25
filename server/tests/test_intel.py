@@ -1650,3 +1650,66 @@ def test_a_billing_failure_tells_the_user_what_to_do():
     assert "Plans & Billing" in panel
     # やり直しは新しいジョブを作るのではなく、失敗したステップから再開する。
     assert "retryFrom" in panel and "からやり直す" in panel
+
+
+def test_the_report_is_written_to_a_file_without_another_command(conn, dataset, tmp_path):
+    """DB の中にあることと、手元にファイルがあることは違います。
+
+    追加のコマンドを打たないと現物が手に入らないのでは、「レポートを作る道具」
+    として不完全です。
+    """
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.6717, lng=139.765, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             location_name="銀座4丁目")
+    try:
+        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        path = report.write_file(conn, job_id, directory=str(tmp_path))
+        assert path is not None and path.exists()
+        assert "銀座4丁目" in path.name, "人が見て分かる名前にする"
+        assert path.read_text(encoding="utf-8").startswith("# 商圏分析レポート")
+
+        # やり直しても同じ名前に上書きする。日付ごとに増やすと最新が分からない。
+        again = report.write_file(conn, job_id, directory=str(tmp_path))
+        assert again == path
+        assert len(list(tmp_path.glob("*.md"))) == 1
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_file_name_survives_windows(conn, dataset, tmp_path):
+    """`/` や `:` が入ると Windows では保存できません。"""
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             location_name='A/B:C*D?"E<F>G|H')
+    try:
+        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        path = report.write_file(conn, job_id, directory=str(tmp_path))
+        assert path is not None and path.exists()
+        assert not set(path.name) & set('\\/:*?"<>|')
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_report_carries_the_numbers_it_did_not_quote(dataset):
+    """本文が引用しなかった数値も、同じ文書の中で確かめられること。
+
+    本文の数字は LLM が選びます。選ばれなかった数字がどこにも残らないと、
+    読んだ人は「その数字はどこから来たのか」を別の画面で探すことになります。
+    付録はデータセットからそのまま出すので、桁の取り違えも起きません。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    assert "## 付録：商圏の基礎数値" in markdown
+    for heading in ("### 常住人口", "### 昼間（従業者・事業所）",
+                    "### 競合（歯科医院）", "### 交通アクセス", "### 地価（公示地価）"):
+        assert heading in markdown, heading
+    # 半径3段の比較が並ぶこと（1kmだけでは商圏の広がりが分からない）。
+    assert "| 指標 | 500m | 1km | 2km |" in markdown
+    # 標榜科目と診療時間は、競合の読み方を変える情報なので落とさない。
+    assert "#### 標榜診療科目（商圏内）" in markdown
+    assert "#### 診療時間（商圏内）" in markdown

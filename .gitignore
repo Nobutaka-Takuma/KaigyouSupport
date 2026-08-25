@@ -20,3 +20,4 @@ downloads/
 .env
 .env.local
 *.tsbuildinfo
+reports/

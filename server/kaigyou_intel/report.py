@@ -9,6 +9,7 @@ Markdown はここで作ります。LLM に書かせません。免責・出典�
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import psycopg
@@ -63,9 +64,152 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
             lines.append(f"- {action.get('statement')}{tail}")
         lines.append("")
 
+    lines += _figures_block(dataset)
     lines += _sources_block(sources)
     lines += _provenance_block(dataset)
     return "\n".join(lines).rstrip() + "\n"
+
+
+# --------------------------------------------------------------- 付録：基礎数値
+#
+# 本文の数字は LLM が選んで書きます。ここはデータセットからそのまま並べます。
+# 分けているのは、レポートを読んだ人が「その数字はどこから来たのか」を
+# 同じ文書の中で確かめられるようにするためです。本文に全部書かせると、
+# 選ばれなかった数字がどこにも残りません。
+#
+# LLM を通さないので、桁の取り違えも書き落としも起きません。トークンも
+# 使いません。
+
+def _table(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> list[str]:
+    if not rows:
+        return []
+    out = ["| " + " | ".join(header) + " |",
+           "|" + "|".join("---" for _ in header) + "|"]
+    for row in rows:
+        out.append("| " + " | ".join("" if v is None else str(v) for v in row) + " |")
+    return out + [""]
+
+
+def _num(value: Any, unit: str = "") -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float) and not value.is_integer():
+        return f"{value:,.1f}{unit}"
+    return f"{int(value):,}{unit}"
+
+
+def _pct(value: Any) -> str:
+    return "—" if value is None else f"{float(value) * 100:+.2f}%"
+
+
+def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
+    demand = dataset.get("demand") or {}
+    competition = dataset.get("competition") or {}
+    radii = ["500", "1000", "2000"]
+    head = ["指標", "500m", "1km", "2km"]
+    lines = ["## 付録：商圏の基礎数値", "",
+             "本文が引用しなかったものも含め、分析に使った数値です。"
+             "文章は生成されたものですが、この表はデータからそのまま出しています。", ""]
+
+    residents = (demand.get("residents") or {}).get("by_radius") or {}
+    if residents:
+        lines += ["### 常住人口", ""]
+        lines += _table(head, [
+            [label] + [_num((residents.get(r) or {}).get(key)) for r in radii]
+            for label, key in (("総人口", "population"), ("0〜14歳", "age_0_14"),
+                               ("15〜64歳", "age_15_64"), ("65歳以上", "age_65_plus"),
+                               ("世帯数", "households"))
+        ] + [["人口増減率（2015→2020）"]
+             + [_pct((residents.get(r) or {}).get("population_growth")) for r in radii]])
+
+    daytime = (demand.get("daytime") or {}).get("by_radius") or {}
+    if daytime:
+        lines += ["### 昼間（従業者・事業所）", ""]
+        lines += _table(head, [
+            [label] + [_num((daytime.get(r) or {}).get(key)) for r in radii]
+            for label, key in (("従業者数", "workers"), ("事業所数", "establishments"))
+        ])
+        mix = (demand.get("daytime") or {}).get("industry_mix") or {}
+        if mix:
+            labels = {"tertiary": "第3次産業", "secondary": "第2次産業",
+                      "wholesale_retail": "卸売・小売", "accommodation_food": "宿泊・飲食",
+                      "health_welfare": "医療・福祉", "education": "教育・学習支援"}
+            lines += ["#### 産業別（商圏内）", ""]
+            lines += _table(["産業", "従業者数", "事業所数"], [
+                [labels.get(key, key), _num(v.get("workers")), _num(v.get("establishments"))]
+                for key, v in mix.items()])
+
+    by_radius = competition.get("by_radius") or {}
+    if by_radius:
+        lines += ["### 競合（歯科医院）", ""]
+        lines += _table(head, [
+            [label] + [_num((by_radius.get(r) or {}).get(key)) for r in radii]
+            for label, key in (("医院数", "dental_clinics"),
+                               ("1院あたり常住人口", "population_per_clinic"),
+                               ("1院あたり従業者数", "workers_per_clinic"))
+        ])
+
+    specialty = competition.get("by_specialty") or {}
+    if specialty.get("detail"):
+        lines += ["#### 標榜診療科目（商圏内）", ""]
+        lines += _table(["科目", "医院数", "標榜率", "1院あたり人口"], [
+            [item.get("label"), _num(item.get("count")),
+             "—" if item.get("share_of_clinics_with_data") is None
+             else f"{item['share_of_clinics_with_data'] * 100:.1f}%",
+             _num(item.get("population_per_clinic"))]
+            for item in specialty["detail"]])
+
+    hours = competition.get("hours") or {}
+    if hours.get("counts"):
+        lines += ["#### 診療時間（商圏内）", ""]
+        lines += _table(["区分", "医院数", "割合"], [
+            [item.get("label"), _num(item.get("count")),
+             "—" if item.get("share") is None else f"{item['share'] * 100:.1f}%"]
+            for item in hours["counts"]])
+        if hours.get("weekly_hours_median") is not None:
+            lines += [f"週間診療時間の中央値: {hours['weekly_hours_median']} 時間", ""]
+
+    clinics = (competition.get("clinics_in_radius") or {}).get("items") or []
+    if clinics:
+        lines += ["#### 商圏内の歯科医院", ""]
+        lines += _table(["距離", "名称", "標榜科目", "週間診療時間"], [
+            [_num(c.get("distance_m"), "m"), c.get("name"),
+             "・".join(s.get("label", "") for s in (c.get("specialties") or [])) or "—",
+             _num(((c.get("hours") or {}) or {}).get("weekly_hours"), "h")]
+            for c in clinics])
+
+    lines += _access_figures(dataset)
+    lines += _cost_figures(dataset)
+    return lines
+
+
+def _access_figures(dataset: Mapping[str, Any]) -> list[str]:
+    access = dataset.get("access") or {}
+    stations = (access.get("stations_in_radius") or {}).get("items") or []
+    if not stations:
+        return []
+    return ["### 交通アクセス", ""] + _table(
+        ["距離", "駅", "事業者", "乗降客数/日"],
+        [[_num(s.get("distance_m"), "m"), s.get("name"), s.get("operator"),
+          _num(s.get("daily_passengers"), "人")] for s in stations[:10]])
+
+
+def _cost_figures(dataset: Mapping[str, Any]) -> list[str]:
+    cost = dataset.get("cost") or {}
+    divisions = cost.get("by_use_division") or []
+    if not divisions:
+        return []
+    lines = ["### 地価（公示地価）", ""]
+    lines += _table(["用途", "地点数", "中央値", "最小", "最大", "前年比", "調査年"], [
+        [d.get("use_category"), _num(d.get("points")),
+         _num(d.get("median_yen_per_sqm"), "円/m²"),
+         _num(d.get("min_yen_per_sqm"), "円/m²"),
+         _num(d.get("max_yen_per_sqm"), "円/m²"),
+         "—" if d.get("mean_change_pct") is None else f"{d['mean_change_pct']:+.1f}%",
+         d.get("survey_year")] for d in divisions])
+    if cost.get("note"):
+        lines += [str(cost["note"]), ""]
+    return lines
 
 
 def _decision_block(decision: Mapping[str, Any]) -> list[str]:
@@ -253,6 +397,57 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         report_id = str(cur.fetchone()["id"])
     conn.commit()
     return report_id
+
+
+#: レポートを書き出す既定の場所。設定で変えられます（config/analysis.yaml）。
+DEFAULT_OUTPUT_DIR = "reports"
+
+
+def write_file(conn: psycopg.Connection, job_id: str,
+               directory: str | None = None) -> Path | None:
+    """レポートをファイルとして書き出す。
+
+    STEP4 が終わったら黙って保存します。追加のコマンドを打たないと現物が
+    手に入らないのでは、「レポートを作る道具」として不完全です。DB の中に
+    あることと、手元にファイルがあることは違います。
+
+    同じジョブを何度やり直しても同じ名前に上書きします。日付ごとに増やすと、
+    どれが最新か分からなくなります。
+    """
+    from kaigyou_core import config as cfg
+
+    markdown = markdown_for(conn, job_id)
+    if markdown is None:
+        return None
+    settings = (cfg.analysis_config().get("report") or {})
+    target = Path(directory or settings.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    target.mkdir(parents=True, exist_ok=True)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT location_name, latitude, longitude, radius_m, created_at "
+                    "FROM analysis_jobs WHERE id = %s", (job_id,))
+        job = cur.fetchone()
+    path = target / _file_name(job_id, job)
+    path.write_text(markdown, encoding="utf-8")
+    return path
+
+
+def _file_name(job_id: str, job: Mapping[str, Any] | None) -> str:
+    """人が見て分かる名前に。地点名が無ければ座標で。
+
+    ファイル名に使えない文字は落とします（Windows で `/` や `:` が入ると
+    保存できません）。
+    """
+    if not job:
+        return f"{job_id[:8]}.md"
+    name = (job.get("location_name") or "").strip()
+    if not name:
+        name = f"{job['latitude']:.5f}_{job['longitude']:.5f}"
+    for bad in '\\/:*?"<>|\n\t':
+        name = name.replace(bad, "_")
+    when = job.get("created_at")
+    stamp = f"{when:%Y%m%d}" if hasattr(when, "year") else ""
+    return "_".join(x for x in ("商圏分析", name[:40], stamp, job_id[:8]) if x) + ".md"
 
 
 def markdown_for(conn: psycopg.Connection, job_id: str) -> str | None:
