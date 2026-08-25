@@ -21,7 +21,23 @@ T = TypeVar("T", bound=BaseModel)
 #: Web検索ツール。要件 §8 の外部調査はこれで行います。検索プロバイダを
 #: 別途契約せずに済み、出典 URL とタイトルが結果ブロックに入るので
 #: analysis_sources にそのまま落とせます。
+#:
+#: この型（動的フィルタ付き）は Sonnet 5 / Opus 5 系で使えます。それより古い
+#: モデルを設定した場合は基本版に落とす必要があるので、モデルを変えるときは
+#: ここも確認してください。
 WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+
+#: このプロジェクトが送らないもの。
+#:
+#: Sonnet 5 / Opus 5 系では ``budget_tokens`` と ``temperature`` などの
+#: サンプリング指定は**削除**されていて、送ると 400 で落ちます。思考の深さは
+#: ``thinking: {"type": "adaptive"}`` と ``output_config.effort`` で決めます。
+#: 「以前はこう書いた」で足さないよう、理由をここに残します。
+REMOVED_PARAMETERS = ("budget_tokens", "temperature", "top_p", "top_k")
+
+
+class Refused(RuntimeError):
+    """安全性の判定で応答が拒否された。障害ではないので、そう記録します。"""
 
 
 class NotConfigured(RuntimeError):
@@ -144,6 +160,14 @@ def ask(*, step_number: int, system: str, user: str,
         with client.messages.stream(**request) as stream:
             message = stream.get_final_message()
         parsed = None
+
+    # 拒否は例外ではなく HTTP 200 で返ります。content を読む前に確かめないと、
+    # 空の応答を「モデルが何も見つけなかった」と取り違えます。
+    if getattr(message, "stop_reason", None) == "refusal":
+        details = getattr(message, "stop_details", None)
+        raise Refused(
+            f"モデルが応答を拒否しました（category={getattr(details, 'category', None)}）: "
+            f"{getattr(details, 'explanation', '')}")
 
     return Result(
         parsed=parsed,

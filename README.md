@@ -992,8 +992,26 @@ python -m kaigyou_etl analyze --once
 `projection.full_dataset: true` にすると、何も削らずデータセット全体を渡します
 （比較実験用）。
 
-入力サイズの実測: 銀座・半径1km で 86KB（≒43,000トークン、Opus 5 の入力で
-$0.22 程度）、裾野・半径1km で 31KB。
+入力サイズの実測: 銀座・半径1km で 86KB（≒43,000トークン）、裾野・半径1km で 31KB。
+
+### モデル
+
+既定は **`claude-sonnet-5`**（`config/analysis.yaml` の `model.id`）。
+ステップごとに `steps.<n>.model` で上書きできます。
+
+| モデル | 入力/出力（$/1Mtok） | STEP1 1回の概算 |
+|---|---|---:|
+| `claude-sonnet-5`（既定） | $2 / $10 | **$0.13** |
+| `claude-opus-5` | $5 / $25 | $0.32 |
+
+（銀座・半径1km、入力43,233トークン＋出力4,000トークンの想定。出力側は未実測です）
+
+推論の深さは `model.effort`（`low` 〜 `max`、既定 `high`）。
+このモデル系では `budget_tokens` や `temperature` は**削除**されていて、
+送ると 400 になります。深さは adaptive thinking と `effort` で決めます。
+
+レポートの質が物足りなければ、まず `effort: xhigh` を試し、それでも足りなければ
+STEP4 だけ `model: claude-opus-5` にするのが費用対効果の良い順序です。
 
 ### API
 

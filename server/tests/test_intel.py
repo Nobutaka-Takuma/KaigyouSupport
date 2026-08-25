@@ -466,3 +466,79 @@ def test_the_dry_run_can_target_one_job():
     args = build_parser().parse_args(
         ["analyze", "--dry-run", "step1.txt", "--job", "abc-123"])
     assert args.dry_run == "step1.txt" and args.job == "abc-123"
+
+
+# ------------------------------------------------------------ モデルの契約
+#
+# Sonnet 5 / Opus 5 系では、以前よく書かれていた指定のいくつかが**削除**され、
+# 送ると 400 で落ちます。「前はこう書いた」で戻ってこないように固定します。
+
+def test_the_configured_model_is_a_current_one():
+    """モデルIDは実在するものだけ。日付サフィックスは付けない。"""
+    known = {"claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+             "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+             "claude-fable-5"}
+    config = cfg.analysis_config()
+    assert config["model"]["id"] in known, f"未知のモデル: {config['model']['id']}"
+    for number, step in config["steps"].items():
+        if step.get("model"):
+            assert step["model"] in known, f"step{number} のモデルが未知です"
+
+
+def test_effort_is_one_of_the_documented_levels():
+    config = cfg.analysis_config()
+    levels = {"low", "medium", "high", "xhigh", "max"}
+    assert config["model"]["effort"] in levels
+
+
+def test_we_never_send_the_parameters_that_were_removed():
+    """budget_tokens / temperature などは 400 になります。
+
+    思考の深さは adaptive thinking と effort で決めます。固定のトークン予算と
+    いう考え方はもうありません。
+    """
+    from kaigyou_intel import client as llm
+
+    source = Path(llm.__file__).read_text(encoding="utf-8")
+    request_block = source[source.index('request: dict[str, Any] = {'):
+                            source.index('declared = list(tools or [])')]
+    for parameter in llm.REMOVED_PARAMETERS:
+        assert f'"{parameter}"' not in request_block, (
+            f"{parameter} を送っています。このモデルでは 400 になります")
+
+
+def test_thinking_is_adaptive():
+    """このモデル系での唯一の有効な指定。"""
+    from kaigyou_intel import client as llm
+
+    source = Path(llm.__file__).read_text(encoding="utf-8")
+    assert '"thinking": {"type": "adaptive"}' in source
+
+
+def test_a_refusal_is_reported_rather_than_read_as_an_empty_answer(monkeypatch):
+    """拒否は例外ではなく HTTP 200 で返る。
+
+    content を読む前に stop_reason を確かめないと、空の応答を
+    「モデルが何も見つけなかった」と取り違えます。
+    """
+    from kaigyou_intel import client as llm
+
+    class _Details:
+        category, explanation = "cyber", "declined"
+
+    class _Message:
+        stop_reason, stop_details, content = "refusal", _Details(), []
+        usage = type("U", (), {"input_tokens": 10, "output_tokens": 0})()
+        model = "claude-sonnet-5"
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def parse(**kwargs):
+                m = _Message()
+                m.parsed_output = None
+                return m
+
+    monkeypatch.setattr(llm, "_client", lambda: _Client())
+    with pytest.raises(llm.Refused, match="cyber"):
+        llm.ask(step_number=1, system="s", user="u", schema=Step1Output)
