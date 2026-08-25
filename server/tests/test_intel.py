@@ -995,8 +995,15 @@ def test_a_job_that_stops_does_not_stay_running_forever(conn, dataset):
 
     try:
         assert worker.run_job(conn, job_id) == "blocked"
-        # 未実装で止まったのは失敗ではないので、queued に戻します。queued は
-        # claim_job が拾う唯一の状態なので、実装した次の実行が続きから拾えます。
+        # running のままにしない。ただし queued にも戻しません。戻すと worker が
+        # 同じ Job を拾っては同じところで止まる、を繰り返します。
+        # claim_job は queued しか見ないので、blocked は拾われません。
+        assert jobs.get_job(conn, job_id)["status"] == "blocked"
+
+        # 止まっていたステップを実装した体で、自動的に待ち行列へ戻ること。
+        blocked_at = jobs.next_step(conn, job_id)
+        assert jobs.requeue_unblocked(conn, {1, 2}) == 0, "まだ実装していない"
+        assert jobs.requeue_unblocked(conn, {blocked_at}) >= 1
         assert jobs.get_job(conn, job_id)["status"] == "queued"
     finally:
         _drop_job(job_id)

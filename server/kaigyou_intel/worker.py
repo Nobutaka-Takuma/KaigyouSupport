@@ -142,6 +142,14 @@ def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
         say("ANTHROPIC_API_KEY が未設定です。分析は実行できません。")
         return 1
 
+    with connect() as conn:
+        # 未実装で止まっていた Job を、実装済みになっていれば拾い直します。
+        # 「実装したあとにどのジョブを再開するか」を人が覚えている必要は
+        # 無いはずです。
+        resumed = jobs.requeue_unblocked(conn, RUNNERS)
+    if resumed:
+        say(f"未実装で止まっていたジョブ {resumed} 件を再開します。")
+
     if job_id is not None:
         with connect() as conn:
             claimed = jobs.claim_specific(conn, job_id)

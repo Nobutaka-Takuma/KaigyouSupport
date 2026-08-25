@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import psycopg
 from psycopg.types.json import Json
@@ -154,12 +154,15 @@ def release_job(conn: psycopg.Connection, job_id: str, outcome: str,
     見ないので二度と拾われません。実測：銀座のジョブが running のまま残り、
     ``analyze --once`` が「0 件を処理しました」と言い続けました。
 
-    ``blocked``（未実装のステップに当たった）は queued に戻します。失敗では
-    ないので、そのステップを実装した次の実行がそのまま続きから拾います。
+    ``blocked``（未実装のステップに当たった）は失敗ではありませんが、queued にも
+    戻しません。worker は queued を古い順に拾うので、戻すと同じ Job を拾っては
+    同じところで止まる、を繰り返します（``--poll`` なら 5 秒ごと）。blocked の
+    Job は ``requeue_unblocked`` が、そのステップの実装後に自動で戻します。
+
     ``failed`` は failed のままにします。壊れたまま自動で拾い直すと、
     同じ失敗に何度も課金されます。
     """
-    status = {"completed": "completed", "blocked": "queued"}.get(outcome, "failed")
+    status = {"completed": "completed", "blocked": "blocked"}.get(outcome, "failed")
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE analysis_jobs SET status = %s, error_message = %s, "
@@ -167,6 +170,29 @@ def release_job(conn: psycopg.Connection, job_id: str, outcome: str,
             "WHERE id = %s",
             (status, (message or "")[:4000] or None, status, job_id))
     conn.commit()
+
+
+def requeue_unblocked(conn: psycopg.Connection, implemented: Iterable[int]) -> int:
+    """止まっていたステップが実装済みになった Job を、待ち行列に戻す。
+
+    worker の起動時に呼びます。実装したあとに「どのジョブを再開すればいいか」を
+    人が思い出す必要は無いはずです。次のステップがまだ未実装のものは、
+    blocked のままにします。
+    """
+    numbers = sorted(set(implemented))
+    if not numbers:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM analysis_jobs WHERE status = 'blocked'")
+        candidates = [str(r["id"]) for r in cur.fetchall()]
+        moved = [job_id for job_id in candidates
+                 if next_step(conn, job_id) in numbers]
+        if moved:
+            cur.execute(
+                "UPDATE analysis_jobs SET status = 'queued', error_message = NULL "
+                "WHERE id = ANY(%s)", (moved,))
+    conn.commit()
+    return len(moved)
 
 
 def start_step(conn: psycopg.Connection, job_id: str, number: int,

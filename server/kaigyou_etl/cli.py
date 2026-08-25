@@ -633,10 +633,19 @@ def _explain_why_nothing_ran() -> None:
         print("  ジョブがありません。")
         print("    python -m kaigyou_etl new-analysis --lat 35.6717 --lng 139.7650")
         return
+    if "blocked" in rows:
+        # 失敗ではありません。材料は揃っていて、続きを実装していないだけです。
+        row = rows["blocked"]
+        print(f"  未実装のステップで待機中のジョブが {row['n']} 件あります"
+              "（失敗ではありません）。")
+        print("    そのステップを実装すると、次の `analyze --once` が自動で再開します。")
+        print(f"    途中まで読む: python -m kaigyou_etl analyze --show {row['newest']}")
+
     stuck = [rows[s] for s in ("failed", "running") if s in rows]
     if not stuck:
-        summary = "、".join(f"{s} {r['n']}件" for s, r in rows.items())
-        print(f"  待っているジョブがありません（{summary}）。")
+        if "blocked" not in rows:
+            summary = "、".join(f"{s} {r['n']}件" for s, r in rows.items())
+            print(f"  待っているジョブがありません（{summary}）。")
         return
     for row in stuck:
         label = {"failed": "失敗したまま", "running": "実行中のまま"}[row["status"]]
