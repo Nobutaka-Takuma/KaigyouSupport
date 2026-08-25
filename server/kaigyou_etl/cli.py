@@ -294,8 +294,41 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     Vercel の関数には実行時間の上限があり、Web検索を伴う 4 ステップは
     そこに収まりません（要件 §31）。API は Job を作るだけで、実行はここです。
     """
+    import json as _json
+
     from kaigyou_intel import client as llm
+    from kaigyou_intel import jobs as _jobs
+    from kaigyou_intel.steps import step1_features
     from kaigyou_intel.worker import serve
+
+    if args.dry_run:
+        # 課金する前に、何が送られるかを見るための道具。API は叩きません。
+        with connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM analysis_jobs WHERE status IN "
+                            "('queued','running','failed') ORDER BY created_at LIMIT 1")
+                row = cur.fetchone()
+            if row is None:
+                print("待っているジョブがありません。先に POST /api/analysis で作成してください。")
+                return EXIT_OK
+            job_id = str(row["id"])
+            job = _jobs.get_job(conn, job_id, include_base_data=True)
+
+        payload = step1_features.build_input(job["base_data"])
+        settings = llm.step_settings(1)
+        system = cfg.prompt_text(settings["prompt"])
+        body = _json.dumps(payload, ensure_ascii=False, indent=1)
+
+        out = Path(args.dry_run)
+        out.write_text(f"===== system ({settings['prompt_version']}) =====\n"
+                       f"{system}\n\n===== user =====\n{body}\n", encoding="utf-8")
+        size = len(system.encode()) + len(body.encode())
+        print(f"ジョブ {job_id} / STEP1 に送る内容を書き出しました: {out}")
+        print(f"  モデル      {settings['model']}（effort={settings['effort']}）")
+        print(f"  入力サイズ  {size:,} bytes  ≒ {size // 2:,} トークン前後（日本語の概算）")
+        print(f"  Web検索     {'あり' if settings['web_search'] else 'なし'}")
+        print("\n中身を確認してから、キーを設定して --once を実行してください。")
+        return EXIT_OK
 
     if not llm.is_configured():
         print("error: ANTHROPIC_API_KEY が設定されていません。", file=sys.stderr)
@@ -498,6 +531,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="待っているジョブを1件処理して終了する")
     p.add_argument("--poll", type=float, default=5.0,
                    help="ジョブが無いときの待ち時間（秒）")
+    p.add_argument("--dry-run", metavar="FILE",
+                   help="APIを呼ばずに、STEP1へ送る内容をファイルへ書き出す")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")

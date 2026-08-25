@@ -305,6 +305,53 @@ def _check_specialties(report: Report, conn: Any) -> None:
                    + ("…" if len(covered) > 8 else ""))
 
 
+def _check_intelligence(report: Report, conn: Any) -> None:
+    """商圏インテリジェンス・エンジンが動かせる状態か。
+
+    足りないものは 3 種類あり、直し方が違います。テーブル（migrate）、
+    パッケージ（pip）、APIキー（環境変数）。まとめて「使えません」と言うと、
+    どれを直せばよいか分かりません。
+    """
+    from kaigyou_core.db import table_exists
+
+    tables = ["analysis_jobs", "analysis_steps", "analysis_sources", "analysis_reports"]
+    missing = [t for t in tables if not table_exists(conn, t)]
+    if missing:
+        report.add("商圏分析エンジン", WARN, f"テーブルがありません: {', '.join(missing)}",
+                   "kaigyou-etl migrate を実行してください。")
+        return
+
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        report.add("商圏分析エンジン", WARN, "anthropic パッケージが未導入",
+                   "pip install anthropic を実行してください。")
+        return
+
+    from kaigyou_intel import client as llm
+
+    if not llm.is_configured():
+        report.add("商圏分析エンジン", WARN, "ANTHROPIC_API_KEY が未設定",
+                   "https://console.anthropic.com でキーを作り、"
+                   "$env:ANTHROPIC_API_KEY = 'sk-ant-...' を設定してください。"
+                   "（設定前でも analyze --dry-run で送信内容は確認できます）")
+    else:
+        settings = llm.step_settings(1)
+        report.add("商圏分析エンジン", OK,
+                   f"実行可能（{settings['model']} / {settings['prompt_version']}）")
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT status, count(*) AS n FROM analysis_jobs GROUP BY status
+        """)
+        counts = {r["status"]: r["n"] for r in cur.fetchall()}
+    if counts:
+        report.add("分析ジョブ", OK,
+                   "、".join(f"{k} {v}件" for k, v in sorted(counts.items()))
+                   + ("  → kaigyou-etl analyze で実行できます"
+                      if counts.get("queued") else ""))
+
+
 def _check_walk_network(report: Report, conn: Any) -> None:
     """Whether a walking catchment can be produced, and what is missing if not.
 
@@ -536,6 +583,7 @@ def run() -> Report:
         _check_prefectures(report, conn)
         _check_scores(report, conn)
         _check_specialties(report, conn)
+        _check_intelligence(report, conn)
         _check_walk_network(report, conn)
         _check_api_surface(report, conn)
     return report
