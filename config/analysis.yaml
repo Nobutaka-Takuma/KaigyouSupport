@@ -42,6 +42,23 @@ search:
   allowed_domains: []
   blocked_domains: []
 
+# STEP1 に渡す範囲。
+#
+# 削る基準は「コストが高いもの」ではなく「発見に寄与しないもの」です。
+# 医院20件の名前と住所は14KBありますが、パターン発見には効きません
+# （効くのは competition.by_specialty と hours の集計のほう）。
+#
+# 逆に、母集団6つの比較は42.9KBありますが**これは削れません**。
+# 「県内では上位45.7%だが市区町村内では下位2.4%」という食い違いこそが
+# パターンで、代表の1つだけを渡すとその食い違いが見えなくなります。
+projection:
+  all_benchmarks: true     # 母集団6つの比較を全部渡す（prefecture / municipality / nearby ...）
+  clinic_list: false       # 商圏内の医院一覧（名前・住所）
+  station_list: true       # 商圏内の駅（路線・乗降客数）
+  # 何も削らずデータセット全体を渡す。上の3つより優先されます。
+  # 比較実験用。既定では使いません（成分の値が measures と二重になるため）。
+  full_dataset: false
+
 steps:
   1:
     name: 商圏特徴抽出

@@ -359,6 +359,39 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from kaigyou_intel.steps import step1_features
     from kaigyou_intel.worker import serve
 
+    if args.list:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, location_name, latitude, longitude, radius_m, profile,
+                       status, current_step, created_at
+                FROM analysis_jobs ORDER BY created_at DESC LIMIT 20
+            """)
+            rows = cur.fetchall()
+        if not rows:
+            print("ジョブはありません。")
+            return EXIT_OK
+        print(f"{'作成日時':16s} {'状態':10s} {'地点':14s} ジョブID")
+        for i, r in enumerate(rows):
+            when = r["created_at"].strftime("%m-%d %H:%M")
+            name = (r["location_name"] or f"{r['latitude']:.4f},{r['longitude']:.4f}")[:14]
+            mark = " ←次に実行" if r["status"] == "queued" and r is rows[-1] else ""
+            print(f"{when:16s} {r['status']:10s} {name:14s} {r['id']}{mark}")
+        print("\nworker は古い順に処理します。不要なものは --cancel <id> で取り下げてください。")
+        return EXIT_OK
+
+    if args.cancel:
+        with connect() as conn, conn.cursor() as cur:
+            if args.cancel == "all":
+                cur.execute("UPDATE analysis_jobs SET status = 'cancelled' "
+                            "WHERE status IN ('queued','failed') RETURNING id")
+            else:
+                cur.execute("UPDATE analysis_jobs SET status = 'cancelled' "
+                            "WHERE id = %s RETURNING id", (args.cancel,))
+            cancelled = cur.fetchall()
+            conn.commit()
+        print(f"{len(cancelled)} 件を取り下げました。")
+        return EXIT_OK
+
     if args.dry_run:
         # 課金する前に、何が送られるかを見るための道具。API は叩きません。
         with connect() as conn:
@@ -368,15 +401,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                                 (args.job,))
                     row, waiting = cur.fetchone(), 1
                 else:
-                    # worker が次に拾うのと同じ順（古い順）。「送られる内容」を
-                    # 見るための道具なので、実際に送られるものを見せます。
+                    # いちばん新しいもの。`--dry-run` を打つのは、たいてい
+                    # ジョブを作った直後に「いま作ったものを見たい」ときです。
+                    # worker の順（古い順）に合わせると、前に作って忘れていた
+                    # ジョブが表示され、消えていないように見えます。
                     cur.execute(
                         "SELECT id, location_name FROM analysis_jobs "
                         "WHERE status IN ('queued','running','failed') "
-                        "ORDER BY created_at LIMIT 1")
+                        "ORDER BY created_at DESC LIMIT 1")
                     row = cur.fetchone()
                     cur.execute("SELECT count(*) AS n FROM analysis_jobs "
-                                "WHERE status IN ('queued','running','failed')")
+                                "WHERE status = 'queued'")
                     waiting = cur.fetchone()["n"]
             if row is None:
                 print("待っているジョブがありません。")
@@ -391,8 +426,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         body = _json.dumps(payload, ensure_ascii=False, indent=1)
 
         if waiting > 1 and not args.job:
-            print(f"待っているジョブ {waiting} 件のうち、worker が次に拾うものを表示します。"
-                  "（--job <id> で指定できます）")
+            # worker は古い順に処理します。いま見ているものが次に実行される
+            # とは限らないので、そこを黙っていると想定と違う結果になります。
+            print(f"待っているジョブが {waiting} 件あります。ここに表示するのは"
+                  "**いちばん新しいもの**です。")
+            print("  worker は古い順に処理します。"
+                  "`analyze --list` で一覧、`--cancel all` で不要分を取り下げ。")
         out = Path(args.dry_run)
         out.write_text(f"===== system ({settings['prompt_version']}) =====\n"
                        f"{system}\n\n===== user =====\n{body}\n", encoding="utf-8")
@@ -619,7 +658,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", metavar="FILE",
                    help="APIを呼ばずに、STEP1へ送る内容をファイルへ書き出す")
     p.add_argument("--job", metavar="ID", default=None,
-                   help="対象のジョブID（省略時は worker が次に拾うもの）")
+                   help="対象のジョブID（省略時はいちばん新しいもの）")
+    p.add_argument("--list", action="store_true", help="ジョブの一覧を表示する")
+    p.add_argument("--cancel", metavar="ID", default=None,
+                   help="ジョブを取り下げる（all で待機中すべて）")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")

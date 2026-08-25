@@ -118,19 +118,60 @@ def test_step1_is_given_the_benchmarks_rather_than_asked_to_compute_them(dataset
             assert measure.get("benchmark_type")
 
 
-def test_step1_input_is_a_fraction_of_the_whole_document(dataset):
-    """要件 §34：元JSONを毎回丸ごと渡さない。"""
+def test_step1_keeps_every_reference_class(dataset):
+    """母集団6つの比較は削らない。
+
+    最初の実装は「大きいものを削る」で代表1つに間引いていました。ですがそこは
+    いちばん削ってはいけない場所でした。銀座の 0〜14歳人口は、県内では
+    下位24.3%（typical）なのに、近隣・同一区・同規模の商圏と比べると
+    下位2.4〜4.5%（very_low）です。**食い違いこそがパターン**で、代表1つでは
+    見えません。
+
+    削る基準は「大きいもの」ではなく「発見に寄与しないもの」です。
+    """
+    payload = for_step1(dataset, {"all_benchmarks": True})
+    placed = [m for m in payload["measures"]
+              if m.get("value") is not None and m.get("percentile") is not None]
+    assert placed
+    for measure in placed:
+        assert measure.get("benchmarks"), f"{measure['key']} の比較が落ちています"
+    # 母集団が複数あることが、この設計の要点。
+    assert max(len(m["benchmarks"]) for m in placed) >= 3
+
+
+def test_step1_still_drops_what_does_not_help(dataset):
+    """要件 §34：元JSONを毎回丸ごと渡さない。
+
+    医院20件の名前と住所は14KBありますが、パターン発見には効きません
+    （効くのは by_specialty と hours の集計のほう）。
+    """
     whole = len(json.dumps(to_jsonable(dataset), ensure_ascii=False).encode())
-    projected = len(json.dumps(for_step1(dataset), ensure_ascii=False).encode())
-    assert projected < whole * 0.5, (
-        f"STEP1 の入力が大きすぎます: {projected:,} / {whole:,} bytes")
+    projected = len(json.dumps(
+        for_step1(dataset, {"all_benchmarks": True}), ensure_ascii=False).encode())
+    assert projected < whole, "何も削れていません"
+    assert "clinics" not in for_step1(dataset, {})["competition"]
+
+
+def test_the_whole_dataset_can_be_sent_when_asked(dataset):
+    """比較実験のための逃げ道。既定ではありません。"""
+    payload = for_step1(dataset, {"full_dataset": True})
+    assert set(payload) == set(to_jsonable(dataset))
+
+
+def test_what_step1_sees_is_configuration_not_code():
+    """何を渡すかは config/analysis.yaml で変えられること。"""
+    projection = cfg.analysis_config().get("projection") or {}
+    assert projection.get("all_benchmarks") is True
+    assert projection.get("clinic_list") is False
+    assert projection.get("full_dataset") is False
 
 
 def test_the_clinic_list_is_not_sent_to_step1(dataset):
     """50件の医院名と住所は 34KB あって、パターン発見には寄与しません。"""
-    payload = for_step1(dataset)
-    assert "items" not in payload["competition"]
+    payload = for_step1(dataset, {})
+    assert "clinics" not in payload["competition"]
     assert payload["competition"]["by_specialty"] is not None
+    assert payload["competition"]["hours"] is not None
 
 
 def test_step1_keeps_the_reasons_a_comparison_was_withheld(dataset):

@@ -62,8 +62,12 @@ def base_data_hash(dataset: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _measure(item: Mapping[str, Any]) -> dict[str, Any]:
+def _measure(item: Mapping[str, Any], keep_benchmarks: bool = True) -> dict[str, Any]:
     out = {k: item[k] for k in _MEASURE_FIELDS if k in item and item[k] is not None}
+    if keep_benchmarks and item.get("benchmarks"):
+        # 6つの比較。代表（平坦な benchmark_*）は prefecture などの写しですが、
+        # 母集団によって読みが変わることこそがパターンの材料です。
+        out["benchmarks"] = item["benchmarks"]
     # 比較できなかったものは、なぜできなかったかごと残します。欄ごと消すと
     # 「平凡だった」と読まれます。
     if item.get("value") is not None and item.get("percentile") is None:
@@ -72,14 +76,26 @@ def _measure(item: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def for_step1(dataset: Mapping[str, Any]) -> dict[str, Any]:
+def for_step1(dataset: Mapping[str, Any],
+              settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """STEP1（商圏特徴抽出）の入力。
 
     FACT と BENCHMARK は既に算出済みなので、ここでは**発見**だけをさせます。
     パーセンタイルや順位を LLM に作らせません（要件 §3 原則2）。作らせると、
     それらしい数字が出てきて、しかも間違っていても誰も気づけません。
+
+    削る基準は「大きいもの」ではなく「発見に寄与しないもの」です。最初の実装は
+    そこを取り違えて、母集団6つの比較（42.9KB）を代表1つに間引いていました。
+    ですがその比較こそがパターンの材料で、「県内では上位45.7%だが市区町村内では
+    下位2.4%」という食い違いは、6つ揃っていないと見つかりません。
     """
+    settings = settings or {}
+    if settings.get("full_dataset"):
+        # 何も削らない。比較実験用。
+        return to_jsonable(dataset)
+
     measures = dataset.get("measures") or {}
+    keep_benchmarks = settings.get("all_benchmarks", True)
     return {
         "location": dataset.get("location"),
         "query": dataset.get("query"),
@@ -95,8 +111,8 @@ def for_step1(dataset: Mapping[str, Any]) -> dict[str, Any]:
         # 使い、しかも同じ数字が 2 か所にある状態で読ませることになります）。
         "insight_metrics": [_insight(i) for i in (dataset.get("insight_metrics") or [])],
         "demand": dataset.get("demand"),
-        "competition": _competition_summary(dataset),
-        "access": _access_summary(dataset),
+        "competition": _competition_summary(dataset, settings.get("clinic_list", False)),
+        "access": _access_summary(dataset, settings.get("station_list", True)),
         "cost": _cost_summary(dataset),
         "regulation": dataset.get("regulation"),
         "data_quality": dataset.get("data_quality"),
@@ -122,7 +138,8 @@ def _insight(insight: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _access_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
+def _access_summary(dataset: Mapping[str, Any],
+                    include_list: bool = True) -> dict[str, Any]:
     """最寄り駅と、商圏内の駅の要点だけ。
 
     路線名と事業者名まで並べると 3KB になりますが、Step1 が見つけるべきなのは
@@ -133,15 +150,16 @@ def _access_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "nearest_station": access.get("nearest_station"),
         "stations_in_radius": len(stations),
-        "stations": [
+        "stations": ([
             {"name": s.get("name"), "distance_m": s.get("distance_m"),
              "daily_passengers": s.get("daily_passengers")}
             for s in stations[:5]
-        ],
+        ] if include_list else None),
     }
 
 
-def _competition_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
+def _competition_summary(dataset: Mapping[str, Any],
+                         include_list: bool = False) -> dict[str, Any]:
     """医院の一覧は落とし、集計だけ残す。
 
     50 件の医院名と住所は 34KB あって、Step1 が発見すべきパターンには
@@ -149,7 +167,7 @@ def _competition_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
     """
     comp = dataset.get("competition") or {}
     inside = comp.get("clinics_in_radius") or {}
-    return {
+    out = {
         "by_radius": comp.get("by_radius"),
         "nearest": comp.get("nearest"),
         "clinic_count": inside.get("count"),
@@ -157,6 +175,9 @@ def _competition_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
         "hours": comp.get("hours"),
         "proximity": comp.get("proximity"),
     }
+    if include_list:
+        out["clinics"] = inside.get("items")
+    return out
 
 
 def _cost_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:

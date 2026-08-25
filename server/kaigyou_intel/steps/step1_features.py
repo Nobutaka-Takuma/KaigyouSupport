@@ -26,7 +26,8 @@ class StepFailed(RuntimeError):
 
 
 def build_input(dataset: Mapping[str, Any]) -> dict[str, Any]:
-    return for_step1(dataset)
+    """何を渡すかは config/analysis.yaml の projection: で決まります。"""
+    return for_step1(dataset, cfg.analysis_config().get("projection") or {})
 
 
 def run(dataset: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
