@@ -88,6 +88,8 @@ def run_job(conn: psycopg.Connection, job_id: str,
             return "blocked"
         except Exception as exc:  # noqa: BLE001
             say(f"    失敗: {type(exc).__name__}: {exc}")
+            say(f"    直したら: python -m kaigyou_etl analyze --once"
+                f"  （STEP{number} からやり直します。済んだステップは残ります）")
             return "failed"
 
 

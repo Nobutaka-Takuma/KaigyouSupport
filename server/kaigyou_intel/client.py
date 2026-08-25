@@ -119,24 +119,26 @@ def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any]) -> di
     return tool
 
 
-def ask(*, step_number: int, system: str, user: str,
-        schema: Type[T] | None = None,
-        tools: Sequence[Mapping[str, Any]] | None = None) -> Result:
-    """1 ステップぶんの呼び出し。
+def build_request(step_number: int, system: str, user: str, *,
+                  tools: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """送信する本体を組み立てる。呼び出しとは分けてあります。
 
-    ``schema`` を渡すと構造化出力で受け取り、Pydantic で検証します。
-    渡さないときは本文をそのまま返します（Web検索の段のように、まず調べさせて
-    から別呼び出しで構造化するとき）。
+    分けているのは検算のためです。API キーの無い環境でも、この戻り値が
+    そのまま JSON にできるかを確かめられます。最初の実装は Pydantic の
+    **クラス**を ``output_config.format`` に入れていて、送信の瞬間に
+    ``Object of type ModelMetaclass is not JSON serializable`` で落ちました。
+    呼び出しごとスタブしたテストでは、その形を一度も見ていませんでした。
     """
     settings = step_settings(step_number)
     config = cfg.analysis_config()
-    client = _client()
 
     request: dict[str, Any] = {
         "model": settings["model"],
         "max_tokens": settings["max_tokens"],
         # 「専門家の思考プロセスの再現」が要件なので、考える量を削りません。
         "thinking": {"type": "adaptive"},
+        # effort はここ。スキーマは output_format に渡し、SDK が
+        # output_config へマージします（型のまま入れてはいけません）。
         "output_config": {"effort": settings["effort"]},
         "system": system,
         "messages": [{"role": "user", "content": user}],
@@ -148,12 +150,28 @@ def ask(*, step_number: int, system: str, user: str,
                                          config.get("search") or {}))
     if declared:
         request["tools"] = declared
+    return request
 
-    if schema is not None and not declared:
+
+def ask(*, step_number: int, system: str, user: str,
+        schema: Type[T] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None) -> Result:
+    """1 ステップぶんの呼び出し。
+
+    ``schema`` を渡すと構造化出力で受け取り、Pydantic で検証します。
+    渡さないときは本文をそのまま返します（Web検索の段のように、まず調べさせて
+    から別呼び出しで構造化するとき）。
+    """
+    settings = step_settings(step_number)
+    client = _client()
+    request = build_request(step_number, system, user, tools=tools)
+
+    if schema is not None and "tools" not in request:
         # 構造化出力。ツールを併用しないときはこれがいちばん素直です。
-        message = client.messages.parse(output_config={
-            "effort": settings["effort"], "format": schema}, **{
-            k: v for k, v in request.items() if k != "output_config"})
+        # schema は **型のまま** output_format に渡します。SDK が JSON Schema へ
+        # 変換して output_config.format にマージします。自分で
+        # output_config へ入れると、型がそのまま送信されて落ちます。
+        message = client.messages.parse(output_format=schema, **request)
         parsed = message.parsed_output
     else:
         # 大きな max_tokens は HTTP タイムアウトに当たるのでストリームで受けます。

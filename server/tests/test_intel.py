@@ -542,3 +542,83 @@ def test_a_refusal_is_reported_rather_than_read_as_an_empty_answer(monkeypatch):
     monkeypatch.setattr(llm, "_client", lambda: _Client())
     with pytest.raises(llm.Refused, match="cyber"):
         llm.ask(step_number=1, system="s", user="u", schema=Step1Output)
+
+
+# --------------------------------------------- 送信する本体そのものを検算する
+#
+# 最初の実装は Pydantic の**クラス**を output_config.format に入れていて、
+# 送信の瞬間に `Object of type ModelMetaclass is not JSON serializable` で
+# 落ちました。呼び出しごとスタブしたテストでは、その形を一度も見ていません
+# でした。以下は API キー無しで、本体の形だけを確かめます。
+
+def test_the_request_body_can_actually_be_serialised():
+    """これが通らなければ、キーがあっても送信で落ちます。"""
+    from kaigyou_intel.client import build_request
+
+    for step_number in (1, 2, 3, 4):
+        body = build_request(step_number, "system", "user")
+        json.dumps(body, ensure_ascii=False)   # 落ちたらそこが原因
+
+
+def test_the_schema_never_goes_into_output_config():
+    """スキーマは output_format に渡し、SDK が output_config へマージします。
+
+    自分で output_config.format に入れると、型がそのまま送信されます。
+    """
+    from kaigyou_intel.client import build_request
+
+    body = build_request(1, "system", "user")
+    assert "format" not in body["output_config"]
+    assert body["output_config"]["effort"] in {"low", "medium", "high", "xhigh", "max"}
+
+
+def test_output_format_must_be_a_type_not_a_dict():
+    """SDK の契約。ここを取り違えたのが今回の原因なので、明示的に置きます。"""
+    anthropic = pytest.importorskip("anthropic")
+    import inspect
+
+    source = inspect.getsource(anthropic.resources.messages.messages.Messages.parse)
+    assert "`output_format` must be a type" in source, (
+        "SDK の契約が変わった可能性があります。client.ask の呼び方を確認してください")
+
+
+def test_step1_sends_no_tools_and_step2_sends_web_search():
+    """要件 §38：外部コンテクスト調査を STEP2 に限定する。
+
+    設定だけでなく、組み立てた本体でも確かめます。設定が正しくても
+    組み立てが無視していたら意味がありません。
+    """
+    from kaigyou_intel.client import build_request
+
+    assert "tools" not in build_request(1, "s", "u")
+    assert [t["type"] for t in build_request(2, "s", "u")["tools"]] == \
+        ["web_search_20260209"]
+    for step_number in (3, 4):
+        assert "tools" not in build_request(step_number, "s", "u")
+
+
+def test_the_structured_call_passes_the_schema_as_output_format(monkeypatch):
+    """parse() の呼び方を固定する。"""
+    from kaigyou_intel import client as llm
+
+    seen: dict[str, object] = {}
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def parse(**kwargs):
+                seen.update(kwargs)
+                message = type("M", (), {})()
+                message.parsed_output = _output()
+                message.content, message.stop_reason = [], "end_turn"
+                message.usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
+                message.model = "claude-sonnet-5"
+                return message
+
+    monkeypatch.setattr(llm, "_client", lambda: _Client())
+    llm.ask(step_number=1, system="s", user="u", schema=Step1Output)
+
+    assert seen["output_format"] is Step1Output
+    assert "format" not in seen["output_config"]
+    json.dumps({k: v for k, v in seen.items() if k != "output_format"},
+               ensure_ascii=False)
