@@ -93,6 +93,9 @@ class Benchmark:
     direction_label: str | None = None
     significance: str | None = None
     significance_label: str | None = None
+    #: この母集団で上位・下位を語れるか。語れないときは significance を出しません。
+    discriminating: bool = True
+    significance_withheld_reason: str | None = None
 
     def as_dict(self, *, include_label: bool = False) -> dict[str, Any]:
         """比較 1 件ぶん。
@@ -117,7 +120,10 @@ class Benchmark:
             "direction_label": self.direction_label,
             "significance": self.significance,
             "significance_label": self.significance_label,
+            "discriminating": self.discriminating,
         }
+        if self.significance_withheld_reason:
+            out["significance_withheld_reason"] = self.significance_withheld_reason
         if include_label:
             out["benchmark_label"] = self.label
             out["benchmark_sample_count"] = self.sample_count
@@ -348,25 +354,85 @@ def measure_value(spec: Mapping[str, Any], metrics: Mapping[str, Any]) -> float 
     return float(raw) * float(factor) if factor else float(raw)
 
 
-@dataclass(frozen=True)
+@dataclass
 class BenchmarkScope:
+    """比較する母集団ひとつぶん。
+
+    ``discriminating`` は「この集合で上位・下位を語れるか」。県全域のように
+    大半が無人のメッシュで埋まっている集合では、町の中心はどこでも上位数%に
+    入るので、パーセンタイルは「市街地かどうか」しか測っていません。
+    """
+
     type: str
     label: str
     where: str
     params: tuple[Any, ...]
+    sample_count: int = 0
+    share_below_viable_floor: float | None = None
+    discriminating: bool = True
+    not_discriminating_reason: str | None = None
 
 
-def benchmark_scopes(prefecture_code: str, prefecture_label: str,
+def viable_floor(conn: psycopg.Connection, *, profile: str, radius_m: int,
+                 prefecture_code: str, percentile: float) -> float | None:
+    """その県で開業が成立している商圏人口の下限。実測値であって、決め打ちではない。
+
+    県内で**実際に歯科医院がある**商圏の人口の下位パーセンタイル点を使います。
+    誰も山の中では開業していないので、この値は「その県でこの規模の商圏に
+    診療所が成立している」の実測下限になります。恣意的な閾値を置かずに、
+    無人メッシュと生活圏を分けられます。（東京では9,636人）
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT percentile_cont(%s) WITHIN GROUP (ORDER BY ms.population) AS floor,
+                   count(*) AS n
+            FROM mesh_scores ms
+            JOIN population_mesh pm ON pm.id = ms.mesh_id
+            WHERE ms.profile = %s AND ms.radius_m = %s
+              AND pm.prefecture_code = %s AND ms.facility_count > 0
+              AND ms.population IS NOT NULL
+            """,
+            (percentile, profile, radius_m, prefecture_code))
+        row = cur.fetchone()
+    if not row or not row["n"] or row["floor"] is None:
+        return None
+    return float(row["floor"])
+
+
+def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
                      municipality: str | None, population: float | None,
-                     radius_m: int) -> list[BenchmarkScope]:
-    """比較相手の集合。計算できるものだけ。
+                     radius_m: int, lat: float, lng: float,
+                     config: Mapping[str, Any]) -> list[BenchmarkScope]:
+    """比較できる母集団を、計算できるものだけ組み立てる。
 
     全国は入りません。全国のメッシュ統計を読み込んでいないからで、都のメッシュを
     全国と言い換えることはできません。欠けていることは data_quality に出ます。
     """
-    scopes = [BenchmarkScope(
-        "prefecture", f"{prefecture_label}の半径{radius_m}m商圏（全メッシュ）",
-        "pm.prefecture_code = %s", (prefecture_code,))]
+    nearby_m = float(config.get("nearby_radius_m", 10000))
+    station_m = float(config.get("station_front_m", 800))
+
+    scopes = [
+        BenchmarkScope(
+            "prefecture", f"{prefecture_label}の半径{radius_m}m商圏（全メッシュ）",
+            "pm.prefecture_code = %s", (prefecture_code,)),
+        # 実績による絞り込み。閾値をひとつも置かずに山林を外せる。
+        BenchmarkScope(
+            "with_clinics", f"{prefecture_label}内で歯科医院が実在する商圏",
+            "pm.prefecture_code = %s AND ms.facility_count > 0", (prefecture_code,)),
+        # 実際に選びうる代替地。「県内で上位」ではなく「この辺で上位」を答える。
+        BenchmarkScope(
+            "nearby", f"この地点から半径{nearby_m / 1000:g}km以内の商圏",
+            "pm.prefecture_code = %s AND ST_DWithin(pm.centroid::geography, "
+            "ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)",
+            (prefecture_code, lng, lat, nearby_m)),
+        # 駅前どうし。駅前は駅前と比べるのが筋で、田畑と比べても何も分からない。
+        BenchmarkScope(
+            "station_front", f"{prefecture_label}内の駅から{station_m:g}m以内の商圏",
+            "pm.prefecture_code = %s AND EXISTS (SELECT 1 FROM stations s "
+            "WHERE ST_DWithin(pm.centroid::geography, s.geom::geography, %s))",
+            (prefecture_code, station_m)),
+    ]
     if municipality:
         scopes.append(BenchmarkScope(
             "municipality", f"{municipality}内の同条件の商圏",
@@ -383,6 +449,47 @@ def benchmark_scopes(prefecture_code: str, prefecture_label: str,
     return scopes
 
 
+def measure_scope_shape(conn: psycopg.Connection, scope: BenchmarkScope, *,
+                        profile: str, radius_m: int, floor: float | None,
+                        max_share_below: float, min_sample: int) -> None:
+    """母集団の大きさと、そのうち生活圏の下限を下回る割合を測る。
+
+    これが「県内上位4.5%」を止める仕掛けです。母集団の大半が無人なら、
+    町の中心はどこでも上位に来ます。その集合では順位は出しても
+    「極めて高い」という評価は付けません。評価が付かなければ、
+    「本商圏の最大のエンジン」という文はそもそも書けません。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT count(*)::int AS n,
+                   count(*) FILTER (WHERE ms.population < %s)::int AS below
+            FROM mesh_scores ms
+            JOIN population_mesh pm ON pm.id = ms.mesh_id
+            WHERE ms.profile = %s AND ms.radius_m = %s AND {scope.where}
+            """,
+            (floor if floor is not None else -1.0, profile, radius_m) + scope.params)
+        row = cur.fetchone()
+
+    scope.sample_count = int(row["n"] or 0)
+    if scope.sample_count < min_sample:
+        scope.discriminating = False
+        scope.not_discriminating_reason = (
+            f"比較できる商圏が{scope.sample_count}件しかないため（{min_sample}件以上で算出）")
+        return
+    if floor is None:
+        return
+    share = row["below"] / scope.sample_count
+    scope.share_below_viable_floor = round(share, 3)
+    if share > max_share_below:
+        scope.discriminating = False
+        scope.not_discriminating_reason = (
+            f"この母集団の{share * 100:.0f}%が、県内で歯科医院が成立している"
+            f"人口規模の下限（{floor:,.0f}人）を下回ります。"
+            f"市街地であればどこでも上位に入るため、順位は出しますが"
+            f"「高い・低い」の評価は付けません。")
+
+
 def _direction(value: float, median: float | None) -> tuple[str, str]:
     if median is None or median == 0:
         return "unknown", "比較できません"
@@ -397,13 +504,19 @@ def _direction(value: float, median: float | None) -> tuple[str, str]:
 def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
                    profile: str, radius_m: int, prefecture_code: str,
                    prefecture_label: str, municipality: str | None,
+                   lat: float, lng: float,
                    specialty: str | None = None,
-                   specialty_label: str | None = None) -> tuple[list[Measure], list[str]]:
+                   specialty_label: str | None = None,
+                   config: Mapping[str, Any] | None = None,
+                   ) -> tuple[list[Measure], list[str], dict[str, Any]]:
     """全指標を、比較相手つきで組み立てる。
 
     比較は mesh_scores に対して行います。同じ半径・同じ商圏の形・同じ情報源で
-    採点済みの全メッシュなので、同じ量どうしの比較になります。返り値の 2 つめは
-    「計算できなかった比較とその理由」で、そのまま data_quality に載ります。
+    採点済みの全メッシュなので、同じ量どうしの比較になります。
+
+    母集団はひとつではありません。県全域は、人口の少ない県では「市街地かどうか」
+    しか測らなくなるので、そのときは弁別力のある別の母集団を代表に選び、
+    選んだ理由を返します。返り値は (指標, 算出できなかった比較の理由, 代表母集団の説明)。
     """
     specs: dict[str, dict[str, Any]] = dict(MEASURE_SPECS)
     for key, spec in SPECIALTY_SPECS.items():
@@ -418,37 +531,96 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
             filled["definition"] = spec["definition"].format(label="指定した標榜科目")
         specs[key] = filled
 
+    config = config or {}
+    preference = [str(x) for x in (config.get("preference") or ["prefecture"])]
+    min_sample = int(config.get("min_sample", MIN_BENCHMARK_SAMPLE))
+    max_share = float(config.get("max_share_below_viable_floor", 0.5))
+
     notes: list[str] = []
+    primary_info: dict[str, Any] = {}
     if not table_exists(conn, "mesh_scores"):
         notes.append("メッシュスコアが未計算のため、すべての比較（percentile・順位）を"
                      "算出できません。kaigyou-etl compute-scores を実行してください。")
-        return ([_bare(key, spec, metrics) for key, spec in specs.items()], notes)
+        return ([_bare(key, spec, metrics) for key, spec in specs.items()],
+                notes, primary_info)
 
     # 列が無い指標は比較を諦めます。デプロイとマイグレーションの間の窓で、
     # 存在しない列を SELECT すると分析全体が落ちるため。
     usable = {}
     for key, spec in specs.items():
-        column = spec["column"]
-        needed = [c.split(".")[1].rstrip(")") for c in _columns_in(column)]
+        needed = [c.split(".")[1].rstrip(")") for c in _columns_in(spec["column"])]
         if all(column_exists(conn, "mesh_scores", c) for c in needed):
             usable[key] = spec
         else:
             notes.append(f"{spec['label']}: 比較用の列が未作成のため percentile と"
                          f"順位を算出できません（kaigyou-etl migrate）。")
 
-    population = metrics.get("population")
-    scopes = benchmark_scopes(prefecture_code, prefecture_label, municipality,
-                              population, radius_m)
+    floor = viable_floor(conn, profile=profile, radius_m=radius_m,
+                         prefecture_code=prefecture_code,
+                         percentile=float(config.get("viable_floor_percentile", 0.10)))
+    scopes = benchmark_scopes(
+        prefecture_code=prefecture_code, prefecture_label=prefecture_label,
+        municipality=municipality, population=metrics.get("population"),
+        radius_m=radius_m, lat=lat, lng=lng, config=config)
+    for scope in scopes:
+        measure_scope_shape(conn, scope, profile=profile, radius_m=radius_m,
+                            floor=floor, max_share_below=max_share,
+                            min_sample=min_sample)
+
+    by_type = {s.type: s for s in scopes}
     if municipality is None:
         notes.append("市区町村の境界データが無いため、同一市区町村内での比較は"
                      "算出していません。")
     notes.append("全国のメッシュ統計を読み込んでいないため、全国比較は算出していません。"
                  "比較はすべて同一都道府県内のメッシュ分布に対するものです。")
 
+    # 代表に使う母集団。設定の順に見て、最初に弁別力のあるもの。
+    primary_type = next(
+        (name for name in preference
+         if name in by_type and by_type[name].discriminating
+         and by_type[name].sample_count >= min_sample),
+        None)
+    skipped = [by_type[name] for name in preference
+               if name in by_type and not by_type[name].discriminating]
+    fell_back = False
+    if primary_type is None:
+        # 弁別力のある母集団がひとつも無い。いちばん大きいものを代表にしますが、
+        # 弁別力が無いことは変わらないので significance は出ません。
+        primary_type = next((s.type for s in scopes if s.sample_count >= min_sample), None)
+        fell_back = primary_type is not None
+    primary_info = {
+        "benchmark_type": primary_type,
+        "viable_floor_population": None if floor is None else round(floor),
+        "viable_floor_definition": (
+            "県内で歯科医院が実在する商圏の人口の下位10%点。"
+            "その県で開業が成立している商圏規模の実測下限であり、決め打ちの閾値ではありません。"),
+        "reason": None,
+        "skipped": [
+            {"benchmark_type": s.type, "reason": s.not_discriminating_reason}
+            for s in skipped if s.not_discriminating_reason
+        ],
+    }
+    if fell_back and primary_type:
+        primary_info["reason"] = (
+            f"弁別力のある比較対象がありません。{by_type[primary_type].label}を"
+            f"代表にしていますが、順位のみで「高い・低い」の評価は付けていません。")
+        notes.append(primary_info["reason"])
+    elif skipped and primary_type and primary_type != preference[0]:
+        primary_info["reason"] = (
+            f"{by_type[skipped[0].type].label}は弁別力がないため、"
+            f"{by_type[primary_type].label}を代表の比較対象にしています。")
+        notes.append(primary_info["reason"] + " " + (skipped[0].not_discriminating_reason or ""))
+
+    # 代表が先頭に来るように並べ替える。平坦な benchmark_* はこの先頭の写し。
+    ordered = ([by_type[primary_type]] if primary_type else []) + \
+              [s for s in scopes if s.type != primary_type]
+
     values = {key: measure_value(spec, metrics) for key, spec in specs.items()}
     results: dict[str, list[Benchmark]] = {key: [] for key in specs}
 
-    for scope in scopes:
+    for scope in ordered:
+        if scope.sample_count < min_sample:
+            continue
         rows = _scope_statistics(conn, usable, values, profile, radius_m, scope)
         if rows is None:
             continue
@@ -461,7 +633,7 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
         measure.benchmarks = results.get(key, [])
         measures.append(measure)
     _attach_growth(measures)
-    return measures, notes
+    return measures, notes, primary_info
 
 
 def _columns_in(expression: str) -> list[str]:
@@ -498,9 +670,12 @@ def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str,
 
     for key, spec in active:
         column = spec["column"]
-        parts.append(f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {column}) AS {key}_p50")
-        parts.append(f"percentile_cont(0.25) WITHIN GROUP (ORDER BY {column}) AS {key}_p25")
-        parts.append(f"percentile_cont(0.75) WITHIN GROUP (ORDER BY {column}) AS {key}_p75")
+        # 四分位は配列版で 1 回のソートにまとめます。指標ごとに 3 回呼ぶと、
+        # 17 指標 × 6 母集団で 300 回以上ソートすることになり、応答が 10 秒に
+        # なりました。同じ ORDER BY を 3 度並べても、答えは 1 度ぶんです。
+        parts.append(
+            f"percentile_cont(ARRAY[0.25, 0.5, 0.75]) WITHIN GROUP (ORDER BY {column})"
+            f" AS {key}_q")
         parts.append(f"count({column}) AS {key}_total")
         parts.append(f"count(*) FILTER (WHERE {column} <= %s) AS {key}_below")
         params.append(values[key])
@@ -525,13 +700,22 @@ def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str,
         if not total:
             continue
         value = float(values[key])
-        median = row.get(f"{key}_p50")
+        quartiles = row.get(f"{key}_q") or [None, None, None]
+        median = quartiles[1]
         below = row.get(f"{key}_below") or 0
         percentile = round(100.0 * below / total, 1)
         # 「上位何位か」。同値は同順位（自分より大きいものの数 + 1）。
         rank = total - below + 1
         direction, direction_label = _direction(value, median)
-        significance, significance_label = significance_for(percentile)
+        # 弁別力のない母集団では「極めて高い」を出しません。順位は事実なので
+        # 出しますが、評価まで付けると「県内上位4.5%だから最大の強み」という、
+        # 母集団の形しか反映していない文が書けてしまいます。
+        if scope.discriminating:
+            significance, significance_label = significance_for(percentile)
+            withheld = None
+        else:
+            significance, significance_label = None, None
+            withheld = scope.not_discriminating_reason
         out[key] = Benchmark(
             type=scope.type, label=scope.label,
             value=None if median is None else round(float(median), 4),
@@ -539,10 +723,11 @@ def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str,
             percentile=percentile, top_share_pct=round(100.0 - percentile, 1),
             position_label=_position_label(int(rank), int(total)),
             rank=int(rank), of=int(total),
-            p25=_maybe_round(row.get(f"{key}_p25")),
-            p75=_maybe_round(row.get(f"{key}_p75")),
+            p25=_maybe_round(quartiles[0]), p75=_maybe_round(quartiles[2]),
             direction=direction, direction_label=direction_label,
             significance=significance, significance_label=significance_label,
+            discriminating=scope.discriminating,
+            significance_withheld_reason=withheld,
         )
     return out
 
@@ -626,6 +811,8 @@ def scope_summary(measures: Sequence[Measure]) -> list[dict[str, Any]]:
                 "label": bench.label,
                 "sample_count": bench.sample_count,
                 "comparison": bench.comparison,
+                "discriminating": bench.discriminating,
+                "not_discriminating_reason": bench.significance_withheld_reason,
             })
     return list(seen.values())
 

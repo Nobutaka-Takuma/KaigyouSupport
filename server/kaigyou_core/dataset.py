@@ -746,15 +746,18 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     # 比較はメッシュ分布に対して行うので、分布が作られた半径で測ります。2km の
     # 商圏を 1km で測ったメッシュと比べると、同じ名前の別の量を比べることに
     # なります。どの半径で比べたかは measurement_basis に出します。
-    measures, benchmark_notes = build_measures(
+    insights_config = cfg.insights_config()
+    measures, benchmark_notes, primary_benchmark = build_measures(
         conn, comparison_metrics,
         profile=model.profile_name, radius_m=comparison_radius,
         prefecture_code=prefecture_code,
         prefecture_label=prefecture_name(conn, prefecture_code),
         municipality=(municipality or {}).get("name"),
+        lat=lat, lng=lng,
         specialty=specialty,
-        specialty_label=vocab.label(specialty) if specialty else None)
-    insights = build_insights(measures, cfg.insights_config())
+        specialty_label=vocab.label(specialty) if specialty else None,
+        config=insights_config.get("benchmarks") or {})
+    insights = build_insights(measures, insights_config)
 
     tables = ["population_mesh", "mesh_business", "facilities", "stations",
               "municipalities", "land_prices"]
@@ -818,6 +821,11 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                          f"要求された半径（{radius_m}m）と異なる場合、実数は要求半径、"
                          "比較は上記半径のものです。"),
             },
+            # どの母集団を代表に使ったか、なぜそれを選んだか。県全域が
+            # 弁別力を失う県（山林が大半を占める県）では、ここが別の母集団に
+            # 切り替わります。切り替えたことを黙っていると、東京の「上位6%」と
+            # 静岡の「上位6%」が同じ意味に見えてしまいます。
+            "primary_benchmark": primary_benchmark,
             # 比較対象の説明はここに 1 回だけ。各 benchmark は type で参照します。
             "benchmark_scopes": scope_summary(measures),
             "items": [m.as_dict() for m in measures],

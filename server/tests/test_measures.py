@@ -128,14 +128,20 @@ def test_every_measure_declares_its_unit_source_and_year():
 # ------------------------------------------------------------- 比較対象の宣言
 def test_the_scopes_never_include_a_national_comparison():
     """全国のメッシュ統計は読み込んでいない。都のメッシュを全国と言い換えない。"""
-    scopes = benchmark_scopes("13", "東京都", "中央区", 30000, 1000)
+    scopes = benchmark_scopes(prefecture_code="13", prefecture_label="東京都",
+                              municipality="中央区", population=30000, radius_m=1000,
+                              lat=35.67, lng=139.76, config={})
     types = {s.type for s in scopes}
-    assert types == {"prefecture", "municipality", "similar_population"}
     assert "national" not in types
+    # 母集団は「計算できるものだけ」。全国は入らない。
+    assert types == {"prefecture", "with_clinics", "nearby", "station_front",
+                     "municipality", "similar_population"}
 
 
 def test_the_similar_population_scope_is_built_from_this_points_population():
-    scopes = {s.type: s for s in benchmark_scopes("13", "東京都", None, 10000, 1000)}
+    scopes = {s.type: s for s in benchmark_scopes(
+        prefecture_code="13", prefecture_label="東京都", municipality=None,
+        population=10000, radius_m=1000, lat=35.67, lng=139.76, config={})}
     similar = scopes["similar_population"]
     assert similar.params[1:] == (8000.0, 12000.0)
     assert "8,000" in similar.label and "12,000" in similar.label
@@ -143,8 +149,12 @@ def test_the_similar_population_scope_is_built_from_this_points_population():
 
 def test_scopes_that_cannot_be_built_are_simply_absent():
     """境界データが無ければ市区町村比較は作らない。作れないものは作らない。"""
-    types = {s.type for s in benchmark_scopes("13", "東京都", None, None, 1000)}
-    assert types == {"prefecture"}
+    types = {s.type for s in benchmark_scopes(
+        prefecture_code="13", prefecture_label="東京都", municipality=None,
+        population=None, radius_m=1000, lat=35.67, lng=139.76, config={})}
+    assert "municipality" not in types
+    assert "similar_population" not in types
+    assert "prefecture" in types
 
 
 def test_a_measure_without_a_benchmark_says_why():
@@ -361,3 +371,160 @@ def test_the_insights_reach_the_document_with_their_gaps(document):
     for insight in insights.values():
         assert "gaps" in insight and "complete" in insight
         assert insight["complete"] == (not insight["gaps"])
+
+
+# ------------------------------------------- 母集団が的外れなときに黙らない
+#
+# 裾野市（人口約4.8万人、子どもの割合は静岡県平均並みかやや低め）の駅前が
+# 「子どもの絶対数が県内上位4.5%」と評価された、という報告への回帰テスト。
+# その数字が言っているのは「そこが市街地である」ということだけで、静岡県の
+# メッシュの大半が山林と農地だから起きます。東京の山間部5市町村で同じことを
+# 測ると、83%が生活圏の下限を下回り、17,231人という平凡な郊外の商圏が
+# 「上位4.5%」に入りました。
+
+_RURAL_SOURCE = "__rural_benchmark_test__"
+_RURAL_PREF = "97"
+
+
+@pytest.fixture
+def rural_prefecture():
+    """大半が無人で、町がひとつだけある県を作る。
+
+    400 の空メッシュ（300人）と、60 の町のメッシュ（15,000人・歯科医院あり）。
+    実際の農村県の形で、県全域比較が「市街地かどうか」しか測らなくなる状況です。
+    """
+    from kaigyou_core import mesh as meshlib
+    from kaigyou_core.db import connect
+
+    try:
+        with connect() as probe, probe.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.mesh_scores') AS t")
+            if cur.fetchone()["t"] is None:
+                pytest.skip("schema not migrated")
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"database unavailable: {exc}")
+
+    # フィクスチャの接続をそのまま渡します。別の接続からは、コミットしていない
+    # 行は見えません（見えないまま「データが無い」と読めてしまいます）。
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO data_sources (id, name, publisher, dataset_kind) "
+                "VALUES (%s, 'test fixture', 'test', 'sample') "
+                "ON CONFLICT (id) DO NOTHING", (_RURAL_SOURCE,))
+            # 4030xxxx 帯の 1km メッシュ。読み込み済みのどの県とも重なりません。
+            for i in range(460):
+                code = f"40{3000 + i:04d}"
+                lng, lat = meshlib.centroid(code)
+                town = i >= 400
+                cur.execute(
+                    """
+                    INSERT INTO population_mesh (
+                        source_id, mesh_code, mesh_size_m, prefecture_code,
+                        geom, centroid, population, age_0_14, source_date
+                    ) VALUES (%s, %s, 1000, %s, ST_GeomFromText(%s, 4326),
+                              ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s, current_date)
+                    RETURNING id
+                    """,
+                    (_RURAL_SOURCE, code, _RURAL_PREF, meshlib.to_polygon_wkt(code),
+                     lng, lat, 15000 if town else 300, 1800 if town else 36))
+                mesh_id = cur.fetchone()["id"]
+                cur.execute(
+                    """
+                    INSERT INTO mesh_scores (
+                        mesh_id, profile, radius_m, population, age_0_14,
+                        facility_count, area_label
+                    ) VALUES (%s, 'default', 1000, %s, %s, %s, '町')
+                    """,
+                    (mesh_id, 15000 if town else 300, 1800 if town else 36,
+                     4 if town else 0))
+        yield conn
+        conn.rollback()
+
+
+def test_a_prefecture_of_mostly_empty_mesh_is_not_used_to_rank(rural_prefecture):
+    """県全域比較が「市街地かどうか」しか測らないとき、それを検出する。"""
+    from kaigyou_core import config as cfg
+    from kaigyou_core.measures import benchmark_scopes, measure_scope_shape, viable_floor
+
+    config = cfg.insights_config()["benchmarks"]
+    conn = rural_prefecture
+    floor = viable_floor(conn, profile="default", radius_m=1000,
+                         prefecture_code=_RURAL_PREF,
+                         percentile=config["viable_floor_percentile"])
+    # 歯科医院があるのは町だけなので、下限は町の人口になる。
+    assert floor == pytest.approx(15000)
+
+    scopes = {s.type: s for s in benchmark_scopes(
+        prefecture_code=_RURAL_PREF, prefecture_label="テスト県",
+        municipality=None, population=15000, radius_m=1000,
+        lat=35.0, lng=138.0, config=config)}
+    for scope in scopes.values():
+        measure_scope_shape(conn, scope, profile="default", radius_m=1000,
+                            floor=floor,
+                            max_share_below=config["max_share_below_viable_floor"],
+                            min_sample=config["min_sample"])
+
+    # 400/460 = 87% が生活圏の下限未満。県全域では上位・下位を語れない。
+    assert scopes["prefecture"].share_below_viable_floor == pytest.approx(0.87, abs=0.01)
+    assert scopes["prefecture"].discriminating is False
+    assert "下限" in scopes["prefecture"].not_discriminating_reason
+
+    # 歯科医院が実在する商圏どうしなら比較になる。
+    assert scopes["with_clinics"].sample_count == 60
+    assert scopes["with_clinics"].discriminating is True
+
+
+def test_the_town_centre_is_not_called_outstanding_by_a_prefecture_of_farmland(
+        rural_prefecture):
+    """裾野の再現。町の中心は県内で上位に来るが、それは評価にならない。
+
+    順位は事実なので出します。出さないのは significance です。「極めて高い」が
+    付かなければ、「本商圏の最大のエンジンです」という文は書けません。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_core.measures import build_measures
+
+    metrics = {"population": 15000, "age_0_14": 1800, "facility_count": 4}
+    measures, notes, primary = build_measures(
+        rural_prefecture, metrics, profile="default", radius_m=1000,
+        prefecture_code=_RURAL_PREF, prefecture_label="テスト県",
+        municipality=None, lat=35.0, lng=138.0,
+        config=cfg.insights_config()["benchmarks"])
+
+    by_key = {m.key: m for m in measures}
+    child = by_key["child_population"]
+    prefecture = next(b for b in child.benchmarks if b.type == "prefecture")
+
+    # 県内では最上位。事実なので順位は出す。
+    assert prefecture.rank == 1
+    assert prefecture.position_label.startswith("上位")
+    # だが「極めて高い」とは言わせない。ここが裾野の修正点。
+    assert prefecture.significance is None
+    assert prefecture.discriminating is False
+    assert "下限" in (prefecture.significance_withheld_reason or "")
+
+    # 代表の比較対象は、弁別力のあるほうへ切り替わっている。
+    assert primary["benchmark_type"] != "prefecture"
+    assert primary["reason"] and "弁別力" in primary["reason"]
+    assert any("弁別力" in note for note in notes)
+
+
+def test_the_switch_is_reported_so_two_prefectures_are_not_read_alike(rural_prefecture):
+    """代表の母集団が県によって違うなら、違うと書いてあること。
+
+    黙って切り替えると、東京の「上位6%」と静岡の「上位6%」が同じ意味に見えます。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_core.measures import build_measures
+
+    _measures, _notes, primary = build_measures(
+        rural_prefecture, {"population": 15000, "age_0_14": 1800, "facility_count": 4},
+        profile="default", radius_m=1000, prefecture_code=_RURAL_PREF,
+        prefecture_label="テスト県", municipality=None, lat=35.0, lng=138.0,
+        config=cfg.insights_config()["benchmarks"])
+
+    assert primary["viable_floor_population"] == 15000
+    assert "決め打ちの閾値ではありません" in primary["viable_floor_definition"]
+    skipped = {s["benchmark_type"] for s in primary["skipped"]}
+    assert "prefecture" in skipped
