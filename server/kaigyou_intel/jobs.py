@@ -73,7 +73,8 @@ def get_steps(conn: psycopg.Connection, job_id: str) -> list[dict[str, Any]]:
             """
             SELECT step_number, step_name, status, output_json, error_message,
                    started_at, completed_at, prompt_version, model,
-                   input_tokens, output_tokens, web_searches
+                   input_tokens, output_tokens, web_searches,
+                   cache_read_tokens, cache_write_tokens
             FROM analysis_steps WHERE job_id = %s ORDER BY step_number
             """, (job_id,))
         return [dict(r) for r in cur.fetchall()]
@@ -222,11 +223,13 @@ def finish_step(conn: psycopg.Connection, job_id: str, number: int,
             """
             UPDATE analysis_steps
             SET status = 'completed', completed_at = now(), output_json = %s,
-                input_tokens = %s, output_tokens = %s, web_searches = %s
+                input_tokens = %s, output_tokens = %s, web_searches = %s,
+                cache_read_tokens = %s, cache_write_tokens = %s
             WHERE job_id = %s AND step_number = %s
             """,
             (Json(output), usage.get("input_tokens"), usage.get("output_tokens"),
-             usage.get("web_searches"), job_id, number))
+             usage.get("web_searches"), usage.get("cache_read_tokens"),
+             usage.get("cache_write_tokens"), job_id, number))
         if number >= max(STEP_NAMES):
             cur.execute(
                 "UPDATE analysis_jobs SET status = 'completed', completed_at = now() "

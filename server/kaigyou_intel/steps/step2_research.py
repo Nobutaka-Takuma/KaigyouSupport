@@ -110,6 +110,10 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
         input_tokens=research.usage.input_tokens + structured.usage.input_tokens,
         output_tokens=research.usage.output_tokens + structured.usage.output_tokens,
         web_searches=research.usage.web_searches + structured.usage.web_searches,
+        cache_read_tokens=(research.usage.cache_read_tokens
+                           + structured.usage.cache_read_tokens),
+        cache_write_tokens=(research.usage.cache_write_tokens
+                            + structured.usage.cache_write_tokens),
     )
     return output.model_dump(), usage, _sources_with_patterns(retrieved, output)
 

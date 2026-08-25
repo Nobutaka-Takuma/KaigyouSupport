@@ -49,6 +49,10 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     web_searches: int = 0
+    #: キャッシュから読めたぶんと、キャッシュへ書いたぶん。単価が違うので
+    #: 入力トークンとは別に数えます（読み出しは約0.1倍、書き込みは約1.25倍）。
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -147,6 +151,12 @@ def build_request(step_number: int, system: str, user: str, *,
         "output_config": {"effort": settings["effort"]},
         "system": system,
         "messages": [{"role": "user", "content": user}],
+        # 直前までの安定した部分をキャッシュ対象にします。STEP2 はサーバ側の
+        # 検索ループが 1 回の呼び出しの中で回り、増えていく文脈を毎回読み直すので
+        # （実測 307,754 トークン）、変わらない前置き（system + 最初の user）を
+        # 読み直さずに済めばそのぶん安くなります。効いたかどうかは
+        # usage.cache_read_input_tokens に出るので、次の実行で確かめます。
+        "cache_control": {"type": "ephemeral"},
     }
 
     declared = list(tools or [])
@@ -208,6 +218,9 @@ def ask(*, step_number: int, system: str, user: str,
             input_tokens=getattr(message.usage, "input_tokens", 0) or 0,
             output_tokens=getattr(message.usage, "output_tokens", 0) or 0,
             web_searches=_count_searches(message),
+            cache_read_tokens=getattr(message.usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(
+                message.usage, "cache_creation_input_tokens", 0) or 0,
         ),
         model=getattr(message, "model", settings["model"]),
         sources=extract_sources(message),

@@ -82,7 +82,7 @@ steps:
   1:
     name: 商圏特徴抽出
     prompt: step1_features.md
-    prompt_version: step1-v1.1
+    prompt_version: step1-v1.2
     # 要件 §6：Web検索禁止。ここで外部情報が混ざると、FACT と
     # EXTERNAL FACT の区別が最初の段階で壊れます。
     web_search: false
@@ -94,7 +94,7 @@ steps:
     # 事実が増えて、出典の照合が合わなくなります。
     prompt: step2_research.md
     prompt_structure: step2_structure.md
-    prompt_version: step2-v1.0
+    prompt_version: step2-v1.1
     web_search: true
   3:
     name: 需要形成・患者分析

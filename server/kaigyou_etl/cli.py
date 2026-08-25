@@ -357,11 +357,17 @@ _PRICES = {
 }
 
 
+#: キャッシュの単価は入力に対する倍率。読み出しは安く、書き込みは少し高い。
+_CACHE_READ_RATE, _CACHE_WRITE_RATE = 0.1, 1.25
+
+
 def _step_cost(step: dict) -> float | None:
     price = _PRICES.get(step.get("model") or "")
     if not price:
         return None
     return ((step.get("input_tokens") or 0) / 1e6 * price[0]
+            + (step.get("cache_read_tokens") or 0) / 1e6 * price[0] * _CACHE_READ_RATE
+            + (step.get("cache_write_tokens") or 0) / 1e6 * price[0] * _CACHE_WRITE_RATE
             + (step.get("output_tokens") or 0) / 1e6 * price[1])
 
 
@@ -500,8 +506,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             price = _step_cost(step)
             print(f"\n  STEP{step['step_number']} {step['step_name']}  "
                   f"{step['model']} / {step['prompt_version']}")
+            cached = step.get("cache_read_tokens") or 0
             print(f"    入力 {step['input_tokens'] or 0:,} tok / "
                   f"出力 {step['output_tokens'] or 0:,} tok"
+                  + (f" / キャッシュ読 {cached:,} tok" if cached else "")
                   + (f"  ≒ ${price:.3f}" if price else ""))
             _print_step_output(step["step_number"], step["output_json"] or {})
         return EXIT_OK

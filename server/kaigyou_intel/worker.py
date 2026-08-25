@@ -69,6 +69,8 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "web_searches": usage.web_searches,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
     })
     if sources:
         jobs.save_sources(conn, job_id, number, None, sources)

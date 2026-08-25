@@ -1071,3 +1071,63 @@ def test_retrying_from_a_step_is_available_from_the_command_line():
     args = build_parser().parse_args(
         ["analyze", "--job", "abc", "--retry", "1"])
     assert (args.job, args.retry) == ("abc", 1)
+
+
+# ------------------------------------- 空振りを「事実」として記録させない
+def test_the_prompts_say_where_a_missing_source_belongs():
+    """実測：EXTERNAL FACT 12件のうち6件が「その資料には載っていない」でした。
+
+    調べた記録としては要りますが、商圏についての事実ではありません。混ぜると
+    後続が「外部情報で12件確認できた」と読み、半分が空振りだったことが
+    見えなくなります。
+    """
+    text = cfg.prompt_text("step2_structure.md")
+    assert "unanswered" in text
+    assert "EXTERNAL FACT ではありません" in text
+    # 「何も見つからなかった」は反証ではない、と書いてあること。
+    assert "UNSUPPORTED ではありません" in text
+
+
+def test_step1_is_told_which_questions_have_public_answers():
+    """答えの無い質問を作らせない。
+
+    医院の経営方針・患者の居住地別内訳・自由診療比率は、どこにも公表されて
+    いません。それを尋ねると、STEP2 の検索上限と費用が空振りに消えます。
+    """
+    text = cfg.prompt_text("step1_features.md")
+    assert "公表資料で答えが出る質問だけを書く" in text
+    assert "自由診療比率" in text
+
+
+def test_the_request_carries_a_cache_breakpoint():
+    """STEP2 は 1 回の呼び出しの中で検索ループが回り、文脈を読み直します。
+
+    実測 307,754 トークン。変わらない前置きを読み直さずに済めばそのぶん安い。
+    効いたかどうかは usage.cache_read_input_tokens で確かめます。
+    """
+    body = llm.build_request(2, "s", "u")
+    assert body["cache_control"] == {"type": "ephemeral"}
+    json.dumps(body)
+
+
+def test_cache_tokens_are_recorded_and_priced(conn, dataset):
+    """要件 §34：1レポートいくらかかったかを後から数えられること。
+
+    単価が違うので、入力トークンとまとめてしまうと概算が合いません。
+    """
+    from kaigyou_etl.cli import _step_cost
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v",
+                                          "model": "claude-sonnet-5"})
+    jobs.finish_step(conn, job_id, 1, {"facts": []}, {
+        "input_tokens": 1_000_000, "output_tokens": 0, "web_searches": 0,
+        "cache_read_tokens": 1_000_000, "cache_write_tokens": 1_000_000})
+
+    step = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}[1]
+    assert step["cache_read_tokens"] == 1_000_000
+    # 入力 $2 + 読み出し $0.2 + 書き込み $2.5
+    assert _step_cost(step) == pytest.approx(4.7)
+    conn.rollback()
