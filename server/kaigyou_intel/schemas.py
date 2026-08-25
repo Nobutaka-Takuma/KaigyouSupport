@@ -420,14 +420,11 @@ def verify_step4(output: Step4Output, known_ids: set[str]) -> list[TraceProblem]
                      f"期待: {list(REPORT_SECTIONS)} / 実際: {titles}")))
 
     for section in output.sections:
-        order = [BLOCK_TAGS.index(b.tag) for b in section.blocks]
-        if any(b < a for a, b in zip(order, order[1:])):
-            # 全部のタグを入れる必要はありませんが、入れた分は §19 の順に
-            # 並んでいること。ACTION のあとに FACT が来るのは、結論を書いてから
-            # 根拠を足したということです。
+        backwards = _conclusion_before_evidence(section)
+        if backwards:
             problems.append(TraceProblem(
                 where=f"sections[{section.number}]",
-                problem=("分析順序が要件 §19 と違います: "
+                problem=(f"{backwards} が根拠より先に来ています（要件 §19）: "
                          + " → ".join(b.tag for b in section.blocks))))
         for index, block in enumerate(section.blocks):
             check(f"sections[{section.number}].blocks[{index}]", block.evidence)
@@ -444,6 +441,39 @@ def verify_step4(output: Step4Output, known_ids: set[str]) -> list[TraceProblem]
 
     problems.extend(_forbidden_predictions(output))
     return problems
+
+
+#: 根拠の側。FACT と BENCHMARK は「値と比較」で 1 組なので、行き来してかまい
+#: ません（要件 §22 の「値 + 比較 + 意味」はむしろ交互に書くことを求めます）。
+#: PATTERN も、章の中で複数の筋を立てるなら繰り返せます。
+_EVIDENCE_TAGS = ("FACT", "BENCHMARK", "PATTERN")
+#: 結論の側。
+_CONCLUSION_TAGS = ("IMPLICATION", "ACTION")
+
+
+def _conclusion_before_evidence(section: ReportSection) -> str | None:
+    """結論を書いてから根拠を足していないか（要件 §19）。
+
+    最初の実装は、章の中のタグが §19 の並びどおり**単調に**進むことを
+    求めていました。厳しすぎました。
+
+      FACT → FACT → BENCHMARK → FACT → BENCHMARK → PATTERN → WHY → …
+
+    これは良い章です。事実ひとつに比較ひとつを添えて書けば当然こうなりますし、
+    §22 の「値 + 比較 + 意味」はむしろそう書くことを求めています。これを
+    落としていたので、レポート 1 本ぶんの費用が書式の理由で捨てられていました。
+
+    §19 は「可能な限り順番を維持する」と書いてあって、「すべての章にすべての
+    タグを無理に入れる必要はない」とも書いてあります。守らせる価値があるのは
+    **結論を先に書かないこと**だけです。
+    """
+    seen_conclusion: str | None = None
+    for block in section.blocks:
+        if block.tag in _CONCLUSION_TAGS:
+            seen_conclusion = seen_conclusion or block.tag
+        elif seen_conclusion and block.tag in _EVIDENCE_TAGS:
+            return seen_conclusion
+    return None
 
 
 def _forbidden_predictions(output: Step4Output) -> list[TraceProblem]:

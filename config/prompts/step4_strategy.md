@@ -81,8 +81,17 @@ FACT → BENCHMARK → PATTERN → WHY → INSIGHT → IMPLICATION → ACTION
 ```
 
 **全部のタグを入れる必要はありません。** 単なる事実の章は `FACT` だけで構いません。
-ただし入れたものはこの順に並べてください。ACTION のあとに FACT が来るのは、
-結論を書いてから根拠を足したということです。
+
+`FACT` と `BENCHMARK` は行き来してかまいません。事実ひとつに比較ひとつを
+添えて書くほうが読みやすく、§22 の「値 + 比較 + 意味」にも合います。
+
+```
+FACT → BENCHMARK → FACT → BENCHMARK → PATTERN → WHY → INSIGHT → IMPLICATION
+```
+
+守ってほしいのは 1 つだけです。**結論（IMPLICATION / ACTION）を書いたあとに、
+根拠（FACT / BENCHMARK / PATTERN）を戻さないでください。** それは結論を先に
+決めてから理由を探したように読めます。
 
 `FACT` `BENCHMARK` `PATTERN` には `evidence` を付けてください。
 

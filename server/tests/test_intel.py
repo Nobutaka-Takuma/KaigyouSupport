@@ -1336,10 +1336,7 @@ def test_the_report_keeps_the_required_chapters():
 
 
 def test_a_chapter_that_puts_the_conclusion_before_the_evidence_is_caught():
-    """要件 §19：全部のタグを入れる必要はありませんが、入れた分は順を保つこと。
-
-    ACTION のあとに FACT が来るのは、結論を書いてから根拠を足したということです。
-    """
+    """守らせる価値があるのは、結論を先に書かないことだけ（要件 §19）。"""
     from kaigyou_intel.schemas import ReportBlock, verify_step4
 
     output = _step4_output()
@@ -1348,6 +1345,39 @@ def test_a_chapter_that_puts_the_conclusion_before_the_evidence_is_caught():
         ReportBlock(tag="FACT", text="昼間人口が多い", evidence=["F010"]),
     ]
     assert any("§19" in p.problem for p in verify_step4(output, _STEP4_IDS))
+
+
+def test_facts_and_benchmarks_may_interleave():
+    """実測：この章立てでレポート1本を落としていました。
+
+      FACT → FACT → BENCHMARK → FACT → BENCHMARK → PATTERN → WHY → INSIGHT
+        → IMPLICATION
+
+    事実ひとつに比較ひとつを添えて書けば当然こうなります。§22 の
+    「値 + 比較 + 意味」はむしろそう書くことを求めています。書式の理由で
+    レポート1本ぶんの費用を捨てていました。
+    """
+    from kaigyou_intel.schemas import ReportBlock, verify_step4
+
+    output = _step4_output()
+    output.sections[1].blocks = [
+        ReportBlock(tag=tag, text="t", evidence=["F001"] if tag == "FACT" else [])
+        for tag in ("FACT", "FACT", "BENCHMARK", "FACT", "BENCHMARK",
+                    "PATTERN", "WHY", "INSIGHT", "IMPLICATION")
+    ]
+    assert verify_step4(output, _STEP4_IDS) == []
+
+
+def test_a_chapter_may_make_more_than_one_argument():
+    """章の中で筋を2本立てるなら、PATTERN と WHY は繰り返せます。"""
+    from kaigyou_intel.schemas import ReportBlock, verify_step4
+
+    output = _step4_output()
+    output.sections[6].blocks = [
+        ReportBlock(tag=tag, text="t")
+        for tag in ("PATTERN", "WHY", "PATTERN", "WHY", "INSIGHT", "ACTION")
+    ]
+    assert verify_step4(output, _STEP4_IDS) == []
 
 
 def test_a_chapter_may_skip_tags():

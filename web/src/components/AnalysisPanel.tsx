@@ -108,6 +108,7 @@ export function AnalysisPanel({
   // 止まっているのか進んでいるのかが分からなくなります。
   const waiting = status
     && ["queued", "running"].includes(status.job.status);
+  // 経過を秒で出しているので、running のあいだは毎秒描き直します。
   useEffect(() => {
     if (!waiting) return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -162,7 +163,14 @@ export function AnalysisPanel({
   const done = steps.filter((s) => s.status === "completed").length;
   const failedStep = steps.find((s) => s.status === "failed");
   const failed = status?.job.status === "failed";
-  const elapsed = waiting ? since(status?.job.started_at ?? status?.job.created_at, now) : null;
+  const runningStep = steps.find((s) => s.status === "running");
+  const queued = status?.job.status === "queued";
+  // 数えはじめる時刻は「いま動いているステップが始まった時刻」。ジョブの作成
+  // 時刻から数えると、worker を止めていた時間まで入ります（実測：worker を
+  // 起動し直した直後に「経過 34分17秒」と出ました）。
+  const elapsed = queued
+    ? null
+    : since(runningStep?.started_at ?? status?.job.started_at, now);
 
   return (
     <section className="analysis">
@@ -179,7 +187,10 @@ export function AnalysisPanel({
           </span>
         ) : (
           <button onClick={start} disabled={starting || waiting === true}>
-            {starting ? "開始中…" : waiting ? "実行中…" : "この地点で分析を開始"}
+            {starting ? "開始中…"
+              : queued ? "順番待ち…"
+              : waiting ? "実行中…"
+              : "この地点で分析を開始"}
           </button>
         )}
       </div>
@@ -211,7 +222,8 @@ export function AnalysisPanel({
         <>
           <p className="analysis__status">
             <strong>{done} / {steps.length}</strong> ステップ完了
-            {elapsed && <> — 経過 {elapsed}</>}
+            {runningStep && <> — STEP{runningStep.step_number} 実行中</>}
+            {elapsed && <> {elapsed}</>}
             {status.status_note && <> — {status.status_note}</>}
           </p>
 
@@ -228,7 +240,9 @@ export function AnalysisPanel({
           )}
 
           <ol className="analysis__steps">
-            {steps.map((step) => <StepRow key={step.step_number} step={step} />)}
+            {steps.map((step) => (
+              <StepRow key={step.step_number} step={step} now={now} />
+            ))}
           </ol>
 
           <p className="analysis__usage">
@@ -323,7 +337,7 @@ function adviceFor(text: string): string | null {
 }
 
 
-function StepRow({ step }: { step: AnalysisStep }) {
+function StepRow({ step, now }: { step: AnalysisStep; now: number }) {
   // キャッシュに入ったぶんは input_tokens から抜けます。足さないと、
   // 合計と行の数字が合いません。
   const cost = (step.input_tokens ?? 0) + (step.output_tokens ?? 0)
@@ -338,6 +352,9 @@ function StepRow({ step }: { step: AnalysisStep }) {
       </span>
       {step.status === "completed" && cost > 0 && (
         <small>{cost.toLocaleString()} tok</small>
+      )}
+      {step.status === "running" && step.started_at && (
+        <small>{since(step.started_at, now) ?? ""}</small>
       )}
       {step.status === "failed" && (
         <small className="analysis__step-error">
