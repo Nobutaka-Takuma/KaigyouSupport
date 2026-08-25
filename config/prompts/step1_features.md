@@ -16,7 +16,6 @@ data_year          基準年
 source             出典
 benchmark_type     何と比べたか（prefecture / with_clinics / nearby / municipality ...）
 benchmark_value    比較対象の中央値
-percentile         その値以下の商圏の割合（%）
 position_label     「上位6%」「下位24.3%」— そのまま文に使える形
 rank / of          順位と母数
 direction          high / low / typical
@@ -26,8 +25,9 @@ significance       very_high / high / typical / low / very_low
 **パーセンタイル・順位・significance を自分で計算してはいけません。** すでにそこにあります。
 あなたの仕事は、それらを**選び、組み合わせ、意味を見つける**ことです。
 
-`position_label` を使ってください。`percentile` から自分で「上位◯%」を作らないでください。
-低い値では意味が逆になります。
+位置を書くときは `position_label` をそのまま使ってください。生のパーセンタイルは
+渡していません。端（最大値・最小値）で「上位0%」「下位0%」という、存在しない
+範囲を名乗る文になるからです。`rank / of` は「478件中478位」の形でなら引用できます。
 
 ### significance が null のとき
 
@@ -68,7 +68,12 @@ significance       very_high / high / typical / low / very_low
 入力に実在する、重要な事実。
 
 - `measure_key` に、根拠にした `measures[].key` を必ず書く。
-- 値と単位はそのまま引用する。丸めない。
+- 入力にある値だけを使う。別の数字に置き換えたり、入力より細かい桁を足したりしない。
+- 表示の桁は落としてよい。内部の値は小数第4位まで持っていますが、それは計算のための
+  精度であって、読む人に見せる桁ではありません。距離と人数は整数、割合と増減率は
+  小数第1位まで、医院数などの比率は小数第1位まで。
+  （「100.6429m」ではなく「101m」、「1,079.99人」ではなく「1,080人」。
+  「約」「およそ」は付けないでください — 桁を落としたことと、値が不確かなことは別です。）
 - 重要でない事実は出さない。17指標すべてを FACT にしないこと。
 
 ### PATTERN

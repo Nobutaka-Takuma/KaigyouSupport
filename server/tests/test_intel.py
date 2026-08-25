@@ -113,9 +113,31 @@ def test_step1_is_given_the_benchmarks_rather_than_asked_to_compute_them(dataset
     assert placed
     for measure in placed:
         assert "unit" in measure and "source" in measure
-        if measure.get("percentile") is not None:
+        if measure.get("rank") is not None:
             assert measure.get("position_label"), f"{measure['key']} に position_label が無い"
             assert measure.get("benchmark_type")
+
+
+def test_step1_is_not_given_the_raw_percentile(dataset):
+    """端で逆の意味に読める数字は渡さない。
+
+    銀座の人口増減率は中央区内で最下位で、percentile は 0.0 です。それを
+    渡したところ、モデルは position_label（「下位0.4%」）ではなく percentile から
+    文を作り、「下位0%」と書きました。0% の集合には誰も入れません。
+
+    プロンプトには「percentile から作るな」と既に書いてありました。書いてある
+    ことより、無いことのほうが強い。
+    """
+    payload = for_step1(dataset, {"all_benchmarks": True})
+    for measure in payload["measures"]:
+        assert "percentile" not in measure
+        assert "top_share_pct" not in measure
+        for benchmark in measure.get("benchmarks") or []:
+            assert "percentile" not in benchmark, measure["key"]
+            assert "top_share_pct" not in benchmark, measure["key"]
+        # 位置そのものは落としません。落とすと今度は何も言えなくなります。
+        if measure.get("rank") is not None:
+            assert measure.get("position_label") and measure.get("of")
 
 
 def test_step1_keeps_every_reference_class(dataset):
@@ -131,7 +153,7 @@ def test_step1_keeps_every_reference_class(dataset):
     """
     payload = for_step1(dataset, {"all_benchmarks": True})
     placed = [m for m in payload["measures"]
-              if m.get("value") is not None and m.get("percentile") is not None]
+              if m.get("value") is not None and m.get("rank") is not None]
     assert placed
     for measure in placed:
         assert measure.get("benchmarks"), f"{measure['key']} の比較が落ちています"
@@ -158,6 +180,20 @@ def test_the_whole_dataset_can_be_sent_when_asked(dataset):
     assert set(payload) == set(to_jsonable(dataset))
 
 
+def test_turning_off_all_benchmarks_actually_turns_them_off(dataset):
+    """設定の欄が読まれずに落ちていないこと。
+
+    all_benchmarks は読み取ってはいたものの、_measure に渡し忘れていました。
+    既定が True なので出力は正しく、設定だけが黙って効かない状態でした。
+    """
+    trimmed = for_step1(dataset, {"all_benchmarks": False})
+    assert all("benchmarks" not in m for m in trimmed["measures"])
+    # 代表1つ（平坦な benchmark_*）は残ります。
+    assert any(m.get("position_label") for m in trimmed["measures"])
+    full = for_step1(dataset, {"all_benchmarks": True})
+    assert any(m.get("benchmarks") for m in full["measures"])
+
+
 def test_what_step1_sees_is_configuration_not_code():
     """何を渡すかは config/analysis.yaml で変えられること。"""
     projection = cfg.analysis_config().get("projection") or {}
@@ -181,7 +217,7 @@ def test_step1_keeps_the_reasons_a_comparison_was_withheld(dataset):
     """
     payload = for_step1(dataset)
     for measure in payload["measures"]:
-        if measure.get("value") is not None and measure.get("percentile") is None:
+        if measure.get("value") is not None and measure.get("rank") is None:
             assert measure.get("benchmark_unavailable_reason")
 
 
@@ -351,6 +387,32 @@ def test_a_failed_step_does_not_erase_the_completed_ones(conn, dataset):
     assert steps[1]["status"] == "completed"
     assert steps[1]["output_json"] == {"facts": []}
     assert steps[2]["status"] == "failed"
+    assert jobs.next_step(conn, job_id) == 2
+    conn.rollback()
+
+
+def test_an_unimplemented_step_is_left_pending_not_marked_failed(conn, dataset):
+    """未実装は失敗ではない。
+
+    最初の実装は STEP2 を failed で記録していました。画面には赤い「失敗」と
+    エラー本文が出るので、実行して壊れたように見えます。実際には一度も
+    呼ばれていません。pending のままにしておけば、RUNNERS に足した次の
+    `analyze --once` がそのまま続きから拾います。
+    """
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 1, {"facts": []}, {})
+
+    assert 2 not in worker.RUNNERS, "STEP2 を実装したらこのテストを消してください"
+    with pytest.raises(worker.StepNotImplemented):
+        worker.run_step(conn, job_id, 2)
+
+    steps = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}
+    assert steps[2]["status"] == "pending"
+    assert not steps[2]["error_message"]
     assert jobs.next_step(conn, job_id) == 2
     conn.rollback()
 

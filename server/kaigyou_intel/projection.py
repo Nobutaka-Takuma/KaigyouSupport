@@ -23,14 +23,25 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Mapping
 
-#: measures から Step1 へ渡す欄。benchmarks の入れ子は落とし、平坦な代表値
-#: （= primary の写し）だけを残します。
+#: measures から Step1 へ渡す欄。平坦な代表値（= primary の写し）と、
+#: 入れ子の benchmarks の両方を残します。
 _MEASURE_FIELDS = (
     "key", "label", "value", "unit", "data_year", "source", "higher_means",
-    "benchmark_type", "benchmark_value", "percentile", "position_label",
+    "benchmark_type", "benchmark_value", "position_label",
     "rank", "of", "direction", "significance", "significance_withheld_reason",
     "growth",
 )
+
+#: 位置を表す欄のうち、LLM に渡さないもの。
+#:
+#: どちらも数としては正しく、文にすると逆の意味に読めます。``top_share_pct``
+#: は低い値を「上位94%」にしますし、``percentile`` は最小値のとき 0.0 なので
+#: 「下位0%」と書かれます（実測：銀座の人口増減率が中央区内で最下位のとき、
+#: モデルは position_label ではなく percentile から文を作りました）。
+#:
+#: 「使うな」とプロンプトで書くより、渡さないほうが確実です。同じ情報は
+#: ``position_label`` と ``rank`` / ``of`` にあり、そちらは端でも壊れません。
+_BENCHMARK_DROP = ("percentile", "top_share_pct")
 
 
 def to_jsonable(value: Any) -> Any:
@@ -67,7 +78,10 @@ def _measure(item: Mapping[str, Any], keep_benchmarks: bool = True) -> dict[str,
     if keep_benchmarks and item.get("benchmarks"):
         # 6つの比較。代表（平坦な benchmark_*）は prefecture などの写しですが、
         # 母集団によって読みが変わることこそがパターンの材料です。
-        out["benchmarks"] = item["benchmarks"]
+        out["benchmarks"] = [
+            {k: v for k, v in b.items() if k not in _BENCHMARK_DROP}
+            for b in item["benchmarks"]
+        ]
     # 比較できなかったものは、なぜできなかったかごと残します。欄ごと消すと
     # 「平凡だった」と読まれます。
     if item.get("value") is not None and item.get("percentile") is None:
@@ -105,7 +119,8 @@ def for_step1(dataset: Mapping[str, Any],
         "measurement_basis": measures.get("measurement_basis"),
         "primary_benchmark": measures.get("primary_benchmark"),
         "benchmark_scopes": measures.get("benchmark_scopes"),
-        "measures": [_measure(m) for m in (measures.get("items") or [])],
+        "measures": [_measure(m, keep_benchmarks)
+                     for m in (measures.get("items") or [])],
         # 組み合わせと「何が確認できていないか」だけ。成分の値は measures に
         # 既にあるので再掲しません（再掲すると 11.7KB が 1.4KB で済むところを
         # 使い、しかも同じ数字が 2 か所にある状態で読ませることになります）。
@@ -219,7 +234,8 @@ def for_step3(step1: Mapping[str, Any], step2: Mapping[str, Any],
     measures = dataset.get("measures") or {}
     return {
         "location": dataset.get("location"),
-        "measures": [_measure(m) for m in (measures.get("items") or [])],
+        "measures": [_measure(m, keep_benchmarks)
+                     for m in (measures.get("items") or [])],
         "primary_benchmark": measures.get("primary_benchmark"),
         "demand": dataset.get("demand"),
         "competition": _competition_summary(dataset),

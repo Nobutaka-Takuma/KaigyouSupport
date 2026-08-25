@@ -42,10 +42,13 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     settings = llm.step_settings(number)
     runner = RUNNERS.get(number)
     if runner is None:
-        message = (f"STEP{number}（{settings['name']}）は未実装です。"
-                   "実装されるまでこのジョブは進みません。")
-        jobs.fail_step(conn, job_id, number, message)
-        raise StepNotImplemented(message)
+        # 記録は残しません。未実装は「失敗」ではないからです。failed と書くと
+        # 実行して壊れたように見えて、実装後に手で直さないと再開できません。
+        # 何も書かなければ pending のままなので、RUNNERS に足した次の
+        # `analyze --once` がそのまま続きから拾います。
+        raise StepNotImplemented(
+            f"STEP{number}（{settings['name']}）は未実装です。"
+            "実装されるまでこのジョブは進みません。")
 
     if number == 1:
         payload = step1_features.build_input(job["base_data"])
