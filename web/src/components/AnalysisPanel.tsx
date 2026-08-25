@@ -310,6 +310,11 @@ function adviceFor(text: string): string | null {
     return "ANTHROPIC_API_KEY が正しくありません。worker を動かす端末で"
       + "設定し直してから、worker を再起動してください。";
   }
+  if (text.includes("max_tokens") || text.includes("EOF while parsing")) {
+    return "レポートが書き終わる前に長さの上限で切れました。"
+      + "config/analysis.yaml の max_tokens を上げて worker を再起動し、"
+      + "そのステップだけやり直してください。済んだステップは残ります。";
+  }
   if (text.includes("検索結果に無い URL")) {
     return "モデルが実在しない出典を書いたため保存しませんでした。"
       + "やり直すと通ることがあります。";

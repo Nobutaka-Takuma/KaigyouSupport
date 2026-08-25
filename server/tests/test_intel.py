@@ -1713,3 +1713,61 @@ def test_the_report_carries_the_numbers_it_did_not_quote(dataset):
     # 標榜科目と診療時間は、競合の読み方を変える情報なので落とさない。
     assert "#### 標榜診療科目（商圏内）" in markdown
     assert "#### 診療時間（商圏内）" in markdown
+
+
+def test_a_truncated_answer_is_not_reported_as_broken_json(monkeypatch):
+    """実測：STEP4 が
+
+      Invalid JSON: EOF while parsing a string at line 1 column 18741
+
+    で落ちました。モデルが間違った JSON を書いたのではなく、**書き終わる前に
+    止められた**という意味です。この 2 つは直し方がまったく違います
+    （前者はプロンプト、後者は max_tokens）。
+
+    SDK は content_block_stop の時点で本文を解析するので、stop_reason が
+    max_tokens だと分かる前に例外が出ます。だから壊れ方のほうを見ます。
+    """
+    from pydantic_core import ValidationError as CoreValidationError
+
+    from kaigyou_intel import client as llm
+
+    boom = Exception(
+        "1 validation error for Step4Output\n  Invalid JSON: EOF while parsing "
+        "a string at line 1 column 18741 [type=json_invalid, input_value='{...']")
+    assert llm._looks_truncated(boom)
+    # 本物の書き間違いは別扱い（やり直しても同じところで落ちるとは限らない）。
+    assert not llm._looks_truncated(Exception("Field required [type=missing]"))
+    assert CoreValidationError is not None  # import できることの確認
+
+
+def test_the_truncation_message_says_what_to_change(monkeypatch):
+    import contextlib
+
+    from kaigyou_intel import client as llm
+
+    class _Stream:
+        @staticmethod
+        def get_final_message():
+            raise Exception("Invalid JSON: EOF while parsing a string "
+                            "[type=json_invalid, input_value='{']")
+
+    class _Client:
+        class messages:
+            @staticmethod
+            @contextlib.contextmanager
+            def stream(**kwargs):
+                yield _Stream()
+
+    monkeypatch.setattr(llm, "_client", lambda: _Client())
+    with pytest.raises(llm.Truncated, match="max_tokens"):
+        llm.ask(step_number=4, system="s", user="u", schema=Step1Output)
+
+
+def test_the_output_ceiling_leaves_room_for_the_whole_report():
+    """10章＋開業方針の JSON に、思考のぶんを足しても収まる上限にしておく。
+
+    24,000 では書き終わる前に切れました。全部ストリームで受けているので
+    HTTP タイムアウトの心配はなく、上限は余裕を持たせられます。払うのは
+    実際に出た分だけなので、上げても高くなりません。
+    """
+    assert cfg.analysis_config()["model"]["max_tokens"] >= 48000

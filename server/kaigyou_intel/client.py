@@ -40,6 +40,16 @@ class Refused(RuntimeError):
     """安全性の判定で応答が拒否された。障害ではないので、そう記録します。"""
 
 
+class Truncated(RuntimeError):
+    """出力が max_tokens に達して途中で切れた。
+
+    構造化出力では、これは「壊れた JSON」として現れます。pydantic の
+    ``Invalid JSON: EOF while parsing a string at line 1 column 18741`` は、
+    モデルが間違った JSON を書いたのではなく、**書き終わる前に止められた**
+    という意味です。この 2 つは直し方がまったく違うので、区別して報告します。
+    """
+
+
 class NotConfigured(RuntimeError):
     """API キーが無い。設定漏れであって、障害ではない。"""
 
@@ -199,7 +209,19 @@ def ask(*, step_number: int, system: str, user: str,
         # output_config へ入れると、型がそのまま送信されて落ちます。
         request = {**request, "output_format": schema}
     with client.messages.stream(**request) as stream:
-        message = stream.get_final_message()
+        try:
+            message = stream.get_final_message()
+        except Exception as exc:  # noqa: BLE001 - 種類を見分けてから投げ直す
+            if _looks_truncated(exc):
+                raise Truncated(
+                    f"出力が max_tokens（{settings['max_tokens']:,}）に達して"
+                    "途中で切れました。JSON が壊れているのではなく、書き終わる前に"
+                    "止められています。config/analysis.yaml の model.max_tokens か、"
+                    f"steps.{step_number}.max_tokens を上げてから、"
+                    "そのステップだけやり直してください"
+                    "（払うのは実際に出た分だけなので、上げても高くなりません）。"
+                ) from exc
+            raise
     # output_format を渡さなかったときは None。text ブロックに付きます。
     parsed = getattr(message, "parsed_output", None)
 
@@ -225,6 +247,19 @@ def ask(*, step_number: int, system: str, user: str,
         model=getattr(message, "model", settings["model"]),
         sources=extract_sources(message),
     )
+
+
+def _looks_truncated(exc: Exception) -> bool:
+    """途中で切れた JSON かどうか。
+
+    SDK は content_block_stop の時点で本文を解析するので、``stop_reason`` が
+    ``max_tokens`` だと分かる前に例外が出ます。だから停止理由では判定できず、
+    壊れ方のほうを見ます。「EOF while parsing」は、閉じられていない文字列や
+    括弧で終わったということで、モデルの書き間違いではありません。
+    """
+    text = str(exc)
+    return "json_invalid" in text and (
+        "EOF while parsing" in text or "control character" in text)
 
 
 def _count_searches(message: Any) -> int:
