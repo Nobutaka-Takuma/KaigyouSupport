@@ -269,8 +269,12 @@ def reset_step(conn: psycopg.Connection, job_id: str, number: int) -> None:
             """, (job_id, number))
         cur.execute("DELETE FROM analysis_reports WHERE job_id = %s", (job_id,))
         cur.execute(
+            # started_at も消します。残すと、やり直した直後の画面に
+            # 「経過 25秒」と出ます。数えているのは前回の開始からで、
+            # 待っている人が見たいのは今回のぶんです。
             "UPDATE analysis_jobs SET status = 'queued', error_message = NULL, "
-            "current_step = %s, completed_at = NULL WHERE id = %s",
+            "current_step = %s, started_at = NULL, completed_at = NULL "
+            "WHERE id = %s",
             (number - 1, job_id))
     conn.commit()
 

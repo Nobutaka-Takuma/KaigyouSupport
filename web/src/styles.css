@@ -719,3 +719,35 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .report__decision dl > div { grid-template-columns: 1fr; gap: 0.15rem; }
   .analysis__head button { width: 100%; }
 }
+
+.analysis__actions { display: flex; gap: 0.4rem; align-items: center; }
+.analysis__ghost {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 6px;
+  background: #fff;
+  color: #43506b;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.analysis__failure {
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid #b02a37;
+  background: #fff5f5;
+  font-size: 0.82rem;
+}
+.analysis__failure p { margin: 0 0 0.35rem; word-break: break-word; }
+.analysis__advice { color: #7a2530; font-weight: 600; }
+.analysis__failure pre {
+  max-height: 12rem;
+  overflow: auto;
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: #fff;
+  border: 1px solid #f0d5d8;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

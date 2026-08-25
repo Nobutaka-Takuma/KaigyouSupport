@@ -1618,3 +1618,35 @@ def test_the_cost_estimate_is_not_understated_when_a_model_is_unknown():
         {"model": "claude-sonnet-5", "input_tokens": 1_000_000},
         {"model": "未知のモデル", "input_tokens": 1_000_000},
     ]) is None
+
+
+def test_retrying_restarts_the_clock(conn, dataset):
+    """やり直した直後の画面に「経過 25秒」と出さない。
+
+    数えているのが前回の開始からだと、待っている人が見たいものと違います。
+    """
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.claim_specific(conn, job_id)
+    assert jobs.get_job(conn, job_id)["started_at"] is not None
+    jobs.reset_step(conn, job_id, 1)
+    assert jobs.get_job(conn, job_id)["started_at"] is None
+    conn.rollback()
+
+
+def test_a_billing_failure_tells_the_user_what_to_do():
+    """「失敗しました」だけでは動けません。
+
+    実測：残高不足で止まったとき、画面には400のJSONとスタックトレースだけが
+    出ていました。読んでも次に何をすればいいのか分かりません。
+    """
+    from pathlib import Path
+
+    panel = (Path(__file__).resolve().parents[2] / "web" / "src" / "components"
+             / "AnalysisPanel.tsx").read_text(encoding="utf-8")
+    assert "credit balance is too low" in panel
+    assert "Plans & Billing" in panel
+    # やり直しは新しいジョブを作るのではなく、失敗したステップから再開する。
+    assert "retryFrom" in panel and "からやり直す" in panel

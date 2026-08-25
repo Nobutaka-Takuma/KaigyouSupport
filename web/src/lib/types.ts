@@ -373,6 +373,8 @@ export interface AnalysisStep {
   step_name: string;
   status: "pending" | "running" | "completed" | "failed" | "skipped";
   error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
   web_searches?: number | null;
@@ -399,6 +401,9 @@ export interface AnalysisStatus {
     longitude: number;
     radius_m: number;
     error_message?: string | null;
+    created_at?: string | null;
+    started_at?: string | null;
+    completed_at?: string | null;
   };
   steps: AnalysisStep[];
   source_count: number;

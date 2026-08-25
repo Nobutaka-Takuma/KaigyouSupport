@@ -40,6 +40,10 @@ export function AnalysisPanel({
   const [starting, setStarting] = useState(false);
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [needsToken, setNeedsToken] = useState(false);
+  // ポーリングは終わった時点で止まります。やり直したら再開させる必要があるので、
+  // 動かすたびに増やす数を持ちます。
+  const [attempt, setAttempt] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const timer = useRef<number | null>(null);
 
   // 直前のジョブは覚えておきます。分析は数分かかるので、その間にタブを
@@ -98,7 +102,17 @@ export function AnalysisPanel({
       cancelled = true;
       if (timer.current) window.clearTimeout(timer.current);
     };
-  }, [jobId, poll]);
+  }, [jobId, poll, attempt]);
+
+  // 待っている間、何も動かない画面にしない。1つのステップに数分かかるので、
+  // 止まっているのか進んでいるのかが分からなくなります。
+  const waiting = status
+    && ["queued", "running"].includes(status.job.status);
+  useEffect(() => {
+    if (!waiting) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [waiting]);
 
   async function start() {
     setStarting(true);
@@ -114,6 +128,7 @@ export function AnalysisPanel({
         JSON.stringify({ id: created.job_id, lat, lng, radius }));
       if (token) localStorage.setItem(TOKEN_KEY, token);
       setJobId(created.job_id);
+      setAttempt((n) => n + 1);
       setNeedsToken(false);
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 503)) {
@@ -125,16 +140,48 @@ export function AnalysisPanel({
     }
   }
 
+  /**
+   * 失敗したところからやり直す。
+   *
+   * ボタンをもう一度押すと**新しいジョブ**ができます。それは「別の分析を
+   * 始める」であって「さっきの続き」ではありません。済んだステップまで
+   * 捨てて課金し直すことになるので、失敗しているときは retry を出します。
+   */
+  async function retry(from: number) {
+    if (!jobId) return;
+    setError(null);
+    try {
+      await api.analysis.retryFrom(jobId, from, token || undefined);
+      setAttempt((n) => n + 1);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
   const steps = status?.steps ?? [];
   const done = steps.filter((s) => s.status === "completed").length;
+  const failedStep = steps.find((s) => s.status === "failed");
+  const failed = status?.job.status === "failed";
+  const elapsed = waiting ? since(status?.job.started_at ?? status?.job.created_at, now) : null;
 
   return (
     <section className="analysis">
       <div className="analysis__head">
         <h3>商圏インテリジェンス</h3>
-        <button onClick={start} disabled={starting}>
-          {starting ? "開始中…" : "この地点で分析を開始"}
-        </button>
+        {failed && failedStep ? (
+          <span className="analysis__actions">
+            <button onClick={() => retry(failedStep.step_number)}>
+              STEP{failedStep.step_number} からやり直す
+            </button>
+            <button className="analysis__ghost" onClick={() => retry(1)}>
+              最初から
+            </button>
+          </span>
+        ) : (
+          <button onClick={start} disabled={starting || waiting === true}>
+            {starting ? "開始中…" : waiting ? "実行中…" : "この地点で分析を開始"}
+          </button>
+        )}
       </div>
       <p className="analysis__lead">
         統計から特徴を抽出し（STEP1）、その背景をWeb検索で調べ（STEP2）、
@@ -164,8 +211,11 @@ export function AnalysisPanel({
         <>
           <p className="analysis__status">
             <strong>{done} / {steps.length}</strong> ステップ完了
+            {elapsed && <> — 経過 {elapsed}</>}
             {status.status_note && <> — {status.status_note}</>}
           </p>
+
+          {failedStep?.error_message && <FailureNote text={failedStep.error_message} />}
 
           {/* 終わったジョブに「キーがありません」と出しても意味がありません。
               これは待っている人へのヒントです。 */}
@@ -204,6 +254,16 @@ export function AnalysisPanel({
   );
 }
 
+/** 「1分23秒」。止まっているのか進んでいるのかが分かればよいので、秒まで。 */
+function since(iso: string | null | undefined, now: number): string | null {
+  if (!iso) return null;
+  const started = Date.parse(iso);
+  if (Number.isNaN(started)) return null;
+  const seconds = Math.max(0, Math.floor((now - started) / 1000));
+  return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+}
+
+
 /** 地図のクリックは毎回わずかに違う座標になるので、丸めて比べます。 */
 function samePlace(
   a: { lat: number; lng: number; radius: number },
@@ -212,6 +272,49 @@ function samePlace(
   return a.radius === b.radius
     && Math.abs(a.lat - b.lat) < 1e-5
     && Math.abs(a.lng - b.lng) < 1e-5;
+}
+
+
+/**
+ * 失敗の理由を、読める形にして必要なら手当てまで書く。
+ *
+ * 保存されている本文にはスタックトレースが付いています。画面にそのまま
+ * 流すと、いちばん大事な1行が埋もれます。
+ */
+function FailureNote({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const first = text.split("\n")[0];
+  const advice = adviceFor(text);
+  return (
+    <div className="analysis__failure">
+      <p>{first}</p>
+      {advice && <p className="analysis__advice">{advice}</p>}
+      <button className="analysis__ghost" onClick={() => setOpen(!open)}>
+        {open ? "詳細を隠す" : "詳細"}
+      </button>
+      {open && <pre>{text}</pre>}
+    </div>
+  );
+}
+
+/** よくある失敗には、次にやることまで書く。「失敗しました」だけでは動けない。 */
+function adviceFor(text: string): string | null {
+  if (text.includes("credit balance is too low")) {
+    return "Anthropic の残高不足です。console.anthropic.com の Plans & Billing で"
+      + "クレジットを追加してから、やり直してください。課金は発生していません。";
+  }
+  if (text.includes("rate_limit") || text.includes("429")) {
+    return "レート制限です。数分おいてからやり直してください。";
+  }
+  if (text.includes("authentication") || text.includes("invalid x-api-key")) {
+    return "ANTHROPIC_API_KEY が正しくありません。worker を動かす端末で"
+      + "設定し直してから、worker を再起動してください。";
+  }
+  if (text.includes("検索結果に無い URL")) {
+    return "モデルが実在しない出典を書いたため保存しませんでした。"
+      + "やり直すと通ることがあります。";
+  }
+  return null;
 }
 
 
@@ -231,8 +334,10 @@ function StepRow({ step }: { step: AnalysisStep }) {
       {step.status === "completed" && cost > 0 && (
         <small>{cost.toLocaleString()} tok</small>
       )}
-      {step.error_message && (
-        <small className="analysis__step-error">{step.error_message}</small>
+      {step.status === "failed" && (
+        <small className="analysis__step-error">
+          このステップから再開できます
+        </small>
       )}
     </li>
   );
