@@ -154,7 +154,12 @@ def get_analysis(job_id: str,
             "web_searches": sum(s["web_searches"] or 0 for s in steps),
             "estimated_cost_usd": total_cost(steps),
         },
-        "llm_configured": llm.is_configured(),
+        # ホスティング環境では **null**。API サーバは LLM を呼ばないので、
+        # ここにキーがあるかどうかは何も意味しません。false を返すと画面に
+        # 「キーがありません」と出続けますが、必要なのは worker を動かす端末の
+        # ほうです。手元で API と worker を同じ端末で動かしているときだけ、
+        # この値は本当のことを言えます。
+        "llm_configured": None if _hosted() else llm.is_configured(),
         # worker が動いていないと queued のまま止まります。画面で待つ人に、
         # 何を待っているのかが分かるように、状態の意味を添えます。
         "status_note": _STATUS_NOTE.get(job["status"]),

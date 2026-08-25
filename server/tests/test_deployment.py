@@ -839,3 +839,35 @@ def test_the_mesh_sweep_ignores_an_older_signature_left_behind():
         with connect(autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("DROP FUNCTION IF EXISTS kg_analyze_point("
                         "double precision,double precision,double precision,text,integer)")
+
+
+def test_the_hosted_api_does_not_claim_to_know_about_the_llm_key(monkeypatch):
+    """Vercel 側では LLM を一度も呼びません。
+
+    API がするのは Job を積むことと進捗を見せることだけで、実行は worker です。
+    そこで `llm_configured: false` を返すと、画面に「キーがありません」と
+    出続けます。必要なのは worker を動かす端末のほうで、この API のほうでは
+    ありません。
+    """
+    from kaigyou_api.routers import intel
+
+    monkeypatch.setenv("VERCEL", "1")
+    assert intel._hosted() is True
+
+    for var in ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME", "K_SERVICE"):
+        monkeypatch.delenv(var, raising=False)
+    assert intel._hosted() is False
+
+
+def test_the_analysis_token_is_not_the_anthropic_key():
+    """混同されやすいので、文書で名指しして分けておきます。
+
+    Anthropic のキーを公開URLの環境変数に置く運用が定着すると、鍵の置き場所が
+    増えます。Vercel 側は LLM を呼ばないので、置く理由がありません。
+    """
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / "docs" / "deploy.md").read_text(
+        encoding="utf-8")
+    assert "`ANTHROPIC_API_KEY` は Vercel に置きません" in text
+    assert "Anthropic のキーを入れないでください" in text

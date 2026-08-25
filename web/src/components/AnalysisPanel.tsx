@@ -169,7 +169,7 @@ export function AnalysisPanel({
 
           {/* 終わったジョブに「キーがありません」と出しても意味がありません。
               これは待っている人へのヒントです。 */}
-          {!status.llm_configured && !["completed", "cancelled"]
+          {status.llm_configured === false && !["completed", "cancelled"]
             .includes(status.job.status) && (
             <p className="analysis__warn">
               サーバ側で ANTHROPIC_API_KEY が確認できません。worker を動かす端末で

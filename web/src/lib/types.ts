@@ -413,7 +413,8 @@ export interface AnalysisStatus {
     /** 概算。単価の分からないモデルが混じると null。 */
     estimated_cost_usd: number | null;
   };
-  llm_configured: boolean;
+  /** ホスティング環境では null。APIサーバはLLMを呼ばないので判定できない。 */
+  llm_configured: boolean | null;
   status_note?: string | null;
 }
 

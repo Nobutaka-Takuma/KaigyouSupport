@@ -123,15 +123,55 @@ Supabase 無料枠の 500MB に収まります。
 1. [vercel.com](https://vercel.com) で **Add New → Project**、このリポジトリを選びます。
 2. Framework Preset は **Other** のままで構いません。
    ビルド設定はリポジトリの `vercel.json` に書いてあるので、画面での指定は不要です。
-3. **Environment Variables** に3つ設定します（Production / Preview 両方）。
+3. **Environment Variables** に設定します（Production / Preview 両方）。
 
    | 変数 | 値 |
    |---|---|
    | `DATABASE_URL` | Supabase の **Transaction pooler**（ポート **6543**）の接続文字列。末尾に `?sslmode=require` |
    | `VITE_RASTER_TILES` | `https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png` |
    | `VITE_RASTER_ATTRIBUTION` | `国土地理院` |
+   | `KAIGYOU_ANALYSIS_TOKEN` | 商圏インテリジェンスを使うときのみ。次節を参照 |
 
 4. **Deploy** を押します。
+
+### `ANTHROPIC_API_KEY` は Vercel に置きません
+
+**Vercel 側では LLM を一度も呼びません。** API がするのは Job をキューに積むことと
+進捗を見せることだけで、4 ステップの実行と Web 検索はワークステーションの worker が
+行います（要件 §31。Web 検索を伴う 4 ステップは関数の実行時間に収まりません）。
+
+そのため `ANTHROPIC_API_KEY` は **worker を動かす端末の環境変数**です。Vercel に
+置いても使われず、鍵を置く場所が 1 つ増えるだけです。
+
+```powershell
+# worker を動かす端末（ここにだけ API キーを置く）
+$env:ANTHROPIC_API_KEY = 'sk-ant-...'
+$env:DATABASE_URL = 'postgresql://...supabase.com:5432/postgres?sslmode=require'
+python -m kaigyou_etl analyze --poll 5
+```
+
+worker の `DATABASE_URL` は **Session pooler（5432）** を使ってください。長く
+つなぎっぱなしにするので、Transaction pooler（6543）より向いています。
+
+### `KAIGYOU_ANALYSIS_TOKEN` は自分で決める合言葉
+
+`ANTHROPIC_API_KEY` とは**別のもの**です。Anthropic のキーを入れないでください。
+
+分析 1 件ごとに LLM の課金が発生するので、公開 URL に認証なしで置くと誰でも
+財布を開けられます。ホスティング環境でこの変数が未設定なら、分析の開始は
+**503 で断ります**（警告を出して通すのでは、気づいたときには請求が来ています）。
+
+値は自分で作った十分長いランダム文字列にしてください。
+
+```powershell
+# 例：64文字のランダム文字列を作る
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+これを Vercel の `KAIGYOU_ANALYSIS_TOKEN` に設定し、同じ値を画面の
+「分析トークン」欄に入れます。入れた値はその端末のブラウザにだけ保存されます。
+
+地図と統計だけを公開して分析機能は自分だけが使う、という運用がこれでできます。
 
 `vercel.json` はこのままで動きます。**rewrites は一つも書かないでください。**
 Vercel は FastAPI アプリを認識して全リクエストをそのアプリに渡します。
