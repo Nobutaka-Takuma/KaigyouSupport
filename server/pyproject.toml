@@ -26,7 +26,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["kaigyou_core", "kaigyou_etl", "kaigyou_etl.adapters", "kaigyou_api", "kaigyou_api.routers"]
+packages = ["kaigyou_core", "kaigyou_etl", "kaigyou_etl.adapters", "kaigyou_api", "kaigyou_api.routers", "kaigyou_intel", "kaigyou_intel.steps"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

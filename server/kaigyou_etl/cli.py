@@ -288,6 +288,34 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     return cmd_status(argparse.Namespace(json=False))
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """商圏インテリジェンスの worker。
+
+    Vercel の関数には実行時間の上限があり、Web検索を伴う 4 ステップは
+    そこに収まりません（要件 §31）。API は Job を作るだけで、実行はここです。
+    """
+    from kaigyou_intel import client as llm
+    from kaigyou_intel.worker import serve
+
+    if not llm.is_configured():
+        print("error: ANTHROPIC_API_KEY が設定されていません。", file=sys.stderr)
+        print("  $env:ANTHROPIC_API_KEY = 'sk-ant-...'  を設定してください。",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.once:
+        handled = serve(connect, once=True, progress=print)
+        print(f"{handled} 件を処理しました。")
+        return EXIT_OK
+
+    print("worker を起動しました。Ctrl+C で終了します。")
+    try:
+        serve(connect, poll_seconds=args.poll, progress=print)
+    except KeyboardInterrupt:
+        print("\n終了しました。")
+    return EXIT_OK
+
+
 def cmd_generate_sample(_args: argparse.Namespace) -> int:
     from kaigyou_etl.acquisition import AcquisitionLog
     from kaigyou_etl.sample.generate import generate
@@ -464,6 +492,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="都道府県コード。省略時はファイル名から判定します"
                         "（tblT001141H22.txt なら 22）")
     p.set_defaults(func=cmd_load_local)
+
+    p = sub.add_parser("analyze", help="商圏インテリジェンスの worker を動かす")
+    p.add_argument("--once", action="store_true",
+                   help="待っているジョブを1件処理して終了する")
+    p.add_argument("--poll", type=float, default=5.0,
+                   help="ジョブが無いときの待ち時間（秒）")
+    p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")
     p.set_defaults(func=cmd_generate_sample)

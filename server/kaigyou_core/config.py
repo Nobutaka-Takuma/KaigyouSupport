@@ -91,6 +91,26 @@ def sources_config() -> dict[str, Any]:
     return load_yaml(config_dir() / "sources.yaml")
 
 
+def analysis_config() -> dict[str, Any]:
+    """商圏インテリジェンス・エンジンの設定。無い環境では空。"""
+    try:
+        return load_yaml(config_dir() / "analysis.yaml")
+    except ConfigNotFound:
+        return {}
+
+
+def prompt_text(name: str) -> str:
+    """config/prompts/<name> をそのまま読む。
+
+    プロンプトはコードではなく資料です。文字列リテラルとして Python の中に
+    埋めると、差分が読めなくなり、非エンジニアが直せなくなります。
+    """
+    path = config_dir() / "prompts" / name
+    if not path.is_file():
+        raise ConfigNotFound(f"プロンプトが見つかりません: {path}")
+    return path.read_text(encoding="utf-8")
+
+
 def insights_config() -> dict[str, Any]:
     """複合指標の定義。無くてもデータセットは組み立てられる。
 

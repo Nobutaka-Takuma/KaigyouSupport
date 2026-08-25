@@ -1,0 +1,398 @@
+"""商圏インテリジェンス・エンジン（Phase 1〜2）。
+
+ここで守りたいのは、要件定義書がいちばん強く禁じていることです。
+
+**入力に無い数字を出さない**（§3 原則2）。LLM にパーセンタイルを作らせない
+仕組みになっているか、出力の数字が入力に実在するかを見ます。
+
+**根拠が辿れる**（§25）。FACT が実在の指標を、PATTERN が実在の FACT を
+指しているか。スキーマは形しか保証しないので、参照はこちらで確かめます。
+
+**ステップが独立している**（§32）。Step2 が落ちても Step1 は残り、Step2 から
+やり直せるか。
+
+LLM は呼びません（API キーが要るうえ、呼ぶたびに結果が変わるとテストに
+なりません）。呼び出しの境界を差し替えて、その前後を検証します。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from kaigyou_core import config as cfg
+from kaigyou_intel import client as llm
+from kaigyou_intel.projection import (
+    allowed_numbers,
+    base_data_hash,
+    for_step1,
+    for_step2,
+    for_step4,
+    to_jsonable,
+)
+from kaigyou_intel.schemas import Fact, Pattern, Step1Output, verify_step1
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+# ------------------------------------------------------------------ 設定
+def test_the_four_steps_are_configured_with_their_prompts():
+    config = cfg.analysis_config()
+    assert set(config["steps"]) == {1, 2, 3, 4}
+    for number, step in config["steps"].items():
+        assert step["prompt_version"], f"step{number} に prompt_version がありません"
+        assert (cfg.config_dir() / "prompts" / step["prompt"]).is_file() or number > 1, (
+            f"step{number} のプロンプトが見つかりません: {step['prompt']}")
+
+
+def test_only_step2_may_search_the_web():
+    """要件 §38：外部コンテクスト調査を STEP2 に限定する。
+
+    STEP1 で外部情報が混ざると、FACT と EXTERNAL FACT の区別が最初の段階で
+    壊れます。STEP4 で足せると、§16 の「新しい外部事実を追加しない」が破れます。
+    """
+    steps = cfg.analysis_config()["steps"]
+    assert steps[2]["web_search"] is True
+    for number in (1, 3, 4):
+        assert steps[number].get("web_search") is False, (
+            f"STEP{number} で Web 検索が有効になっています")
+
+
+def test_the_search_source_priority_matches_the_requirement():
+    """要件 §9 の優先順位が、設定として存在すること。"""
+    types = [s["type"] for s in cfg.analysis_config()["search"]["source_types"]]
+    assert types[:5] == ["government", "statistics", "prefecture",
+                         "municipality", "public_body"]
+
+
+def test_source_type_is_decided_by_the_url_not_by_the_model():
+    """機械的に決まることを LLM に判定させない。"""
+    from kaigyou_intel.jobs import classify_source
+
+    assert classify_source("https://www.mlit.go.jp/a") == "government"
+    assert classify_source("https://www.pref.shizuoka.jp/b") == "prefecture"
+    assert classify_source("https://www.city.susono.shizuoka.jp/c") == "municipality"
+    assert classify_source("https://www.u-tokyo.ac.jp/d") == "academic"
+    assert classify_source("https://example.com/e") == "other"
+
+
+# ------------------------------------------------------------------ 射影
+@pytest.fixture(scope="module")
+def dataset():
+    psycopg = pytest.importorskip("psycopg")
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_core.db import connect
+
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM mesh_scores")
+            if cur.fetchone()["n"] == 0:
+                pytest.skip("mesh scores not computed here")
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"database unavailable: {exc}")
+
+    response = TestClient(app).get("/api/dataset", params={
+        "lat": 35.6717, "lng": 139.7650, "radius": 1000,
+        "profile": "pediatric", "max_clinics": 0})
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_step1_is_given_the_benchmarks_rather_than_asked_to_compute_them(dataset):
+    """§3 原則2 を仕組みで守る。
+
+    パーセンタイル・順位・position_label を入力に含めます。含めなければ LLM は
+    自分で作るしかなく、作ったものは入力に無い数字です。
+    """
+    payload = for_step1(dataset)
+    measures = {m["key"]: m for m in payload["measures"]}
+    placed = [m for m in measures.values() if m.get("value") is not None]
+    assert placed
+    for measure in placed:
+        assert "unit" in measure and "source" in measure
+        if measure.get("percentile") is not None:
+            assert measure.get("position_label"), f"{measure['key']} に position_label が無い"
+            assert measure.get("benchmark_type")
+
+
+def test_step1_input_is_a_fraction_of_the_whole_document(dataset):
+    """要件 §34：元JSONを毎回丸ごと渡さない。"""
+    whole = len(json.dumps(to_jsonable(dataset), ensure_ascii=False).encode())
+    projected = len(json.dumps(for_step1(dataset), ensure_ascii=False).encode())
+    assert projected < whole * 0.5, (
+        f"STEP1 の入力が大きすぎます: {projected:,} / {whole:,} bytes")
+
+
+def test_the_clinic_list_is_not_sent_to_step1(dataset):
+    """50件の医院名と住所は 34KB あって、パターン発見には寄与しません。"""
+    payload = for_step1(dataset)
+    assert "items" not in payload["competition"]
+    assert payload["competition"]["by_specialty"] is not None
+
+
+def test_step1_keeps_the_reasons_a_comparison_was_withheld(dataset):
+    """significance が無い理由を落とさない。
+
+    落とすと「平凡だった」と読まれ、裾野のような地域で誤った断定が出ます。
+    """
+    payload = for_step1(dataset)
+    for measure in payload["measures"]:
+        if measure.get("value") is not None and measure.get("percentile") is None:
+            assert measure.get("benchmark_unavailable_reason")
+
+
+def test_step1_keeps_the_gaps(dataset):
+    """gaps は「確認できていないこと」。ここが唯一「未確認」と言える場所。"""
+    payload = for_step1(dataset)
+    for insight in payload["insight_metrics"]:
+        assert "gaps" in insight and "complete" in insight
+        # 成分の値は measures にあるので再掲しない。
+        assert "components" not in insight
+        assert "component_keys" in insight
+
+
+def test_step2_is_not_given_the_base_data(dataset):
+    """渡さなかったものについては何も言えない。
+
+    base_data を渡すと、外部情報を調べずに手元の数字を言い換えたものが
+    「外部事実」として返ってきます。
+    """
+    step1 = {"patterns": [{"id": "P001", "title": "t", "evidence_summary": "s",
+                           "importance": "high", "research_questions": ["q"]}]}
+    payload = for_step2(step1, dataset["location"], {"max_patterns": 5})
+    assert "measures" not in payload
+    assert "competition" not in payload
+    assert payload["patterns"][0]["id"] == "P001"
+
+
+def test_step2_respects_the_pattern_limit(dataset):
+    """要件 §34：PATTERN 最大5個。"""
+    step1 = {"patterns": [{"id": f"P{i:03d}", "title": "t", "evidence_summary": "s",
+                           "importance": "high", "research_questions": ["q"]}
+                          for i in range(1, 12)]}
+    payload = for_step2(step1, dataset["location"], {"max_patterns": 5})
+    assert len(payload["patterns"]) == 5
+
+
+def test_step4_gets_conclusions_not_raw_material(dataset):
+    """要件 §16：STEP4 で新しい外部事実を足さない。
+
+    足せないようにするには、足せるだけの材料を渡さないのが確実です。
+    """
+    payload = for_step4({"facts": []}, {"external_facts": []}, {"insights": []}, dataset)
+    assert "items" not in payload["competition"]
+    assert payload["step2"] == {"external_facts": []}
+
+
+def test_the_hash_ignores_the_timestamp(dataset):
+    """同一地点・同一データの再実行を見分けるため（§34 Cache）。
+
+    generated_at を含めると毎回別物になり、キャッシュが永久に当たりません。
+    """
+    a = dict(dataset, generated_at="2026-01-01T00:00:00Z")
+    b = dict(dataset, generated_at="2026-12-31T23:59:59Z")
+    assert base_data_hash(a) == base_data_hash(b)
+    c = dict(dataset)
+    c["location"] = dict(c["location"], lat=99.0)
+    assert base_data_hash(c) != base_data_hash(a)
+
+
+def test_numbers_in_the_input_can_be_enumerated(dataset):
+    """出力の検算に使う集合。入力に無い数字を見つけるための土台。"""
+    numbers = allowed_numbers(for_step1(dataset))
+    assert len(numbers) > 50
+    population = next(m for m in for_step1(dataset)["measures"]
+                      if m["key"] == "population")
+    from kaigyou_intel.projection import _canonical
+    assert _canonical(population["value"]) in numbers
+
+
+# ------------------------------------------------- スキーマと根拠の追跡
+def _output(**kwargs) -> Step1Output:
+    base = dict(
+        facts=[Fact(id="F001", statement="0〜14歳人口は1,088人", value=1088.6,
+                    unit="人", measure_key="child_population",
+                    position_label="下位24.3%", benchmark_type="prefecture"),
+               Fact(id="F002", statement="構成比は8.2%", measure_key="child_share")],
+        patterns=[Pattern(id="P001", title="絶対数も構成比も周辺並み",
+                          evidence=["F001", "F002"], evidence_summary="…",
+                          importance="medium", research_questions=["なぜか"])])
+    base.update(kwargs)
+    return Step1Output(**base)
+
+
+def test_a_pattern_must_rest_on_at_least_two_facts():
+    """単一の事実の言い換えは PATTERN ではありません（要件 §6）。"""
+    with pytest.raises(Exception):
+        Pattern(id="P001", title="t", evidence=["F001"], evidence_summary="s",
+                importance="high", research_questions=["q"])
+
+
+def test_a_fact_pointing_at_a_measure_that_does_not_exist_is_caught():
+    """LLM が指標名を作ってしまった場合。スキーマは通ってしまう。"""
+    output = _output(facts=[Fact(id="F001", statement="…",
+                                 measure_key="median_household_income")])
+    output.patterns[0].evidence = ["F001", "F001"]
+    problems = verify_step1(output, {"child_population", "child_share"})
+    assert any("median_household_income" in p.problem for p in problems)
+
+
+def test_a_pattern_pointing_at_a_fact_that_does_not_exist_is_caught():
+    """§25 の追跡は、参照が全部解決して初めて成立します。"""
+    output = _output()
+    output.patterns[0].evidence = ["F001", "F999"]
+    problems = verify_step1(output, {"child_population", "child_share"})
+    assert any("F999" in p.problem for p in problems)
+
+
+def test_a_clean_output_has_no_problems():
+    assert verify_step1(_output(), {"child_population", "child_share"}) == []
+
+
+def test_the_step1_schema_does_not_ask_for_benchmarks():
+    """要件 §7 からの変更点。ここが変わったら気づけるように。
+
+    パーセンタイルは /api/dataset が算出済みで、FACT は measure_key で参照
+    します。スキーマに benchmarks を戻すと、LLM が数字を作り始めます。
+    """
+    assert set(Step1Output.model_fields) == {"facts", "patterns", "not_determinable"}
+    assert "measure_key" in Fact.model_fields
+
+
+# ------------------------------------------------------------------ Job
+@pytest.fixture
+def conn():
+    psycopg = pytest.importorskip("psycopg")
+    from kaigyou_core.db import connect
+
+    try:
+        with connect() as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.analysis_jobs') AS t")
+                if cur.fetchone()["t"] is None:
+                    pytest.skip("017_analysis_jobs.sql not applied")
+            yield c
+            c.rollback()
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"database unavailable: {exc}")
+
+
+def test_a_new_job_has_all_four_steps_pending(conn, dataset):
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    steps = jobs.get_steps(conn, job_id)
+    assert [s["step_number"] for s in steps] == [1, 2, 3, 4]
+    assert all(s["status"] == "pending" for s in steps)
+    assert jobs.next_step(conn, job_id) == 1
+    conn.rollback()
+
+
+def test_a_failed_step_does_not_erase_the_completed_ones(conn, dataset):
+    """要件 §32：Step2 から再実行できること。
+
+    最初からやり直させると、Web検索の費用も待ち時間ももう一度かかります。
+    """
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    jobs.start_step(conn, job_id, 1, {"in": 1}, {"prompt_version": "v", "model": "m"})
+    jobs.finish_step(conn, job_id, 1, {"facts": []},
+                     {"input_tokens": 10, "output_tokens": 5, "web_searches": 0})
+    jobs.fail_step(conn, job_id, 2, "検索に失敗しました")
+
+    steps = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}
+    assert steps[1]["status"] == "completed"
+    assert steps[1]["output_json"] == {"facts": []}
+    assert steps[2]["status"] == "failed"
+    assert jobs.next_step(conn, job_id) == 2
+    conn.rollback()
+
+
+def test_retrying_a_step_also_clears_the_steps_after_it(conn, dataset):
+    """後続だけ残すと、古い前提の上に新しい結論が乗ります。"""
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    for number in (1, 2, 3):
+        jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
+        jobs.finish_step(conn, job_id, number, {"n": number}, {})
+
+    jobs.reset_step(conn, job_id, 2)
+    steps = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}
+    assert steps[1]["status"] == "completed", "STEP1 まで消してはいけない"
+    assert steps[2]["status"] == "pending"
+    assert steps[3]["status"] == "pending" and steps[3]["output_json"] is None
+    assert jobs.next_step(conn, job_id) == 2
+    conn.rollback()
+
+
+def test_two_workers_do_not_claim_the_same_job(conn, dataset):
+    """同じジョブを2回分析すると、費用が2倍で結果は1つしか残りません。"""
+    from kaigyou_core.db import connect
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="claimtest")
+    conn.commit()
+    try:
+        with connect() as a, connect() as b:
+            first = jobs.claim_job(a)
+            second = jobs.claim_job(b)
+            assert first is not None
+            assert second != first
+    finally:
+        with connect() as cleanup, cleanup.cursor() as cur:
+            cur.execute("DELETE FROM analysis_jobs WHERE id = %s", (job_id,))
+            cleanup.commit()
+
+
+# ------------------------------------------------------ LLM を差し替えて通す
+def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
+    """API キー無しで、呼び出しの前後を通す。
+
+    プロンプトの組み立て・射影・構造化出力の検証・参照の追跡まで、LLM 以外の
+    全部がここを通ります。
+    """
+    from kaigyou_intel.steps import step1_features
+
+    captured: dict[str, object] = {}
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None):
+        captured.update(step_number=step_number, system=system, user=user,
+                        schema=schema, tools=tools)
+        return llm.Result(parsed=_output(), text="",
+                          usage=llm.Usage(input_tokens=1000, output_tokens=200),
+                          model="claude-opus-5")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    output, usage, sources = step1_features.run(dataset)
+
+    assert captured["step_number"] == 1
+    assert captured["tools"] is None, "STEP1 に道具を渡してはいけない（Web検索禁止）"
+    assert captured["schema"] is Step1Output
+    # プロンプトに上限が埋め込まれていること。
+    assert "最大 5 個" in captured["system"]
+    assert "{max_patterns}" not in captured["system"]
+    assert usage.input_tokens == 1000
+    assert output["facts"][0]["measure_key"] == "child_population"
+    assert sources == []
+
+
+def test_step1_refuses_an_output_whose_references_do_not_resolve(dataset, monkeypatch):
+    """参照が切れた出力は保存しない。レポートの末尾まで残ると追跡が切れます。"""
+    from kaigyou_intel.steps import step1_features
+
+    broken = _output()
+    broken.patterns[0].evidence = ["F001", "F404"]
+    monkeypatch.setattr(llm, "ask", lambda **kw: llm.Result(
+        parsed=broken, usage=llm.Usage(), model="m"))
+
+    with pytest.raises(step1_features.StepFailed, match="F404"):
+        step1_features.run(dataset)

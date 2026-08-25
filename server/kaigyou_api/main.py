@@ -42,11 +42,12 @@ app.add_middleware(
 # Vercel finds the application by parsing this file, not by running it.
 ROUTER_IMPORT_ERROR: str | None = None
 try:
-    from kaigyou_api.routers import analysis, layers, meta
+    from kaigyou_api.routers import analysis, intel, layers, meta
 
     app.include_router(meta.router, prefix="/api", tags=["meta"])
     app.include_router(layers.router, prefix="/api", tags=["layers"])
     app.include_router(analysis.router, prefix="/api", tags=["analysis"])
+    app.include_router(intel.router, prefix="/api", tags=["intelligence"])
 except Exception as exc:  # noqa: BLE001 - report it rather than die at import
     log.exception("failed to load API routers")
     ROUTER_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"

@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------------------
+# 商圏インテリジェンス・エンジンの設定。
+#
+# モデル・上限・検索対象・プロンプト版をここに置きます。コードに書くと、
+# 「なぜこの出力になったか」を後から追うのに git log を読む羽目になります。
+# ---------------------------------------------------------------------------
+
+version: 1
+
+model:
+  # 既定。ステップごとに上書きできます。
+  id: claude-opus-5
+  # 推論の深さ。要件が求めているのは「専門家の思考プロセスの再現」なので、
+  # 安いほうへ倒しません。
+  effort: high
+  max_tokens: 16000
+
+# 要件 §34。1レポートあたりの上限。
+limits:
+  max_patterns: 5              # STEP1 が出す PATTERN の最大数
+  searches_per_pattern: 3      # PATTERN あたりの Web 検索回数
+  max_searches_total: 15
+  max_clinics_in_projection: 20
+
+# 要件 §9 の情報源優先順位。API 側で強制します（プロンプトでのお願いは
+# 守られないことがあるので、守らせられるものは仕組みで守らせます）。
+search:
+  # 上から順に「望ましい」。source_type の分類にも使います。
+  source_types:
+    - { type: government,   label: "国・省庁",       domains: ["go.jp"] }
+    - { type: statistics,   label: "政府統計",       domains: ["e-stat.go.jp", "stat.go.jp"] }
+    - { type: prefecture,   label: "都道府県",       domains: ["pref.*.jp"] }
+    - { type: municipality, label: "市区町村",       domains: ["city.*.jp", "town.*.jp", "vill.*.jp", "lg.jp"] }
+    - { type: public_body,  label: "公的機関",       domains: ["or.jp"] }
+    - { type: transit,      label: "交通事業者",     domains: [] }
+    - { type: academic,     label: "大学・研究機関", domains: ["ac.jp"] }
+    - { type: company,      label: "企業",           domains: ["co.jp"] }
+    - { type: news,         label: "ニュース",       domains: [] }
+    - { type: other,        label: "その他",         domains: [] }
+  # 空なら制限なし。ここに列挙すると Anthropic 側で絞り込まれます。
+  # 最初は絞らずに走らせ、実際に何が返るかを見てから決めることを勧めます。
+  allowed_domains: []
+  blocked_domains: []
+
+steps:
+  1:
+    name: 商圏特徴抽出
+    prompt: step1_features.md
+    prompt_version: step1-v1.0
+    # 要件 §6：Web検索禁止。ここで外部情報が混ざると、FACT と
+    # EXTERNAL FACT の区別が最初の段階で壊れます。
+    web_search: false
+  2:
+    name: 外部コンテクスト調査
+    prompt: step2_context.md
+    prompt_version: step2-v1.0
+    web_search: true
+  3:
+    name: 需要形成・患者分析
+    prompt: step3_demand.md
+    prompt_version: step3-v1.0
+    web_search: false
+  4:
+    name: 経営判断・レポート生成
+    prompt: step4_strategy.md
+    prompt_version: step4-v1.0
+    # 要件 §16：STEP4 では新しい外部事実を追加しない。
+    web_search: false

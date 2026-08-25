@@ -18,6 +18,10 @@ psycopg[binary]>=3.2
 pydantic>=2.9
 PyYAML>=6.0
 
+# 商圏インテリジェンス・エンジン。API は Job を作るだけですが、
+# kaigyou_intel を import するため関数側にも必要です。
+anthropic>=0.40
+
 # Deliberately absent:
 #   uvicorn      -- Vercel invokes the ASGI app directly; there is no server to run.
 #   psycopg_pool -- connections are pooled by Supabase (PgBouncer), not in-process.
