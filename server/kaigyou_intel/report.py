@@ -103,20 +103,63 @@ def _decision_block(decision: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+#: 出典の表題の上限。e-Stat の表題は「国勢調査 …（27区分）による人口，就業者数
+#: 及び通学者数(流出人口，流入人口，昼夜間人口比率－特掲) 全国，都道府県，
+#: 市区町村 | 統計表・グラフ表示 | 政府統計の総合窓口」で 481 文字ありました。
+_TITLE_LIMIT = 90
+
+
+def _short_title(title: str, url: str) -> str:
+    text = (title or url or "").strip()
+    # 「… | サイト名 | 政府統計の総合窓口」の後半はどれも同じなので落とします。
+    head = text.split(" | ", 1)[0].strip() or text
+    if len(head) <= _TITLE_LIMIT:
+        return head
+    return head[:_TITLE_LIMIT - 1].rstrip() + "…"
+
+
 def _sources_block(sources: Sequence[Mapping[str, Any]]) -> list[str]:
-    if not sources:
-        return []
+    """レポートに載せるのは、**本文が引用した**出典だけ。
+
+    最初の実装は取得した URL を全部並べていて、銀座のレポートで 230 件に
+    なりました。同じ URL が最大 6 回、医院のホームページや情報サイトも
+    混ざっていて、出典一覧として使えません。
+
+    引用されなかったぶんは analysis_sources に残っています。調べた記録としては
+    そちらが正しい置き場所で、レポートの末尾ではありません。件数だけ添えます。
+    """
+    cited = [s for s in sources if s.get("pattern_id")]
+    others = len(sources) - len(cited)
+    if not cited:
+        # 引用が 1 件も無いのは、外部情報を使えなかったということ。黙らない。
+        return (["## 出典（外部情報）", "",
+                 f"本文が引用した外部資料はありません（{others} 件を参照）。", ""]
+                if sources else [])
+
+    seen: set[str] = set()
+    unique: list[Mapping[str, Any]] = []
+    for source in cited:
+        key = (source.get("url") or "").rstrip("/").lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(source)
+    others += len(cited) - len(unique)
+
     lines = ["## 出典（外部情報）", ""]
-    ordered = sorted(sources, key=lambda s: (
+    ordered = sorted(unique, key=lambda s: (
         _SOURCE_ORDER.index(s.get("source_type") or "other")
         if (s.get("source_type") or "other") in _SOURCE_ORDER else len(_SOURCE_ORDER),
         s.get("url") or ""))
     for source in ordered:
         label = _SOURCE_LABEL.get(source.get("source_type") or "other", "その他")
-        title = source.get("title") or source.get("url")
         retrieved = source.get("retrieved_at")
         when = f"（取得 {retrieved:%Y-%m-%d}）" if hasattr(retrieved, "year") else ""
-        lines.append(f"- [{label}] {title}{when}  \n  {source.get('url')}")
+        lines.append(f"- [{label}] "
+                     f"{_short_title(source.get('title'), source.get('url'))}{when}  "
+                     f"\n  {source.get('url')}")
+    if others > 0:
+        lines += ["", f"このほか {others} 件の資料を参照しましたが、"
+                      "本文の根拠としては引用していません。"]
     lines.append("")
     return lines
 
@@ -175,7 +218,8 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT url, title, source_type, retrieved_at FROM analysis_sources
+            SELECT url, title, source_type, retrieved_at, pattern_id
+            FROM analysis_sources
             WHERE job_id = %s ORDER BY created_at
             """, (job_id,))
         sources = [dict(r) for r in cur.fetchall()]

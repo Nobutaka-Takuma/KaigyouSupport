@@ -1420,10 +1420,59 @@ def test_the_report_lists_its_external_sources_in_priority_order(dataset):
     from kaigyou_intel.report import to_markdown
 
     markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
-        {"url": "https://example.com/a", "title": "企業サイト", "source_type": "company"},
-        {"url": "https://www.mhlw.go.jp/b", "title": "厚労省", "source_type": "government"},
+        {"url": "https://example.com/a", "title": "企業サイト",
+         "source_type": "company", "pattern_id": "P001"},
+        {"url": "https://www.mhlw.go.jp/b", "title": "厚労省",
+         "source_type": "government", "pattern_id": "P001"},
     ])
     assert markdown.index("厚労省") < markdown.index("企業サイト")
+
+
+def test_the_source_list_is_what_the_report_cited_not_what_it_opened(dataset):
+    """実測：銀座のレポートの出典が 230 件になりました。
+
+    同じ URL が最大6回、医院のホームページや情報サイトも混ざっていて、
+    出典一覧として使えません。調べた記録は analysis_sources に残っているので、
+    レポートに載せるのは本文が引用したものだけにします。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+        {"url": "https://www.city.chuo.lg.jp/x", "title": "中央区 人口統計",
+         "source_type": "municipality", "pattern_id": "P001"},
+        {"url": "https://www.city.chuo.lg.jp/x/", "title": "中央区 人口統計",
+         "source_type": "municipality", "pattern_id": "P002"},
+        {"url": "https://example-clinic.com/", "title": "銀座◯◯歯科",
+         "source_type": "company", "pattern_id": None},
+    ])
+    block = markdown.split("## 出典（外部情報）", 1)[1].split("\n## ", 1)[0]
+    assert block.count("city.chuo.lg.jp") == 1, "同じ URL を重ねて出しています"
+    assert "銀座◯◯歯科" not in block, "引用していない資料を出典に載せています"
+    assert "このほか 2 件" in block
+
+
+def test_a_very_long_source_title_is_trimmed(dataset):
+    """e-Stat の表題は 481 文字ありました。"""
+    from kaigyou_intel.report import to_markdown
+
+    long_title = ("国勢調査 平成27年国勢調査 従業地・通学地による集計" + "あ" * 200
+                  + " | 統計表・グラフ表示 | 政府統計の総合窓口")
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+        {"url": "https://www.e-stat.go.jp/x", "title": long_title,
+         "source_type": "statistics", "pattern_id": "P001"}])
+    line = [ln for ln in markdown.splitlines() if ln.startswith("- [政府統計]")][0]
+    assert len(line) < 130
+    assert "政府統計の総合窓口" not in line, "どの出典にも付く後半は落とす"
+
+
+def test_a_report_with_no_cited_source_says_so(dataset):
+    """外部情報を使えなかったことを黙らない。"""
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+        {"url": "https://example.com/a", "title": "t", "source_type": "other",
+         "pattern_id": None}])
+    assert "本文が引用した外部資料はありません（1 件を参照）" in markdown
 
 
 def test_step4_needs_all_three_earlier_steps(conn, dataset):
