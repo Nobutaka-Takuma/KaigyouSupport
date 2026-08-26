@@ -403,7 +403,8 @@ def viable_floor(conn: psycopg.Connection, *, profile: str, radius_m: int,
 def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
                      municipality: str | None, population: float | None,
                      radius_m: int, lat: float, lng: float,
-                     config: Mapping[str, Any]) -> list[BenchmarkScope]:
+                     config: Mapping[str, Any],
+                     viable_floor_population: float | None = None) -> list[BenchmarkScope]:
     """比較できる母集団を、計算できるものだけ組み立てる。
 
     全国は入りません。全国のメッシュ統計を読み込んでいないからで、都のメッシュを
@@ -417,6 +418,11 @@ def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
             "prefecture", f"{prefecture_label}の半径{radius_m}m商圏（全メッシュ）",
             "pm.prefecture_code = %s", (prefecture_code,)),
         # 実績による絞り込み。閾値をひとつも置かずに山林を外せる。
+        #
+        # ただしこれだけでは足りません。山あいの集落に1院あるだけの商圏も
+        # 「歯科医院が実在する商圏」です。静岡では、この母集団の53%が
+        # 生活圏の人口下限を下回っていて、医院数の中央値は2院でした。
+        # 「9院は中央値の4.5倍」は、市街地と農村を混ぜた比較です。
         BenchmarkScope(
             "with_clinics", f"{prefecture_label}内で歯科医院が実在する商圏",
             "pm.prefecture_code = %s AND ms.facility_count > 0", (prefecture_code,)),
@@ -433,6 +439,17 @@ def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
             "WHERE ST_DWithin(pm.centroid::geography, s.geom::geography, %s))",
             (prefecture_code, station_m)),
     ]
+    if viable_floor_population:
+        # 市街地どうしの比較。閾値は決め打ちではなく、その県で歯科医院が
+        # 成立している商圏人口の実測下限です。ここを入れると、農村部の
+        # 「1院しかない商圏」が母集団から外れ、医院数の中央値が市街地の
+        # 実態に寄ります。
+        scopes.append(BenchmarkScope(
+            "urban",
+            f"{prefecture_label}内で人口が生活圏規模に達する商圏"
+            f"（{viable_floor_population:,.0f}人以上）",
+            "pm.prefecture_code = %s AND ms.population >= %s",
+            (prefecture_code, viable_floor_population)))
     if municipality:
         scopes.append(BenchmarkScope(
             "municipality", f"{municipality}内の同条件の商圏",
@@ -561,7 +578,8 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
     scopes = benchmark_scopes(
         prefecture_code=prefecture_code, prefecture_label=prefecture_label,
         municipality=municipality, population=metrics.get("population"),
-        radius_m=radius_m, lat=lat, lng=lng, config=config)
+        radius_m=radius_m, lat=lat, lng=lng, config=config,
+        viable_floor_population=floor)
     for scope in scopes:
         measure_scope_shape(conn, scope, profile=profile, radius_m=radius_m,
                             floor=floor, max_share_below=max_share,

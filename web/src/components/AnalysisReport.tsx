@@ -120,12 +120,20 @@ function ClientReportView(
             </section>
           ))}
 
-          {json.questions_for_the_client.length > 0 && (
+          {json.further_research.length > 0 && (
             <>
-              <h4>面談で確認したいこと</h4>
-              <ul>
-                {json.questions_for_the_client.map((q, i) => <li key={i}>{q}</li>)}
-              </ul>
+              <h4>さらに深掘りすべき調査</h4>
+              <p className="report__note">
+                本レポートは公的統計から読み取れる範囲です。ここから先は現地・
+                一次情報の領域で、調査の方向としては次が考えられます。
+              </p>
+              {json.further_research.map((item, i) => (
+                <div key={i} className="report__support">
+                  <strong>{item.topic}</strong>
+                  <p>{item.why}</p>
+                  <p className="report__how">調べ方: {item.how}</p>
+                </div>
+              ))}
             </>
           )}
 

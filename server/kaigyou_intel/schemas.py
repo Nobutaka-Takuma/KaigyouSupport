@@ -346,6 +346,10 @@ BlockTag = Literal["FACT", "BENCHMARK", "PATTERN", "WHY", "INSIGHT",
 
 #: 出してはいけない予測。開業成功確率・売上・患者数・家賃の予測は、この
 #: システムの目的外です。プロンプトで禁じたうえで、出力でも落とします。
+#: 「想定家賃」はここに入っていません。地価からの換算を出すことにしたためです
+#: （cost.rent_estimate）。ただしそれは予測ではなく、想定利回りという 1 つの
+#: 仮定による次元の置き換えで、式も仮定もレポートに載ります。
+#: 売上・患者数・成功確率は引き続き出しません。
 FORBIDDEN_PREDICTIONS = (
     "成功確率", "年商", "月商", "想定売上", "売上予測", "売上高", "患者数予測",
     "来院数予測", "収支予測", "損益予測", "投資回収",
@@ -537,6 +541,20 @@ class SupportItem(BaseModel):
     category: Literal["物件", "設備", "人員", "資金", "手続き", "集患"]
 
 
+class ResearchDirection(BaseModel):
+    """次に調べるとよいこと 1 件。
+
+    このレポートを配るのは開業支援の事業者で、読み手はその先の調査を自分で
+    手配できる立場にあります。「ご存知ですか」と本人に尋ねる欄ではなく、
+    **どこを掘ればこの分析が確度を上げるか**を示す欄です。
+    """
+
+    topic: str = Field(description="調べる対象。例：既存小児歯科の受入れ余力")
+    why: str = Field(description="この分析のどこが、それで確かめられるのか")
+    how: str = Field(
+        description="調べ方の当て。現地確認 / 自治体資料 / 事業者への照会 など")
+
+
 class Step5Output(BaseModel):
     """STEP5（顧客提出用レポート）の出力。"""
 
@@ -548,8 +566,8 @@ class Step5Output(BaseModel):
     why_here: str = Field(description="この立地を選ぶ理由を、筋道として散文で")
     sections: list[NarrativeSection] = Field(min_length=3)
     support_needed: list[SupportItem] = Field(min_length=1)
-    #: 面談で確かめること。データからは分からないが、判断に効くもの。
-    questions_for_the_client: list[str] = Field(default_factory=list)
+    #: 次に掘るべきところ。公的統計で見える範囲の外側を指します。
+    further_research: list[ResearchDirection] = Field(default_factory=list)
     #: 価値判断がどこに入っているかの明示。省略できません。
     judgement_note: str = Field(
         description="どこまでがデータで、どこからが評価かを 1〜2 文で")
@@ -603,8 +621,8 @@ def _step5_prose(output: Step5Output) -> list[tuple[str, str]]:
         out.append((f"sections[{i}]", section.body + " " + (section.takeaway or "")))
     for i, item in enumerate(output.support_needed):
         out.append((f"support_needed[{i}]", item.item + " " + item.why))
-    out += [(f"questions[{i}]", q)
-            for i, q in enumerate(output.questions_for_the_client)]
+    out += [(f"further_research[{i}]", f"{r.topic} {r.why} {r.how}")
+            for i, r in enumerate(output.further_research)]
     return out
 
 

@@ -201,7 +201,7 @@ def _cost_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
     cost = dataset.get("cost") or {}
     return {k: cost.get(k) for k in
             ("land_price_yen_per_sqm", "surveyed_points", "basis",
-             "by_use_division", "note")}
+             "by_use_division", "note", "rent_estimate")}
 
 
 def for_step2(step1: Mapping[str, Any], location: Mapping[str, Any],

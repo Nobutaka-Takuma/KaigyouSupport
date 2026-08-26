@@ -793,3 +793,5 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   font-size: 0.8rem;
   color: #6b7280;
 }
+.report__note { color: #6b7280; font-size: 0.82rem; }
+.report__how { color: #43506b; font-size: 0.82rem; }

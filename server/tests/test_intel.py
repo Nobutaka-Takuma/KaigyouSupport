@@ -1807,7 +1807,7 @@ def test_the_output_ceiling_leaves_room_for_the_whole_report():
 # ------------------------------------------------------------------ STEP5
 def _step5_output(**overrides) -> "Step5Output":
     from kaigyou_intel.schemas import (
-        Judgement, NarrativeSection, Step5Output, SupportItem)
+        Judgement, NarrativeSection, ResearchDirection, Step5Output, SupportItem)
 
     data = {
         "title": "銀座4丁目 商圏分析レポート",
@@ -1831,7 +1831,11 @@ def _step5_output(**overrides) -> "Step5Output":
             item="平日夜間まで回せる人員体制",
             why="勤務者を主に据えると、受診は勤務前後に寄ります。",
             evidence=["M001"], category="人員")],
-        "questions_for_the_client": ["想定している診療時間の上限は何時までか"],
+        "further_research": [ResearchDirection(
+            topic="既存の小児歯科標榜3院の受入れ余力",
+            why="小児の供給ギャップは届出上の標榜数からの推定にすぎず、"
+                "この判断のいちばん弱いところです",
+            how="初診予約の空き状況を電話で確認する")],
         "judgement_note": "数値は公的統計です。「条件が揃っている」という評価は"
                           "本レポートの判断であり、開業の成否を示すものではありません。",
     }
@@ -1919,7 +1923,7 @@ def test_the_client_report_reads_as_prose_not_as_tagged_facts(dataset):
     assert "## なぜこの立地か" in markdown
     assert "## この立地で開業するために必要なこと" in markdown
     assert "### 人員" in markdown, "支援の要件は分類して出す"
-    assert "## 面談で確認したいこと" in markdown
+    assert "## さらに深掘りすべき調査" in markdown
     assert "## このレポートにおける評価の位置づけ" in markdown
     # 根拠の id は残す。読み飛ばせる形で本文の末尾に。
     assert "〔M001, F010〕" in markdown
@@ -2057,3 +2061,61 @@ def test_an_idle_worker_says_why_it_is_idle(conn, dataset):
         assert f"--job {job_id}" in lines
     finally:
         _drop_job(job_id)
+
+
+def test_the_research_section_is_addressed_to_the_consultant_not_the_dentist():
+    """このレポートを配るのは開業支援の事業者です。
+
+    「〜をご存知ですか」と本人に尋ねる欄ではなく、担当者が自分で手配できる
+    次の調査を示す欄です。
+    """
+    text = cfg.prompt_text("step5_client_report.md")
+    assert "本人に尋ねる欄ではありません" in text
+    assert "how" in text and "現地確認" in text
+
+
+def test_the_urban_scope_compares_town_with_town(dataset):
+    """実測：静岡で「歯科医院が実在する商圏」の医院数の中央値が2院でした。
+
+    山あいの集落に1院あるだけの商圏も、その母集団に入るためです。
+    「9院は中央値の4.5倍」は、市街地を農村と比べた結果でした。閾値は
+    決め打ちではなく、その県で開業が成立している商圏人口の実測下限を使います。
+    """
+    scopes = {s["benchmark_type"]: s
+              for s in dataset["measures"]["benchmark_scopes"]}
+    assert "urban" in scopes, "市街地どうしの比較が要ります"
+    assert "人口が生活圏規模に達する商圏" in scopes["urban"]["label"]
+
+    preference = cfg.insights_config()["benchmarks"]["preference"]
+    assert preference.index("urban") < preference.index("with_clinics"), (
+        "with_clinics より前で試すこと。農村の1院商圏が母集団に残ります")
+
+
+def test_the_rent_estimate_is_a_range_with_its_assumption_visible():
+    """賃料の「予測」はしません。想定利回りで次元を置き換えるだけです。
+
+    1つの数字に決め打ちすると、出てきた数字が一人歩きします。式と仮定を
+    出力に載せるので、読み手は自分の利回り観で引き直せます。
+    """
+    from kaigyou_core.dataset import rent_estimate
+
+    out = rent_estimate(782_000, {"yield_range": [0.06, 0.10]})
+    assert out is not None
+    # 782,000 × 3.305785 × 0.06 ÷ 12
+    assert out["monthly_yen_per_tsubo_low"] == 12926
+    assert out["monthly_yen_per_tsubo_high"] == 21543
+    assert out["monthly_yen_per_tsubo_low"] < out["monthly_yen_per_tsubo_high"]
+    assert "想定利回り" in out["note"] and "募集賃料ではありません" in out["note"]
+    assert "3.305785" in out["formula"]
+    # 地価が無い地点では黙って 0 を出さない。
+    assert rent_estimate(None, {}) is None
+    assert rent_estimate(0, {}) is None
+
+
+def test_the_rent_estimate_reaches_the_report(dataset):
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    if (dataset.get("cost") or {}).get("rent_estimate"):
+        assert "#### 賃料の目安（地価からの換算）" in markdown
+        assert "月額（円/坪）" in markdown

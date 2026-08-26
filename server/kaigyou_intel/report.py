@@ -197,6 +197,19 @@ def _cost_figures(dataset: Mapping[str, Any]) -> list[str]:
          d.get("survey_year")] for d in divisions])
     if cost.get("note"):
         lines += [str(cost["note"]), ""]
+
+    rent = cost.get("rent_estimate")
+    if rent:
+        lines += ["#### 賃料の目安（地価からの換算）", ""]
+        lines += _table(["", "月額（円/坪）", "月額（円/m²）"], [
+            [f"想定利回り {rent['assumed_yield_low']:.0%}",
+             _num(rent["monthly_yen_per_tsubo_low"]),
+             _num(rent["monthly_yen_per_sqm_low"])],
+            [f"想定利回り {rent['assumed_yield_high']:.0%}",
+             _num(rent["monthly_yen_per_tsubo_high"]),
+             _num(rent["monthly_yen_per_sqm_high"])],
+        ])
+        lines += [f"`{rent['formula']}`", "", str(rent["note"]), ""]
     return lines
 
 
@@ -247,11 +260,17 @@ def _client_body(output: Mapping[str, Any]) -> list[str]:
                 lines += [f"**{item.get('item')}**", "",
                           str(item.get("why", "")) + _refs(item), ""]
 
-    questions = output.get("questions_for_the_client") or []
-    if questions:
-        lines += ["## 面談で確認したいこと", "",
-                  "データからは分からないが、判断に効くことです。", ""]
-        lines += [f"- {q}" for q in questions] + [""]
+    research = output.get("further_research") or []
+    if research:
+        lines += ["## さらに深掘りすべき調査", "",
+                  "本レポートは公的統計から読み取れる範囲です。"
+                  "ここから先は現地・一次情報の領域で、"
+                  "調査の方向としては次が考えられます。", ""]
+        for item in research:
+            lines += [f"**{item.get('topic')}**", ""]
+            lines += [f"{item.get('why', '')}", ""]
+            if item.get("how"):
+                lines += [f"調べ方: {item['how']}", ""]
 
     if output.get("judgement_note"):
         lines += ["## このレポートにおける評価の位置づけ", "",

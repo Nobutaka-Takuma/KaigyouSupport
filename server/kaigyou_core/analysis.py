@@ -386,8 +386,9 @@ def land_prices_near(conn: psycopg.Connection, lat: float, lng: float,
         "radius_m": radius_m,
         "by_use": by_use,
         "nearest": nearest,
-        "note": ("地価公示の標準地の価格（円/m²・1月1日時点）です。"
-                 "賃料の予測ではありません（建物・階数・契約条件は含まれません）。"
+        "note": ("地価公示の標準地の価格（円/m²・1月1日時点）です。土地の価格で"
+                 "あって賃料ではありません（建物・階数・契約条件を含みません）。"
+                 "賃料の目安への換算は rent_estimate を参照してください。"
                  "スコアには使用していません。"),
     }
 

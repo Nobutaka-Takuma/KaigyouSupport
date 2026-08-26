@@ -34,7 +34,7 @@ looked" will confidently write the wrong sentence.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 import psycopg
 
@@ -222,7 +222,10 @@ def _dataset_caveats() -> list[str]:
         "スコアは同一都道府県内で正規化しています。都道府県をまたいだスコアの比較はできません。",
         "「従業者数」は昼間人口ではありません。通学者・来街者は含まれず、"
         "繁華街の来街需要は捕捉できていません。",
-        "「地価」は土地の価格であり賃料ではありません。テナント賃料・初期投資額の"
+        "「地価」は土地の価格であり賃料ではありません。そこから賃料の目安を"
+        "収益還元の考え方で機械的に換算していますが（cost.rent_estimate）、"
+        "建物の状態・階数・契約条件・実際の募集事例を一切含まない粗い目安です。"
+        "個別物件の賃料や初期投資額の"
         "代わりには使えません。",
         "歯科診療所は施設数と標榜診療科目・診療時間までです。"
         "規模・ユニット数・診療実績・経営状態・自費診療の比率は含まれません。",
@@ -882,6 +885,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "nearest_points": (land or {}).get("nearest", []),
             "note": (land or {}).get(
                 "note", "地価公示が未取得のため、コストの情報はありません。"),
+            "rent_estimate": rent_estimate(
+                _round(metrics.get("land_price_yen_per_sqm")),
+                cfg.insights_config().get("rent_estimate") or {}),
         },
         # 用途地域・容積率・建蔽率。The constraint the rest of the figures sit
         # inside, and the only section here that is about what may be built.
@@ -912,4 +918,56 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         "provenance": provenance,
         "disclaimer": disclaimer,
         "score_disclaimer": score_disclaimer,
+    }
+
+
+#: 坪と平方メートル。
+SQM_PER_TSUBO = 3.305785
+
+
+def rent_estimate(land_price_yen_per_sqm: float | None,
+                  config: Mapping[str, Any]) -> dict[str, Any] | None:
+    """地価から、テナント賃料の**目安の幅**を機械的に換算する。
+
+    プロジェクトの前提では家賃の「予測」を禁じています。ここでやるのも予測では
+    ありません。**土地の価格を、想定利回りという 1 つの仮定で賃料の次元に
+    置き換えているだけ**です。式も仮定も出力に載せるので、読み手は自分の
+    利回り観で引き直せます。
+
+        月額賃料（円/坪） = 地価（円/m²） × 3.305785 × 想定利回り ÷ 12
+
+    利回りの幅は設定に置きます（config/insights.yaml）。ここを 1 つの数字に
+    決め打ちすると、出てきた数字が一人歩きします。幅で出すのは、幅があることが
+    この換算の実態だからです。
+
+    含まれないもの：建物の状態、階数、面積効率、共益費、契約条件、
+    そして何より**実際の募集事例**。募集賃料のデータは取り込んでいません。
+    """
+    if not land_price_yen_per_sqm or land_price_yen_per_sqm <= 0:
+        return None
+    rates = config.get("yield_range") or [0.06, 0.10]
+    low, high = float(min(rates)), float(max(rates))
+    per_tsubo = land_price_yen_per_sqm * SQM_PER_TSUBO
+
+    def monthly(rate: float) -> int:
+        return int(round(per_tsubo * rate / 12))
+
+    return {
+        "monthly_yen_per_tsubo_low": monthly(low),
+        "monthly_yen_per_tsubo_high": monthly(high),
+        "monthly_yen_per_sqm_low": int(round(land_price_yen_per_sqm * low / 12)),
+        "monthly_yen_per_sqm_high": int(round(land_price_yen_per_sqm * high / 12)),
+        "assumed_yield_low": low,
+        "assumed_yield_high": high,
+        "formula": ("月額賃料（円/坪） = 地価（円/m²） × 3.305785 × 想定利回り ÷ 12"),
+        "basis": "公示地価（中央値）からの収益還元による換算",
+        "note": (
+            "実際の募集賃料ではありません。地価を想定利回りで賃料の次元に"
+            "置き換えた目安で、建物の状態・階数・面積効率・共益費・契約条件は"
+            "含みません。募集事例のデータは取り込んでいないため、実勢との差は"
+            "検証できていません。想定利回りは設定値"
+            f"（{low:.0%}〜{high:.0%}）であり、地域や物件種別で変わります。"
+            "**地価の高い商業地ほど実際の利回りは低くなる傾向があるため、"
+            "都心の一等地ではこの換算は高めに出ます。**"
+            "config/insights.yaml の rent_estimate.yield_range で調整してください。"),
     }

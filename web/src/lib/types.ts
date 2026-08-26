@@ -473,7 +473,7 @@ export interface ClientReportJson {
               evidence?: string[] }[];
   support_needed: { item: string; why: string; category: string;
                     evidence?: string[] }[];
-  questions_for_the_client: string[];
+  further_research: { topic: string; why: string; how: string }[];
   judgement_note: string;
 }
 
