@@ -1983,3 +1983,54 @@ def test_the_client_report_keeps_its_own_title(dataset):
     # 表題が無い（STEP4 止まり）ときは定型に戻ること。
     plain = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
     assert plain.startswith("# 商圏分析レポート：")
+
+
+def test_a_number_the_earlier_step_wrote_in_prose_can_be_quoted(dataset):
+    """実測：「下位30.1%」「409件中1位」を引用したら捏造として落ちました。
+
+    数値欄しか見ていなかったためです。前の段が文章で書いた数字は、次の段が
+    引用してよいものです。
+    """
+    from kaigyou_intel.projection import allowed_numbers, for_step5
+    from kaigyou_intel.schemas import invented_numbers
+
+    payload = for_step5({"sections": [{"blocks": [{"text": "409件中1位で、下位30.1%"}]}]},
+                        {"demand_mechanisms": []}, to_jsonable(dataset))
+    known = allowed_numbers(payload)
+    assert invented_numbers("409件中1位、都内では下位30.1%です。", known) == []
+
+
+def test_rounding_to_the_hundreds_is_allowed():
+    """「約7,400人」は 7,431 を丸めた書き方です。4桁で照合すると落ちます。"""
+    from kaigyou_intel.schemas import invented_numbers
+
+    assert invented_numbers("約7,400人が居住しています。", {"7431"}) == []
+    assert invented_numbers("約7,400人が居住しています。", {"9999"}) == ["7,400"]
+
+
+def test_the_report_may_say_it_is_not_a_prediction():
+    """「開業の成功確率を示すものではありません」は免責であって予測ではありません。
+
+    語の有無だけを見ると、書いてほしい一文で落ちます。
+    """
+    from kaigyou_intel.schemas import verify_step5
+
+    ok = _step5_output(
+        judgement_note="この評価は本レポートの判断であり、開業の成功確率を"
+                       "示すものではありません。")
+    assert verify_step5(ok, _STEP5_IDS, _STEP5_NUMBERS) == []
+
+    inline = _step5_output(
+        sections=_step5_output().sections,
+        why_here="売上予測を示すものではありませんが、条件は揃っています。")
+    assert verify_step5(inline, _STEP5_IDS, _STEP5_NUMBERS) == []
+
+
+def test_the_prompt_says_which_ids_are_real():
+    """実測：'competition.proximity' を根拠として書かれ、解決できずに落ちました。
+
+    どれが id なのかを書いていなかったので、入力の場所を書かれました。
+    """
+    text = cfg.prompt_text("step5_client_report.md")
+    assert "データの項目名は id ではありません" in text
+    assert "competition.proximity" in text

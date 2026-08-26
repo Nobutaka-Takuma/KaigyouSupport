@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import hashlib
 import json
 from datetime import date, datetime
@@ -322,9 +324,22 @@ def allowed_numbers(payload: Mapping[str, Any]) -> set[str]:
             return
         elif isinstance(node, (int, float)):
             found.add(_canonical(node))
+        elif isinstance(node, str):
+            # 文字列の中の数値も拾います。前の段が文章で書いた数字
+            #（「下位30.1%」「409件中1位」）は、次の段が引用してよいものです。
+            # 数値欄しか見ていなかったので、正しい引用が捏造として落ちました。
+            for match in _NUMBER_IN_TEXT.finditer(node):
+                try:
+                    found.add(_canonical(float(match.group().replace(",", ""))))
+                except ValueError:
+                    continue
 
     walk(payload)
     return found
+
+
+#: 文章の中の数値。桁区切りと小数に対応します。
+_NUMBER_IN_TEXT = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
 def _canonical(value: float) -> str:

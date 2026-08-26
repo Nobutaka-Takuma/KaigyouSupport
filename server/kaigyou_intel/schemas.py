@@ -581,7 +581,10 @@ def verify_step5(output: Step5Output, known_ids: set[str],
                 where=where,
                 problem=f"前の段に無い数値です: {number}"))
 
-    problems.extend(_forbidden_predictions_in(output.model_dump_json()))
+    # judgement_note は「これは予測ではない」と書くための欄です。ここまで
+    # 検査に含めると、書いてほしい一文で落ちます。
+    body = output.model_copy(update={"judgement_note": ""})
+    problems.extend(_forbidden_predictions_in(body.model_dump_json()))
     return problems
 
 
@@ -646,9 +649,16 @@ def invented_numbers(text: str, known: set[str]) -> list[str]:
 
 
 def _significant_digits(raw: str) -> int:
-    """書かれた桁数。「49万」は2桁、「13,268」は5桁。"""
-    digits = raw.replace(",", "").replace(".", "").lstrip("0")
-    return max(1, len(digits))
+    """書かれた桁数。「49万」は2桁、「13,268」は5桁、「7,400」は2桁。
+
+    小数点が無いときの末尾のゼロは有効桁に数えません。「約7,400人」は
+    7,431 を百の位で丸めた書き方で、4桁で照合すると落ちます。実測：
+    それでレポート1本を落としました。
+    """
+    plain = raw.replace(",", "")
+    if "." in plain:
+        return max(1, len(plain.replace(".", "").lstrip("0")))
+    return max(1, len(plain.lstrip("0").rstrip("0")) or 1)
 
 
 def _matches(value: float, numbers: set[float], digits: int) -> bool:
@@ -684,7 +694,28 @@ def _is_number(text: str) -> bool:
     return True
 
 
+#: 予測語のすぐ後ろに来る打ち消し。「開業の成功確率を示すものではありません」は
+#: 免責であって予測ではありません。実測：この一文でレポート1本を落としました。
+_NEGATIONS = ("ではありません", "ではない", "しません", "しない", "できません",
+              "ありません", "保証するものではありません", "予測するものではありません",
+              "示すものではありません", "を行いません", "を出しません", "は扱いません")
+
+
 def _forbidden_predictions_in(haystack: str) -> list[TraceProblem]:
-    return [TraceProblem(where="report",
-                         problem=f"予測にあたる語が含まれています: {word!r}")
-            for word in FORBIDDEN_PREDICTIONS if word in haystack]
+    """売上・患者数・成功確率の予測が混じっていないか。
+
+    語の有無だけを見ると、**それを否定する文**まで落ちます。レポートには
+    「開業の成否を予測するものではありません」と書いてほしいので、後ろに
+    打ち消しが続くものは通します。
+    """
+    problems: list[TraceProblem] = []
+    for word in FORBIDDEN_PREDICTIONS:
+        for match in re.finditer(re.escape(word), haystack):
+            tail = haystack[match.end():match.end() + 40]
+            if any(negation in tail for negation in _NEGATIONS):
+                continue
+            problems.append(TraceProblem(
+                where="report",
+                problem=f"予測にあたる語が含まれています: {word!r}"))
+            break
+    return problems

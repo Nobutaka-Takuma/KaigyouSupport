@@ -324,6 +324,10 @@ function adviceFor(text: string): string | null {
     return "ANTHROPIC_API_KEY が正しくありません。worker を動かす端末で"
       + "設定し直してから、worker を再起動してください。";
   }
+  if (text.includes("overloaded") || text.includes("529")) {
+    return "Anthropic 側が混雑しています。数分おいてからやり直してください。"
+      + "課金は発生していません。";
+  }
   if (text.includes("max_tokens") || text.includes("EOF while parsing")) {
     return "レポートが書き終わる前に長さの上限で切れました。"
       + "config/analysis.yaml の max_tokens を上げて worker を再起動し、"
