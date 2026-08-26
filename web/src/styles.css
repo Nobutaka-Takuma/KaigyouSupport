@@ -28,7 +28,16 @@ body {
 
 a { color: var(--accent); }
 
-.app { display: flex; flex-direction: column; min-height: 100vh; }
+/* 画面の高さに閉じ込める。
+ *
+ * `min-height: 100vh` だと、地図の横のパネルが伸びたぶんだけ**ページ全体**が
+ * 伸びます。パネルは `overflow-y: auto` を持っていますが、スクロール領域の
+ * 内在高さは中身の高さなので、行の高さがそれに引っ張られます。地図は
+ * `position: absolute; inset: 0` で親いっぱいなので、地図まで一緒に縦長になり、
+ * PC で見ると画面が延々と続く状態になっていました。
+ *
+ * 高さを固定して、スクロールは中の器（パネル・各ページ）に持たせます。 */
+.app { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
 
 .app__header {
   display: flex;
@@ -277,7 +286,9 @@ a { color: var(--accent); }
 .step--skipped { color: var(--muted); }
 
 /* ------------------------------------------------------------------- pages */
-.page { padding: 20px 22px 60px; overflow-y: auto; }
+/* ページ側がスクロールの器。`flex: 1; min-height: 0` が無いと、
+ * `overflow-y: auto` は高さの上限を持てず、器として働きません。 */
+.page { padding: 20px 22px 60px; overflow-y: auto; flex: 1; min-height: 0; }
 .page--prose { max-width: 960px; }
 .page__head h1 { font-size: 20px; margin: 0 0 4px; }
 .page section { margin-bottom: 32px; }
@@ -373,7 +384,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   :root { font-size: 15px; }
 
   /* --- chrome: give the map the screen ------------------------------- */
-  .app { height: 100dvh; overflow: hidden; }
+  /* .app の高さは共通の指定（画面の高さに閉じ込める）で済んでいます。 */
   .app__header {
     padding: 6px 12px;
     gap: 6px;
