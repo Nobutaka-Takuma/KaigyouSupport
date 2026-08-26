@@ -2034,3 +2034,26 @@ def test_the_prompt_says_which_ids_are_real():
     text = cfg.prompt_text("step5_client_report.md")
     assert "データの項目名は id ではありません" in text
     assert "competition.proximity" in text
+
+
+def test_an_idle_worker_says_why_it_is_idle(conn, dataset):
+    """実測：失敗したジョブが3件あるのに worker が黙って待ち、
+
+      「レポートが生成されない」
+
+    となりました。何も言わずに待ち続けると、動いているのか壊れているのかが
+    分かりません。worker は queued しか拾わないので、拾えないものがあるなら
+    そう言います。
+    """
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.claim_specific(conn, job_id)
+        jobs.release_job(conn, job_id, "failed", "模擬的な失敗")
+        lines = "\n".join(worker.idle_reason(conn))
+        assert "失敗したまま" in lines
+        assert f"--job {job_id}" in lines
+    finally:
+        _drop_job(job_id)

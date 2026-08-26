@@ -211,6 +211,7 @@ def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
         return 1
 
     handled = 0
+    told_why_idle = False
     while True:
         with connect() as conn:
             claimed = jobs.claim_job(conn)
@@ -218,7 +219,44 @@ def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
                 say(f"ジョブ {claimed} を開始します")
                 run_job(conn, claimed, progress=say)
                 handled += 1
+                told_why_idle = False
+            elif not once and not told_why_idle:
+                # 何も言わずに待ち続けると、動いているのか壊れているのか
+                # 分かりません。実測：失敗したジョブが3件あるのに worker が
+                # 黙って待ち、「レポートが生成されない」となりました。
+                for line in idle_reason(conn):
+                    say(line)
+                told_why_idle = True
         if once:
             return handled
         if claimed is None:
             time.sleep(poll_seconds)
+
+
+def idle_reason(conn: psycopg.Connection) -> list[str]:
+    """待っているものが無い理由。
+
+    worker は queued しか拾いません（失敗した Job を自動で拾い直すと、壊れた
+    まま何度も課金されるため）。拾えない Job があるなら、そのことと再開の
+    仕方を言います。黙っているのがいちばん困る。
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT status, count(*) AS n,
+                   (array_agg(id ORDER BY created_at DESC))[1] AS newest
+            FROM analysis_jobs WHERE status IN ('failed', 'running', 'blocked')
+            GROUP BY status
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+    if not rows:
+        return ["待っているジョブはありません。地図から分析を開始してください。"]
+
+    label = {"failed": "失敗したまま", "running": "実行中のまま",
+             "blocked": "未実装のステップで待機中"}
+    lines = []
+    for row in rows:
+        lines.append(f"{label[row['status']]}のジョブが {row['n']} 件あります"
+                     "（自動では拾いません）。")
+        lines.append(f"  再開: python -m kaigyou_etl analyze --job {row['newest']}")
+    lines.append("  一覧: python -m kaigyou_etl analyze --list")
+    return lines
