@@ -134,6 +134,66 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
     raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
 
 
+def advance(conn: psycopg.Connection, job_id: str,
+            progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """1 ステップだけ進めて、Job を待ち行列に戻す。
+
+    ``run_job`` は最後まで回します。手元で動かすならそれでよいのですが、
+    ホスティングされた関数には実行時間の上限があり（Vercel の Hobby で 300 秒、
+    Pro で 800 秒）、5 段を 1 回の呼び出しには収められません。
+
+    そこで **1 呼び出し = 1 ステップ**にします。終わったら queued に戻すので、
+    次の呼び出しが続きを拾います。running のまま置くより、こちらのほうが
+    途中で関数が消えたときに強い。状態は全部 DB にあります。
+    """
+    say = progress or (lambda _m: None)
+    number = jobs.next_step(conn, job_id)
+    if number is None:
+        jobs.release_job(conn, job_id, "completed")
+        return {"job_id": job_id, "status": "completed", "step": None}
+
+    settings = llm.step_settings(number)
+    say(f"  {job_id}: STEP{number} {settings['name']} …")
+    try:
+        result = run_step(conn, job_id, number)
+    except StepNotImplemented as exc:
+        say(f"    停止: {exc}")
+        jobs.release_job(conn, job_id, "blocked", str(exc))
+        return {"job_id": job_id, "status": "blocked", "step": number,
+                "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        say(f"    失敗: {type(exc).__name__}: {exc}")
+        jobs.release_job(conn, job_id, "failed", f"STEP{number}: {exc}")
+        return {"job_id": job_id, "status": "failed", "step": number,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    done = jobs.next_step(conn, job_id) is None
+    jobs.release_job(conn, job_id, "completed" if done else "queued")
+    if result.get("_report_file"):
+        say(f"    レポートを書き出しました: {result['_report_file']}")
+    return {"job_id": job_id, "status": "completed" if done else "queued",
+            "step": number, "report_file": result.get("_report_file")}
+
+
+def tick(conn: psycopg.Connection, *, stale_after_minutes: float = 20.0,
+         progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """外から定期的に叩かれる入口。1 回につき 1 ステップ。
+
+    Vercel Cron（Pro なら1分ごと）か、Supabase の pg_cron から呼びます。
+    どちらから叩いても同じことをします。
+    """
+    say = progress or (lambda _m: None)
+    recovered = jobs.recover_stale(conn, stale_after_minutes)
+    if recovered:
+        say(f"途中で止まっていたジョブ {len(recovered)} 件を待ち行列に戻しました。")
+
+    job_id = jobs.claim_job(conn)
+    if job_id is None:
+        return {"claimed": None, "recovered": recovered, "status": "idle"}
+    outcome = advance(conn, job_id, progress=say)
+    return {**outcome, "claimed": job_id, "recovered": recovered}
+
+
 def run_job(conn: psycopg.Connection, job_id: str,
             progress: Callable[[str], None] | None = None) -> str:
     """1 ジョブを、進める限り進める。

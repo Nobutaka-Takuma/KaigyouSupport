@@ -120,11 +120,25 @@ def step_settings(step_number: int) -> dict[str, Any]:
     }
 
 
+#: 検索回数を環境変数で上書きできるようにします。ホスティング先によって
+#: 関数の実行時間の上限が違うためです（Vercel は Hobby で 300 秒、Pro で 800 秒）。
+#: STEP2 は検索のたびに文脈を読み直すので、回数がそのまま実行時間になります。
+#: コードにも設定ファイルにも「本番はこう」と書かずに、環境で決めます。
+MAX_SEARCHES_ENV = "KAIGYOU_MAX_SEARCHES"
+
+
+def max_searches(limits: Mapping[str, Any]) -> int:
+    override = os.getenv(MAX_SEARCHES_ENV)
+    if override and override.strip().isdigit():
+        return max(1, int(override))
+    return int(limits.get("max_searches_total", 15))
+
+
 def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any]) -> dict[str, Any]:
     tool: dict[str, Any] = {
         "type": WEB_SEARCH_TOOL_TYPE,
         "name": "web_search",
-        "max_uses": int(limits.get("max_searches_total", 15)),
+        "max_uses": max_searches(limits),
     }
     # 要件 §9 の優先順位は、プロンプトでのお願いではなく API 側で効かせます。
     # 守らせられるものは仕組みで守らせるほうが確実です。

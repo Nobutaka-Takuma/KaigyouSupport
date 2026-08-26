@@ -134,7 +134,11 @@ Supabase 無料枠の 500MB に収まります。
 
 4. **Deploy** を押します。
 
-### `ANTHROPIC_API_KEY` は Vercel に置きません
+> **PC を常駐させたくない場合** は `docs/saas.md` を参照してください。
+> Vercel 上で分析を走らせ、利用者アカウントと月あたりの上限を管理する構成です。
+> その場合は `ANTHROPIC_API_KEY` を Vercel に置きます（下の節とは逆になります）。
+
+### `ANTHROPIC_API_KEY` は Vercel に置きません（worker を手元で回す場合）
 
 **Vercel 側では LLM を一度も呼びません。** API がするのは Job をキューに積むことと
 進捗を見せることだけで、4 ステップの実行と Web 検索はワークステーションの worker が

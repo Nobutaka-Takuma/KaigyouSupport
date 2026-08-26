@@ -7,6 +7,7 @@
  */
 import type {
   AnalysisCreated,
+  AnalysisList,
   AnalysisReport,
   AnalysisStatus,
   CandidateAnalysis,
@@ -19,6 +20,8 @@ import type {
   RankingResponse,
   SpecialtyList,
 } from "./types";
+
+import { auth } from "./auth";
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -45,9 +48,13 @@ async function request<T>(
       url.searchParams.set(key, String(value));
     }
   }
-  // 分析の開始はLLMの課金を伴うので、サーバが共有シークレットを要求すること
-  // があります。持っているときだけ送る。
+  // ログインしていれば、その JWT を必ず添えます。サーバ側がアカウントを引き、
+  // 枠と権限を見ます。**API がこの製品の唯一の境界**なので、ここを通らない
+  // 経路を作らないでください。
   const headers: Record<string, string> = {};
+  const jwt = await auth.token();
+  if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
+  // アカウントを使わない構成（手元）では共有シークレットで守ります。
   if (token) headers["X-Analysis-Token"] = token;
   const res = await fetch(url.toString(), { method, headers });
   if (!res.ok) {
@@ -176,5 +183,28 @@ export const api = {
     retryFrom: (jobId: string, step: number, token?: string) =>
       request<{ restarted_from: number }>(
         "POST", `/analysis/${jobId}/steps/${step}/retry`, {}, token),
+
+    /** 自分が作ったレポートの一覧。失くしても取り直せるように。 */
+    list: (limit = 50) => get<AnalysisList>("/analyses", { limit }),
+
+    /** Markdown をファイルとして落とす。名前はサーバが付けます。 */
+    async download(jobId: string) {
+      const url = new URL(`${BASE}/api/analysis/${jobId}/report.md`,
+        window.location.origin);
+      const jwt = await auth.token();
+      const res = await fetch(url.toString(), {
+        headers: jwt ? { Authorization: `Bearer ${jwt}` } : {},
+      });
+      if (!res.ok) throw new ApiError("レポートを取得できませんでした。", res.status);
+      const blob = await res.blob();
+      const name = decodeURIComponent(
+        (res.headers.get("Content-Disposition") ?? "").split("''")[1] ?? "report.md");
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(href);
+    },
   },
 };

@@ -1,0 +1,51 @@
+-- Supabase から Vercel の worker を 1 分ごとに叩く（Hobby プラン用）。
+--
+-- **これは自動では適用されません。** URL とトークンを埋めて、Supabase の
+-- SQL Editor で 1 回だけ実行してください。ファイル名が .example なのは、
+-- 秘密を含む設定をリポジトリに置かないためです。
+--
+-- なぜ必要か：Vercel の Cron は Hobby プランでは 1 日 1 回しか動きません。
+-- Pro（$20/月）にすれば 1 分ごとの Cron が使えるので、そのときは
+-- vercel.json の crons に移してここは消してください（下に手順あり）。
+
+-- 1) 拡張を有効にする（Supabase の Database → Extensions からでも可）
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+-- 2) 1 分ごとに worker を叩く
+--    <YOUR-APP> と <KAIGYOU_WORKER_TOKEN> を実際の値に置き換えてください。
+select cron.schedule(
+  'kaigyou-worker-tick',
+  '* * * * *',
+  $$
+  select net.http_post(
+    url     := 'https://<YOUR-APP>.vercel.app/api/worker/tick',
+    headers := jsonb_build_object(
+                 'Content-Type', 'application/json',
+                 'X-Worker-Token', '<KAIGYOU_WORKER_TOKEN>'),
+    body    := '{}'::jsonb,
+    -- 関数側の上限（Hobby は 300 秒）より少し長く待ちます。短いと、
+    -- 走っている最中の呼び出しを打ち切ったように見えて紛らわしい。
+    timeout_milliseconds := 310000
+  );
+  $$
+);
+
+-- 確認
+--   select * from cron.job;
+--   select * from cron.job_run_details order by start_time desc limit 20;
+
+-- 止めるとき
+--   select cron.unschedule('kaigyou-worker-tick');
+
+-- ---------------------------------------------------------------------------
+-- Vercel を Pro にしたら
+--
+-- 1. ここを止める:  select cron.unschedule('kaigyou-worker-tick');
+-- 2. vercel.json に足す:
+--      "crons": [{ "path": "/api/worker/tick", "schedule": "* * * * *" }]
+-- 3. Vercel の環境変数 CRON_SECRET を設定（Vercel が自動で Bearer で送ります）
+-- 4. maxDuration を 300 から 800 に上げる
+--
+-- コード側の変更はありません。同じ /api/worker/tick を叩くだけです。
+-- ---------------------------------------------------------------------------

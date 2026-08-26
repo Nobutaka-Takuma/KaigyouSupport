@@ -11,8 +11,11 @@ import os
 from typing import Any
 
 import psycopg
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from urllib.parse import quote
 
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+
+from kaigyou_api import accounts as acc
 from kaigyou_api.deps import DISCLAIMER, get_conn, get_model
 from kaigyou_core import config as cfg
 from kaigyou_core.analysis import (
@@ -78,6 +81,7 @@ def create_analysis(
     profile: str | None = Query(None),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
+    account: acc.Account | None = Depends(acc.current_account),
     x_analysis_token: str | None = Header(None),
 ) -> dict[str, Any]:
     """基礎データを固定して Job を作る。分析は worker が回します。
@@ -85,8 +89,14 @@ def create_analysis(
     基礎データはここでスナップショットとして保存します。参照だけ持つと、
     スコアを再計算したあとに「このレポートは何を見て書かれたか」が
     再現できなくなります（要件 §25）。
+
+    枠の確認は**始める前**です。走らせてから止めても API 費用は戻りません。
     """
-    _authorise(x_analysis_token)
+    if account is None:
+        # アカウント機能を使っていない環境（手元）。共有シークレットで守ります。
+        _authorise(x_analysis_token)
+    else:
+        acc.require_quota(account)
     _require_tables(conn)
 
     prefecture_code = default_prefecture(conn, prefecture_at(conn, lat, lng))
@@ -104,10 +114,12 @@ def create_analysis(
     job_id = jobs.create_job(
         conn, lat=lat, lng=lng, radius_m=radius, dataset=dataset,
         base_hash=base_data_hash(dataset), business_type=category,
-        location_name=location_name, profile=profile or model.profile_name)
+        location_name=location_name, profile=profile or model.profile_name,
+        user_id=account.user_id if account else None)
 
     return {
         "job_id": job_id,
+        "quota": _quota_view(conn, account),
         "status": "queued",
         "steps": [{"step_number": n, "step_name": name, "status": "pending"}
                   for n, name in jobs.STEP_NAMES.items()],
@@ -118,13 +130,43 @@ def create_analysis(
     }
 
 
+def _quota_view(conn: psycopg.Connection,
+                account: acc.Account | None) -> dict[str, Any] | None:
+    """残り回数。画面に出すためのもの。"""
+    if account is None:
+        return None
+    account.used_this_period = acc.usage_in_period(
+        conn, account.user_id, acc.period_start(account.billing_day))
+    start = acc.period_start(account.billing_day)
+    return {"monthly_quota": account.monthly_quota,
+            "used": account.used_this_period,
+            "remaining": account.remaining,
+            "period_start": start.isoformat()}
+
+
+def _owned(job: dict[str, Any], account: acc.Account | None) -> dict[str, Any]:
+    """他人のジョブを見せない。
+
+    ジョブ ID は推測しにくい UUID ですが、「推測しにくい」は権限ではありません。
+    管理者は全部見られます（サポートのため）。
+    """
+    if account is None or account.is_admin:
+        return job
+    if job.get("user_id") and str(job["user_id"]) != account.user_id:
+        raise HTTPException(404, detail="そのジョブはありません。")
+    return job
+
+
 @router.get("/analysis/{job_id}", summary="分析ジョブの進捗と各ステップの結果")
 def get_analysis(job_id: str,
-                 conn: psycopg.Connection = Depends(get_conn)) -> dict[str, Any]:
+                 conn: psycopg.Connection = Depends(get_conn),
+                 account: acc.Account | None = Depends(acc.current_account),
+                 ) -> dict[str, Any]:
     _require_tables(conn)
     job = jobs.get_job(conn, job_id)
     if job is None:
         raise HTTPException(404, detail="そのジョブはありません。")
+    _owned(job, account)
 
     steps = jobs.get_steps(conn, job_id)
     with conn.cursor() as cur:
@@ -160,6 +202,7 @@ def get_analysis(job_id: str,
         # ほうです。手元で API と worker を同じ端末で動かしているときだけ、
         # この値は本当のことを言えます。
         "llm_configured": None if _hosted() else llm.is_configured(),
+        "quota": _quota_view(conn, account),
         # worker が動いていないと queued のまま止まります。画面で待つ人に、
         # 何を待っているのかが分かるように、状態の意味を添えます。
         "status_note": _STATUS_NOTE.get(job["status"]),
@@ -181,27 +224,134 @@ _STATUS_NOTE = {
              summary="このステップ以降をやり直す")
 def retry_step(job_id: str, step_number: int,
                conn: psycopg.Connection = Depends(get_conn),
+               account: acc.Account | None = Depends(acc.current_account),
                x_analysis_token: str | None = Header(None)) -> dict[str, Any]:
     """要件 §32。最初から全部やり直させない。
 
     指定ステップ**以降**を pending に戻します。後続だけ残すと、古い前提の上に
     新しい結論が乗ります。
     """
-    _authorise(x_analysis_token)
+    if account is None:
+        _authorise(x_analysis_token)
     _require_tables(conn)
     if step_number not in jobs.STEP_NAMES:
         raise HTTPException(400, detail="ステップ番号は 1〜4 です。")
-    if jobs.get_job(conn, job_id) is None:
+    job = jobs.get_job(conn, job_id)
+    if job is None:
         raise HTTPException(404, detail="そのジョブはありません。")
+    _owned(job, account)
 
     jobs.reset_step(conn, job_id, step_number)
     return {"job_id": job_id, "restarted_from": step_number, "status": "queued"}
 
 
+@router.get("/analyses", summary="自分のレポート一覧")
+def list_analyses(limit: int = Query(50, ge=1, le=200),
+                  conn: psycopg.Connection = Depends(get_conn),
+                  account: acc.Account | None = Depends(acc.current_account),
+                  ) -> dict[str, Any]:
+    """過去に作ったレポートを、いつでも取り直せるようにする。
+
+    ファイルを失くしたら再生成、では**運営者の API 費用が増える**だけです。
+    DB には残っているので、出す口を用意します。
+    """
+    _require_tables(conn)
+    where, params = "TRUE", []
+    if account is not None and not account.is_admin:
+        where, params = "j.user_id = %s", [account.user_id]
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT j.id, j.location_name, j.latitude, j.longitude, j.radius_m,
+                   j.profile, j.status, j.created_at, j.completed_at,
+                   r.created_at AS report_at, r.trace_ok,
+                   (r.report_json ->> 'title') AS title,
+                   (r.report_json -> 'verdict' ->> 'label') AS verdict
+            FROM analysis_jobs j
+            LEFT JOIN analysis_reports r ON r.job_id = j.id
+            WHERE {where} AND j.status <> 'cancelled'
+            ORDER BY j.created_at DESC LIMIT %s
+        """, (*params, limit))
+        rows = [dict(r) for r in cur.fetchall()]
+    return {"items": rows, "quota": _quota_view(conn, account)}
+
+
+@router.get("/analysis/{job_id}/report.md", summary="レポートをファイルとして取得")
+def download_report(job_id: str,
+                    conn: psycopg.Connection = Depends(get_conn),
+                    account: acc.Account | None = Depends(acc.current_account),
+                    ) -> Response:
+    """Markdown をそのまま返します。
+
+    ブラウザ側で Blob を組み立てるより、サーバが Content-Disposition を付けて
+    返すほうが確実です（保存先の名前も揃います）。
+    """
+    _require_tables(conn)
+    job = jobs.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(404, detail="そのジョブはありません。")
+    _owned(job, account)
+
+    from kaigyou_intel import report as report_module
+
+    markdown = report_module.markdown_for(conn, job_id)
+    if markdown is None:
+        raise HTTPException(404, detail="レポートはまだありません。")
+    name = report_module._file_name(job_id, job)
+    return Response(
+        content=markdown.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition":
+                 "attachment; filename*=UTF-8''" + quote(name)})
+
+
+#: worker を叩くための鍵。分析トークンとは別にします。片方が漏れても、
+#: もう片方の入口は閉じたままにするためです。
+_WORKER_TOKEN_ENV = "KAIGYOU_WORKER_TOKEN"
+
+
+@router.post("/worker/tick", summary="分析を1ステップ進める（定期実行から呼ぶ）")
+def worker_tick(
+    x_worker_token: str | None = Header(None),
+    authorization: str | None = Header(None),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """1 回につき 1 ステップ。
+
+    5 段を 1 回の関数呼び出しには収められません（Vercel の実行時間上限は
+    Hobby で 300 秒、Pro で 800 秒。分析は通しで 10〜20 分）。**1 呼び出し =
+    1 ステップ**にして、続きは次の呼び出しに任せます。状態は全部 DB にあるので、
+    途中で関数が消えても続きから拾えます。
+
+    誰が叩くかは環境で変えられます。Vercel Cron（Pro なら1分ごと）でも、
+    Supabase の pg_cron からでも、同じことをします。Vercel の Cron は
+    ``Authorization: Bearer <CRON_SECRET>`` を送るので、そちらも受けます。
+    """
+    expected = os.getenv(_WORKER_TOKEN_ENV) or os.getenv("CRON_SECRET")
+    if not expected:
+        raise HTTPException(
+            503, detail=f"{_WORKER_TOKEN_ENV} が未設定のため、worker を起動できません。")
+    bearer = (authorization or "").removeprefix("Bearer ").strip()
+    if x_worker_token != expected and bearer != expected:
+        raise HTTPException(401, detail="worker トークンが一致しません。")
+    _require_tables(conn)
+
+    from kaigyou_intel.worker import tick
+
+    settings = cfg.analysis_config().get("worker") or {}
+    return tick(conn, stale_after_minutes=float(
+        settings.get("stale_after_minutes", 20)))
+
+
 @router.get("/analysis/{job_id}/report", summary="最終レポート")
 def get_report(job_id: str,
-               conn: psycopg.Connection = Depends(get_conn)) -> dict[str, Any]:
+               conn: psycopg.Connection = Depends(get_conn),
+               account: acc.Account | None = Depends(acc.current_account),
+               ) -> dict[str, Any]:
     _require_tables(conn)
+    job = jobs.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(404, detail="そのジョブはありません。")
+    _owned(job, account)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT report_json, report_markdown, trace_ok, trace_problems, created_at "

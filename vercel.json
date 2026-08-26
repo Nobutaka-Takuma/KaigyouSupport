@@ -5,7 +5,7 @@
   "functions": {
     "api/index.py": {
       "memory": 1024,
-      "maxDuration": 30,
+      "maxDuration": 300,
       "includeFiles": "{config,server,web/dist}/**"
     }
   }

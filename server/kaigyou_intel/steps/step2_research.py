@@ -50,9 +50,10 @@ def _prompts(limits: Mapping[str, Any]) -> tuple[str, str]:
     settings = llm.step_settings(STEP_NUMBER)
     if not settings.get("prompt_structure"):
         raise StepFailed("config/analysis.yaml の steps.2 に prompt_structure がありません")
+    total = llm.max_searches(limits)
     research = cfg.prompt_text(settings["prompt"]) \
         .replace("{searches_per_pattern}", str(limits.get("searches_per_pattern", 3))) \
-        .replace("{max_searches_total}", str(limits.get("max_searches_total", 15)))
+        .replace("{max_searches_total}", str(total))
     return research, cfg.prompt_text(settings["prompt_structure"])
 
 

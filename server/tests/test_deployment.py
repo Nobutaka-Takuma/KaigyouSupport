@@ -871,3 +871,56 @@ def test_the_analysis_token_is_not_the_anthropic_key():
         encoding="utf-8")
     assert "`ANTHROPIC_API_KEY` は Vercel に置きません" in text
     assert "Anthropic のキーを入れないでください" in text
+
+
+def test_the_hosted_worker_fits_inside_a_function_call():
+    """5段を1回の関数呼び出しには収められません。
+
+    Vercel の実行時間上限は Hobby で300秒、Pro で800秒。分析は通しで10〜20分。
+    だから 1呼び出し=1ステップ にしてあります。ここが崩れると、ホスティング
+    環境では最後まで走りません。
+    """
+    import inspect
+
+    from kaigyou_intel import worker
+
+    source = inspect.getsource(worker.advance)
+    assert "next_step" in source and "while" not in source, (
+        "advance は1ステップだけ進めること")
+    assert "queued" in source, "終わったら待ち行列に戻すこと"
+
+
+def test_the_function_timeout_is_within_the_hobby_limit():
+    """Hobby は300秒。ここを超える値を書くとデプロイが通りません。"""
+    import json
+    from pathlib import Path
+
+    config = json.loads((Path(__file__).resolve().parents[2] / "vercel.json")
+                        .read_text(encoding="utf-8"))
+    duration = config["functions"]["api/index.py"]["maxDuration"]
+    assert duration <= 300, "Pro に上げるまでは 300 秒以内"
+
+
+def test_the_schedule_example_is_not_applied_automatically():
+    """秘密（URLとトークン）を含む設定をリポジトリに置かないこと。
+
+    .sql だと migrate が拾って、雛形のまま実行されます。
+    """
+    from pathlib import Path
+
+    migrations = Path(__file__).resolve().parents[2] / "db" / "migrations"
+    assert (migrations / "022_worker_schedule.sql.example").is_file()
+    assert not (migrations / "022_worker_schedule.sql").exists()
+
+
+def test_the_saas_guide_covers_the_switch_to_pro():
+    """Hobby で組んで Pro に移る前提なので、移り方が書いてあること。"""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / "docs" / "saas.md").read_text(
+        encoding="utf-8")
+    assert "KAIGYOU_MAX_SEARCHES" in text
+    assert "cron.unschedule" in text
+    assert "コードの変更はありません" in text
+    # Vercel 側で API キーが要る構成に変わることを、はっきり書く。
+    assert "今度は必要です" in text

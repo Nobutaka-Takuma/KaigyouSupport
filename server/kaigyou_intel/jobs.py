@@ -175,6 +175,44 @@ def claim_specific(conn: psycopg.Connection, job_id: str) -> str | None:
     return str(row["id"]) if row else None
 
 
+def recover_stale(conn: psycopg.Connection, minutes: float) -> list[str]:
+    """途中で消えた実行を、待ち行列に戻す。
+
+    ホスティングされた関数には実行時間の上限があります。上限に当たって
+    関数が消えると、Job は running、ステップは running のまま誰も動かしません。
+    手元の worker では滅多に起きませんでしたが、関数で回すなら必ず起きます。
+
+    「実行中のステップが N 分以上前に始まっている」を目印にします。1 ステップの
+    実測は最長でも 10 分前後なので、それより余裕を見た値を設定に置きます。
+    済んだステップは触りません（要件 §32）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE analysis_steps SET status = 'pending', started_at = NULL
+            WHERE status = 'running' AND started_at < now() - make_interval(secs => %s)
+            RETURNING job_id
+            """, (minutes * 60.0,))
+        job_ids = sorted({str(r["job_id"]) for r in cur.fetchall()})
+        if job_ids:
+            cur.execute(
+                "UPDATE analysis_jobs SET status = 'queued', started_at = NULL "
+                "WHERE id = ANY(%s) AND status = 'running'", (job_ids,))
+        # ステップは動いていないのに Job だけ running で残っている場合も戻します
+        # （ステップを始める前に関数が消えたとき）。
+        cur.execute(
+            """
+            UPDATE analysis_jobs SET status = 'queued', started_at = NULL
+            WHERE status = 'running' AND started_at < now() - make_interval(secs => %s)
+              AND NOT EXISTS (SELECT 1 FROM analysis_steps s
+                              WHERE s.job_id = analysis_jobs.id AND s.status = 'running')
+            RETURNING id
+            """, (minutes * 60.0,))
+        job_ids = sorted(set(job_ids) | {str(r["id"]) for r in cur.fetchall()})
+    conn.commit()
+    return job_ids
+
+
 def release_job(conn: psycopg.Connection, job_id: str, outcome: str,
                 message: str | None = None) -> None:
     """走り終わった Job の状態を戻す。
@@ -191,7 +229,8 @@ def release_job(conn: psycopg.Connection, job_id: str, outcome: str,
     ``failed`` は failed のままにします。壊れたまま自動で拾い直すと、
     同じ失敗に何度も課金されます。
     """
-    status = {"completed": "completed", "blocked": "blocked"}.get(outcome, "failed")
+    status = {"completed": "completed", "blocked": "blocked",
+              "queued": "queued"}.get(outcome, "failed")
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE analysis_jobs SET status = %s, error_message = %s, "

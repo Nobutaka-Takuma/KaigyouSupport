@@ -795,3 +795,43 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .report__note { color: #6b7280; font-size: 0.82rem; }
 .report__how { color: #43506b; font-size: 0.82rem; }
+
+/* --------------------------------------------------------- サインイン */
+.signin { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.signin input {
+  padding: 0.32rem 0.5rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  min-width: 10rem;
+}
+.signin button {
+  padding: 0.34rem 0.8rem;
+  border: 1px solid #2b6cb0;
+  border-radius: 6px;
+  background: #2b6cb0;
+  color: #fff;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.signin--in { font-size: 0.82rem; color: #43506b; }
+.signin__error { flex: 1 1 100%; margin: 0; color: #b02a37; font-size: 0.8rem; }
+.signin__note { flex: 1 1 100%; margin: 0; color: #6b7280; font-size: 0.75rem; }
+
+/* ----------------------------------------------------- マイレポート */
+.reports { list-style: none; margin: 1rem 0 0; padding: 0; }
+.reports li {
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--line, #e5e9ef);
+}
+.reports__head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.reports__meta { margin: 0.2rem 0 0.45rem; font-size: 0.8rem; color: #6b7280; }
+.reports__actions { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.reports__actions a { text-decoration: none; }
+.reports__pending { font-size: 0.8rem; color: #6b7280; }
+.reports__quota {
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid #2b6cb0;
+  background: #f4f8fd;
+  font-size: 0.85rem;
+}

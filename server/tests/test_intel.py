@@ -2119,3 +2119,131 @@ def test_the_rent_estimate_reaches_the_report(dataset):
     if (dataset.get("cost") or {}).get("rent_estimate"):
         assert "#### 賃料の目安（地価からの換算）" in markdown
         assert "月額（円/坪）" in markdown
+
+
+# ------------------------------------------------ 関数で回す（PCを常駐させない）
+def test_one_tick_runs_one_step_and_puts_the_job_back(conn, dataset, monkeypatch):
+    """5段を1回の関数呼び出しには収められません。
+
+    Vercel の実行時間上限は Hobby で300秒、Pro で800秒。分析は通しで10〜20分です。
+    1呼び出し=1ステップにして、続きは次の呼び出しに任せます。
+    """
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    monkeypatch.setattr(worker, "RUNNERS", {
+        n: (lambda _p, n=n: ({"n": n}, llm.Usage(), [])) for n in jobs.STEP_NAMES})
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
+    try:
+        # claim_job は「いちばん古い queued」を拾うので、順番を当てにせず
+        # この Job を名指しして進めます。見たいのは 1 呼び出しの粒度です。
+        jobs.claim_specific(conn, job_id)
+        first = worker.advance(conn, job_id)
+        assert first["step"] == 1 and first["status"] == "queued"
+        # 走り終わって queued に戻っているので、次の呼び出しが続きを拾える。
+        assert jobs.get_job(conn, job_id)["status"] == "queued"
+        assert jobs.next_step(conn, job_id) == 2
+
+        for _ in range(len(jobs.STEP_NAMES) - 1):
+            jobs.claim_specific(conn, job_id)
+            worker.advance(conn, job_id)
+        assert jobs.get_job(conn, job_id)["status"] == "completed"
+        assert worker.advance(conn, job_id)["status"] == "completed"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_tick_with_nothing_queued_says_it_is_idle(conn, monkeypatch):
+    """待っているものが無いときに、何かを掴んだふりをしない。
+
+    待ち行列そのものは他のテストと共有なので、掴む口だけ差し替えます。
+    """
+    from kaigyou_intel import jobs, worker
+
+    monkeypatch.setattr(jobs, "claim_job", lambda _conn: None)
+    monkeypatch.setattr(jobs, "recover_stale", lambda _conn, _m: [])
+    assert worker.tick(conn) == {"claimed": None, "recovered": [], "status": "idle"}
+
+
+def test_a_step_that_died_mid_flight_goes_back_to_the_queue(conn, dataset):
+    """関数がタイムアウトすると、Job も ステップも running のまま残ります。
+
+    手元の worker では滅多に起きませんが、関数で回すなら必ず起きます。
+    済んだステップは触りません（要件 §32）。
+    """
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+        jobs.finish_step(conn, job_id, 1, {"n": 1}, {})
+        jobs.start_step(conn, job_id, 2, {}, {"prompt_version": "v", "model": "m"})
+        with conn.cursor() as cur:  # 30分前に始まったことにする
+            cur.execute("UPDATE analysis_steps SET started_at = now() - interval '30 min' "
+                        "WHERE job_id = %s AND step_number = 2", (job_id,))
+            cur.execute("UPDATE analysis_jobs SET status = 'running', "
+                        "started_at = now() - interval '30 min' WHERE id = %s", (job_id,))
+            conn.commit()
+
+        assert job_id in jobs.recover_stale(conn, minutes=20)
+        steps = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}
+        assert steps[1]["status"] == "completed", "済んだステップは触らない"
+        assert steps[2]["status"] == "pending"
+        assert jobs.get_job(conn, job_id)["status"] == "queued"
+        assert jobs.recover_stale(conn, minutes=20) == [], "戻したものを何度も戻さない"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_fresh_step_is_not_reclaimed(conn, dataset):
+    """走っている最中のものを横取りしない。"""
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.claim_specific(conn, job_id)
+        jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+        assert jobs.recover_stale(conn, minutes=20) == []
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_worker_endpoint_needs_its_own_secret(monkeypatch):
+    """分析トークンとは別の鍵にします。片方が漏れても、もう片方は閉じたまま。"""
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    for var in ("KAIGYOU_WORKER_TOKEN", "CRON_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    client = TestClient(app)
+    assert client.post("/api/worker/tick").status_code == 503
+
+    monkeypatch.setenv("KAIGYOU_WORKER_TOKEN", "w0rker")
+    assert client.post("/api/worker/tick").status_code == 401
+    assert client.post("/api/worker/tick",
+                       headers={"X-Worker-Token": "wrong"}).status_code == 401
+    # Vercel Cron は Authorization: Bearer で来るので、そちらも受ける。
+    assert client.post("/api/worker/tick",
+                       headers={"Authorization": "Bearer w0rker"}).status_code == 200
+
+
+def test_the_search_budget_can_be_set_per_deployment(monkeypatch):
+    """ホスティング先で関数の実行時間の上限が違います。
+
+    Vercel は Hobby で300秒、Pro で800秒。STEP2 は検索のたびに文脈を読み直すので、
+    回数がそのまま実行時間になります。コードにも設定にも「本番はこう」と
+    書かずに、環境で決めます。
+    """
+    monkeypatch.delenv(llm.MAX_SEARCHES_ENV, raising=False)
+    assert llm.build_request(2, "s", "u")["tools"][0]["max_uses"] == \
+        cfg.analysis_config()["limits"]["max_searches_total"]
+
+    monkeypatch.setenv(llm.MAX_SEARCHES_ENV, "6")
+    assert llm.build_request(2, "s", "u")["tools"][0]["max_uses"] == 6
+    # 数字でない値で 0 回にしない（検索なしの STEP2 は空振りしかしません）。
+    monkeypatch.setenv(llm.MAX_SEARCHES_ENV, "many")
+    assert llm.build_request(2, "s", "u")["tools"][0]["max_uses"] >= 1

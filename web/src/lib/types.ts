@@ -495,3 +495,30 @@ export interface AnalysisReport {
   sources: AnalysisSource[];
   disclaimer: string;
 }
+
+export interface QuotaView {
+  monthly_quota: number;
+  used: number;
+  remaining: number;
+  period_start: string;
+}
+
+export interface AnalysisListItem {
+  id: string;
+  location_name: string | null;
+  latitude: number;
+  longitude: number;
+  radius_m: number;
+  profile: string | null;
+  status: string;
+  created_at: string;
+  report_at: string | null;
+  trace_ok: boolean | null;
+  title: string | null;
+  verdict: string | null;
+}
+
+export interface AnalysisList {
+  items: AnalysisListItem[];
+  quota: QuotaView | null;
+}
