@@ -469,11 +469,12 @@ export interface ClientReportJson {
     counterpoint: string;
   };
   why_here: string;
-  sections: { heading: string; body: string; takeaway?: string | null;
-              evidence?: string[] }[];
-  support_needed: { item: string; why: string; category: string;
-                    evidence?: string[] }[];
-  further_research: { topic: string; why: string; how: string }[];
+  support_needed?: { item: string; why: string; category: string;
+                     evidence?: string[] }[];
+  /** 古い形で保存されたレポートには無いことがあります。読む側で守ります。 */
+  further_research?: { topic: string; why: string; how: string }[];
+  sections?: { heading: string; body: string; takeaway?: string | null;
+               evidence?: string[] }[];
   judgement_note: string;
 }
 

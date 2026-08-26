@@ -9,6 +9,8 @@ Markdown はここで作ります。LLM に書かせません。免責・出典�
 """
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -52,6 +54,7 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
     lines += (_client_body(output) if _is_client_report(output)
               else _working_body(output))
 
+    lines += _legend_block(output)
     lines += _figures_block(dataset)
     lines += _sources_block(sources)
     lines += _provenance_block(dataset)
@@ -260,7 +263,12 @@ def _client_body(output: Mapping[str, Any]) -> list[str]:
                 lines += [f"**{item.get('item')}**", "",
                           str(item.get("why", "")) + _refs(item), ""]
 
+    # 古い形（questions_for_the_client）で保存されたレポートも読めるように。
+    # レポートは DB に何か月も残り、その間にスキーマは変わります。
     research = output.get("further_research") or []
+    if not research:
+        research = [{"topic": q} for q in
+                    (output.get("questions_for_the_client") or [])]
     if research:
         lines += ["## さらに深掘りすべき調査", "",
                   "本レポートは公的統計から読み取れる範囲です。"
@@ -393,6 +401,37 @@ def _sources_block(sources: Sequence[Mapping[str, Any]]) -> list[str]:
                       "本文の根拠としては引用していません。"]
     lines.append("")
     return lines
+
+
+#: 本文に添えた id が何なのか。読み手が説明なしに分かる記号ではありません。
+#: 実測：「〔F011, F012, F013, F017, P001〕といった数字は何の数字だろうか？」と
+#: 訊かれました。記号を出すなら、同じ文書の中に読み方を置きます。
+_EVIDENCE_LEGEND = (
+    ("F", "基礎データから読み取った事実（国勢調査・経済センサス・医療機能情報提供制度など）"),
+    ("P", "複数の事実を組み合わせて見えた、この商圏の特徴"),
+    ("C", "外部資料で確認した事実。出典は「出典（外部情報）」に載っています"),
+    ("H", "その背景についての仮説と、外部情報による判定"),
+    ("S", "推定した患者層"),
+    ("M", "需要が生まれる筋道"),
+    ("I", "複数の筋道を横断して見えたこと"),
+)
+
+
+def _legend_block(output: Mapping[str, Any]) -> list[str]:
+    """本文の〔F001〕の読み方。
+
+    根拠を辿れることがこのレポートの売りなので、記号は消しません。ただし
+    説明の無い記号は、読み手にとっては模様と同じです。
+    """
+    text = json.dumps(output, ensure_ascii=False)
+    used = [(prefix, label) for prefix, label in _EVIDENCE_LEGEND
+            if re.search(rf'"{prefix}\d{{3}}"', text)]
+    if not used:
+        return []
+    return ["## 本文中の〔F001〕などについて", "",
+            "文末の〔　〕は、その記述の根拠にした項目の番号です。"
+            "どの記述がどのデータに基づくかを後から辿れるように付けています。", ""] + [
+        f"- **{prefix}001** … {label}" for prefix, label in used] + [""]
 
 
 def _provenance_block(dataset: Mapping[str, Any]) -> list[str]:

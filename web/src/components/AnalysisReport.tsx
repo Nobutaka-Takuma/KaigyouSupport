@@ -70,9 +70,13 @@ function ClientReportView(
   { report, json }: { report: AnalysisReport; json: ClientReportJson },
 ) {
   const [open, setOpen] = useState<"report" | "support" | "sources">("report");
-  const cited = report.sources.filter((s) => s.pattern_id).sort(byPriority);
-  const byCategory = new Map<string, ClientReportJson["support_needed"]>();
-  for (const item of json.support_needed) {
+  const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
+  const support = list(json.support_needed);
+  const research = list(json.further_research);
+  const sections = list(json.sections);
+  type Support = NonNullable<ClientReportJson["support_needed"]>;
+  const byCategory = new Map<string, Support>();
+  for (const item of support) {
     byCategory.set(item.category, [...(byCategory.get(item.category) ?? []), item]);
   }
 
@@ -84,7 +88,7 @@ function ClientReportView(
       </div>
 
       <div className="report__tabs" role="tablist">
-        {([["report", "レポート"], ["support", `開業に必要なこと (${json.support_needed.length})`],
+        {([["report", "レポート"], ["support", `開業に必要なこと (${support.length})`],
            ["sources", `出典 (${cited.length})`]] as const).map(([key, label]) => (
           <button key={key} role="tab" aria-selected={open === key}
                   className={open === key ? "is-active" : ""}
@@ -103,14 +107,16 @@ function ClientReportView(
         <div className="report__prose">
           <h4>評価：{json.verdict.label}</h4>
           <p>{json.verdict.statement}<Refs ids={json.verdict.basis} /></p>
-          <p className="report__counterpoint">
-            <strong>この判断が外れるとしたら</strong>　{json.verdict.counterpoint}
-          </p>
+          {json.verdict.counterpoint && (
+            <p className="report__counterpoint">
+              <strong>この判断が外れるとしたら</strong>　{json.verdict.counterpoint}
+            </p>
+          )}
 
           <h4>なぜこの立地か</h4>
           <p>{json.why_here}</p>
 
-          {json.sections.map((section, i) => (
+          {sections.map((section, i) => (
             <section key={i}>
               <h4>{section.heading}</h4>
               {section.takeaway && (
@@ -120,14 +126,14 @@ function ClientReportView(
             </section>
           ))}
 
-          {json.further_research.length > 0 && (
+          {research.length > 0 && (
             <>
               <h4>さらに深掘りすべき調査</h4>
               <p className="report__note">
                 本レポートは公的統計から読み取れる範囲です。ここから先は現地・
                 一次情報の領域で、調査の方向としては次が考えられます。
               </p>
-              {json.further_research.map((item, i) => (
+              {research.map((item, i) => (
                 <div key={i} className="report__support">
                   <strong>{item.topic}</strong>
                   <p>{item.why}</p>
@@ -137,6 +143,18 @@ function ClientReportView(
             </>
           )}
 
+          <details className="report__legend">
+            <summary>文中の〔F001〕などについて</summary>
+            <p>
+              文末の〔　〕は、その記述の根拠にした項目の番号です。どの記述が
+              どのデータに基づくかを後から辿れるように付けています。
+            </p>
+            <ul>
+              {Object.entries(EVIDENCE_LEGEND).map(([prefix, label]) => (
+                <li key={prefix}><code>{prefix}001</code> … {label}</li>
+              ))}
+            </ul>
+          </details>
           <p className="report__judgement-note">{json.judgement_note}</p>
         </div>
       )}
@@ -181,9 +199,9 @@ function SourceList(
           </li>
         ))}
       </ul>
-      {report.sources.length > cited.length && (
+      {list(report.sources).length > cited.length && (
         <p className="report__source-note">
-          このほか {report.sources.length - cited.length} 件を参照しましたが、
+          このほか {list(report.sources).length - cited.length} 件を参照しましたが、
           本文の根拠としては引用していません。
         </p>
       )}
@@ -195,7 +213,7 @@ function WorkingReportView(
   { report, json }: { report: AnalysisReport; json: ReportJson },
 ) {
   const [open, setOpen] = useState<"decision" | "body" | "sources">("decision");
-  const cited = report.sources.filter((s) => s.pattern_id).sort(byPriority);
+  const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
 
   return (
     <div className="report">
@@ -231,9 +249,9 @@ function WorkingReportView(
               </div>
             ))}
           </dl>
-          <EvidencedList title="開業上のメリット" items={json.decision.advantages} />
-          <EvidencedList title="リスク" items={json.decision.risks} />
-          <EvidencedList title="次に取るべき行動" items={json.actions} />
+          <EvidencedList title="開業上のメリット" items={list(json.decision.advantages)} />
+          <EvidencedList title="リスク" items={list(json.decision.risks)} />
+          <EvidencedList title="次に取るべき行動" items={list(json.actions)} />
           <p className="report__confidence">
             判断の確度: <strong>{json.decision.confidence}</strong>
           </p>
@@ -242,10 +260,10 @@ function WorkingReportView(
 
       {open === "body" && (
         <div className="report__body">
-          {[...json.sections].sort((a, b) => a.number - b.number).map((section) => (
+          {[...list(json.sections)].sort((a, b) => a.number - b.number).map((section) => (
             <section key={section.number}>
               <h4>{section.number}. {section.title}</h4>
-              {section.blocks.map((block, i) => (
+              {list(section.blocks).map((block, i) => (
                 <p key={i} className={`report__block report__block--${block.tag}`}>
                   <span className="report__tag">{TAG_LABEL[block.tag] ?? block.tag}</span>
                   {block.text}
@@ -264,7 +282,8 @@ function WorkingReportView(
   );
 }
 
-function Statement({ item }: { item: Evidenced }) {
+function Statement({ item }: { item: Evidenced | undefined }) {
+  if (!item) return null;
   return <>{item.statement}<Refs ids={item.evidence} /></>;
 }
 
@@ -282,15 +301,44 @@ function EvidencedList({ title, items }: { title: string; items: Evidenced[] }) 
   );
 }
 
+/** 記号の読み方。説明の無い記号は、読み手にとっては模様と同じです。 */
+const EVIDENCE_LEGEND: Record<string, string> = {
+  F: "基礎データから読み取った事実",
+  P: "複数の事実から見えた特徴",
+  C: "外部資料で確認した事実",
+  H: "背景についての仮説と判定",
+  S: "推定した患者層",
+  M: "需要が生まれる筋道",
+  I: "横断して見えたこと",
+};
+
+
 /** 根拠の id。ここが §25 の追跡の入り口なので、本文から消さない。 */
 function Refs({ ids }: { ids?: string[] }) {
-  if (!ids?.length) return null;
+  if (!Array.isArray(ids) || ids.length === 0) return null;
   return (
     <span className="report__refs">
-      {ids.map((id) => <code key={id}>{id}</code>)}
+      {ids.map((id) => (
+        <code key={id} title={EVIDENCE_LEGEND[id[0]] ?? "根拠の番号"}>{id}</code>
+      ))}
     </span>
   );
 }
+
+/**
+ * 保存済みの JSON は、いまのコードと同じ形とは限りません。
+ *
+ * レポートは DB に入ったまま何か月も残ります。その間にスキーマは変わります。
+ * 実測：`questions_for_the_client` を `further_research` に直したとき、
+ * 前の形で保存されたレポートを開いた画面が
+ * `Cannot read properties of undefined (reading 'length')` で真っ白になりました。
+ *
+ * **古い形でも読めること**を、レポートを見せる側の責任にします。
+ */
+function list<T>(value: T[] | undefined | null): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
 
 /** e-Stat の表題は481文字あった。一覧で読めなくなる。 */
 function shorten(text: string, limit = 80) {

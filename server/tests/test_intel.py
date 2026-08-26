@@ -2247,3 +2247,35 @@ def test_the_search_budget_can_be_set_per_deployment(monkeypatch):
     # 数字でない値で 0 回にしない（検索なしの STEP2 は空振りしかしません）。
     monkeypatch.setenv(llm.MAX_SEARCHES_ENV, "many")
     assert llm.build_request(2, "s", "u")["tools"][0]["max_uses"] >= 1
+
+
+def test_the_report_explains_its_own_notation(dataset):
+    """実測：「〔F011, F012, F013, F017, P001〕といった数字は何の数字だろうか？」
+
+    根拠を辿れることがこのレポートの売りなので記号は消しません。ですが
+    説明の無い記号は、読み手にとっては模様と同じです。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    assert "## 本文中の〔F001〕などについて" in markdown
+    # 本文で使った記号だけを説明する（使っていない S001 の説明は要らない）。
+    assert "**F001**" in markdown and "**M001**" in markdown
+    assert "**H001**" not in markdown
+
+
+def test_a_report_saved_before_a_rename_still_renders(dataset):
+    """レポートは DB に何か月も残り、その間にスキーマは変わります。
+
+    実測：questions_for_the_client を further_research に直したあと、前の形で
+    保存されたレポートを開いた画面が真っ白になりました
+    （Cannot read properties of undefined (reading 'length')）。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    old = _step5_output().model_dump()
+    old["questions_for_the_client"] = ["古い形の設問"]
+    del old["further_research"]
+    markdown = to_markdown(old, to_jsonable(dataset))
+    assert "古い形の設問" in markdown
+    assert "## さらに深掘りすべき調査" in markdown
