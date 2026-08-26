@@ -360,9 +360,15 @@ function StepRow({ step, now }: { step: AnalysisStep; now: number }) {
       {step.status === "running" && step.started_at && (
         <small>{since(step.started_at, now) ?? ""}</small>
       )}
+      {/* やり直しは進行中の出来事であって、失敗ではありません。赤くしない。 */}
+      {(step.attempts ?? 0) > 0 && step.status !== "failed" && (
+        <small className="analysis__retry">やり直し {step.attempts}回</small>
+      )}
       {step.status === "failed" && (
         <small className="analysis__step-error">
-          このステップから再開できます
+          {(step.attempts ?? 0) > 0
+            ? `${step.attempts}回やり直しましたが通りませんでした`
+            : "このステップから再開できます"}
         </small>
       )}
     </li>

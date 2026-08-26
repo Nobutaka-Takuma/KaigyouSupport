@@ -92,19 +92,10 @@ STEP2 は Web 検索のたびに文脈を読み直すので、**検索回数が�
 
 ## 4. アカウントを発行する
 
-1. Supabase の **Authentication → Users → Invite user** でメールアドレスを招待
-2. 発行された **User UID** を控える
-3. 自分の管理者アカウントで API を叩く
+### 最初の1回だけ：自分を管理者にする
 
-```powershell
-$h = @{ Authorization = "Bearer <あなたのJWT>"; "Content-Type" = "application/json" }
-$body = @{ email="a@example.co.jp"; display_name="◯◯歯科開業支援";
-           organisation="◯◯株式会社"; monthly_quota=5; billing_day=15 } | ConvertTo-Json
-Invoke-RestMethod -Method Put -Uri "https://<app>.vercel.app/api/admin/accounts/<UID>" `
-                  -Headers $h -Body $body
-```
-
-最初の管理者だけは SQL で作ります（鶏と卵）。
+鶏と卵なので、ここだけ SQL です。Supabase の **Authentication → Users** で
+自分を招待し、一覧に出た **User UID** を使います。
 
 ```sql
 insert into accounts (user_id, email, monthly_quota, is_admin)
@@ -112,11 +103,27 @@ values ('<あなたのUID>', 'you@example.com', 999, true)
 on conflict (user_id) do update set is_admin = true;
 ```
 
+これ以降、**画面の「管理」タブ**から操作します（管理者にだけ表示されます）。
+
+### 利用者を1人増やすたび
+
+1. Supabase の **Authentication → Users → Invite user** でメールアドレスを招待
+   （利用者にはパスワード設定のメールが届きます）
+2. 一覧に出た **User UID** をコピー
+3. アプリの **管理 → アカウントを発行** に貼り付け、会社名・担当者名・
+   月あたりの上限・締め日を入れて保存
+
+同じ画面に、利用者ごとの**今期の生成回数**と**LLM の実費**が並びます。
+上限に達したアカウントは行が色付きになります。
+
+上限を変える・止めるときも、同じ画面の「編集」から。**月あたりの上限を 0 に
+すると、新規の分析を開始できなくなります**（走っている分析は止めません）。
+
 ---
 
 ## 5. 請求
 
-`GET /api/admin/usage` が、請求書を書くための1画面です。
+**管理**タブ（= `GET /api/admin/usage`）が、請求書を書くための1画面です。
 
 - 利用者ごとの**今期の生成回数**（`used_this_period`）
 - 締め日基準の期間（`period_start`）。契約日を締め日にできます（1〜28日）
@@ -129,7 +136,32 @@ Stripe を入れるのは、顧客が増えて手作業が割に合わなくな�
 
 ---
 
-## 6. Pro に上げるとき
+## 6. 途中で止まったとき
+
+モデルの言い間違い（存在しない出典を書く、参照 id を取り違える、長さの上限で
+JSON が途中で切れる）は一定の確率で起きます。**これらは自動でやり直します**
+（既定 3 回まで。`config/analysis.yaml` の `worker.max_attempts`）。画面には
+「やり直し 1回」と出るだけで、人が押しに行く必要はありません。
+
+**何度やっても直らないもの**は 1 回で止めます。
+
+| 止まる理由 | 対処 |
+|---|---|
+| 残高不足 | console.anthropic.com の Plans & Billing でクレジットを追加 |
+| API キーが不正 | Vercel の `ANTHROPIC_API_KEY` を直して再デプロイ |
+| 安全性の判定で拒否 | 地点や条件を変える |
+
+判定は `server/kaigyou_intel/failures.py` にあります。**判定できない失敗は
+やり直しません** — 分からないものを繰り返すのは、費用だけが増えていちばん
+気づかれにくい失敗の仕方だからです。
+
+外部事実の出典が1件だけ確かめられなかった場合は、その1件を落として続けます。
+落としたことはレポートの「調べたが確認できなかったこと」に残ります。全部が
+確かめられなかったときだけ止めます。
+
+---
+
+## 7. Pro に上げるとき
 
 1. Supabase の cron を止める: `select cron.unschedule('kaigyou-worker-tick');`
 2. `vercel.json` に足す:
@@ -144,7 +176,7 @@ Stripe を入れるのは、顧客が増えて手作業が割に合わなくな�
 
 ---
 
-## 7. 手元の PC で回す使い方も残っています
+## 8. 手元の PC で回す使い方も残っています
 
 ```powershell
 python -m kaigyou_etl analyze --poll 5

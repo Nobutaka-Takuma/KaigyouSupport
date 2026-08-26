@@ -101,11 +101,18 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
         raise StepFailed("構造化出力を受け取れませんでした")
 
     allowed = {p.get("id") for p in (payload.get("patterns") or []) if p.get("id")}
-    problems = verify_step2(output, allowed, {s["url"] for s in retrieved})
+    urls = {s["url"] for s in retrieved}
+    dropped = _drop_unverifiable(output, urls)
+
+    problems = verify_step2(output, allowed, urls)
     if problems:
         raise StepFailed(
             "参照が解決しませんでした: "
             + "; ".join(f"{p.where}: {p.problem}" for p in problems))
+    if dropped and not output.external_facts:
+        raise StepFailed(
+            "出典を確かめられた外部事実がひとつも残りませんでした"
+            f"（{len(dropped)}件を除外）。")
 
     usage = llm.Usage(
         input_tokens=research.usage.input_tokens + structured.usage.input_tokens,
@@ -117,6 +124,40 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
                             + structured.usage.cache_write_tokens),
     )
     return output.model_dump(), usage, _sources_with_patterns(retrieved, output)
+
+
+def _drop_unverifiable(output: Step2Output, urls: set[str]) -> list[str]:
+    """出典を確かめられなかった外部事実を落とす。**黙って落としません。**
+
+    以前はここでステップごと失敗させていました。出典が実在しないレポートは
+    出典が無いレポートより悪い、という判断は変えていません。ですが 12 件中
+    1 件の URL のために、通った 11 件と $1 の実行を捨てるのは割に合いません
+    （実測：e-stat の検索画面の URL を1つ書いたために STEP2 が丸ごと落ちました）。
+
+    落としたことは ``unanswered`` に書き残します。そこが「調べたが確認できな
+    かった」の置き場所で、後続のステップも読みます。数が残らないと、
+    「外部情報で確認できた」と読まれてしまいます。
+    """
+    known = {normalize_url(u) for u in urls if u}
+    kept, dropped = [], []
+    for fact in output.external_facts:
+        if normalize_url(fact.source_url) in known:
+            kept.append(fact)
+        else:
+            dropped.append(fact.id)
+    if not dropped:
+        return []
+
+    output.external_facts = kept
+    # 根拠が全部消えた仮説も落とします。残すと、根拠の無い判定になります。
+    surviving = {f.id for f in kept}
+    output.hypotheses = [h for h in output.hypotheses
+                         if any(ref in surviving for ref in h.evidence)]
+    output.unanswered = list(output.unanswered) + [
+        f"外部事実 {len(dropped)}件（{', '.join(dropped)}）は、引用された URL が"
+        "今回の検索結果に含まれていなかったため除外しました。"
+        "内容の当否ではなく、出典を確かめられなかったことによる除外です。"]
+    return dropped
 
 
 def _sources_with_patterns(retrieved: list[dict[str, Any]],

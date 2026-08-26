@@ -6,6 +6,8 @@
  * including the "we could not get this" answers.
  */
 import type {
+  AdminUsage,
+  Me,
   AnalysisCreated,
   AnalysisList,
   AnalysisReport,
@@ -184,6 +186,9 @@ export const api = {
       request<{ restarted_from: number }>(
         "POST", `/analysis/${jobId}/steps/${step}/retry`, {}, token),
 
+    /** いまサインインしている利用者。管理リンクの出し分けに使います。 */
+    me: () => get<Me>("/me"),
+
     /** 自分が作ったレポートの一覧。失くしても取り直せるように。 */
     list: (limit = 50) => get<AnalysisList>("/analyses", { limit }),
 
@@ -205,6 +210,30 @@ export const api = {
       link.download = name;
       link.click();
       URL.revokeObjectURL(href);
+    },
+  },
+
+  /** 運営者用。アカウントの発行と、今期の利用状況。 */
+  admin: {
+    usage: () => get<AdminUsage>("/admin/usage"),
+
+    async upsert(userId: string, body: Record<string, unknown>) {
+      const url = new URL(`${BASE}/api/admin/accounts/${encodeURIComponent(userId)}`,
+        window.location.origin);
+      const jwt = await auth.token();
+      const res = await fetch(url.toString(), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new ApiError(detail.detail ?? res.statusText, res.status);
+      }
+      return res.json();
     },
   },
 };

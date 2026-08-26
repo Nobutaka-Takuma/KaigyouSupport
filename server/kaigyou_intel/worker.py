@@ -14,7 +14,9 @@ from typing import Any, Callable, Mapping
 
 import psycopg
 
+from kaigyou_core import config as cfg
 from kaigyou_intel import client as llm
+from kaigyou_intel import failures
 from kaigyou_intel import jobs
 from kaigyou_intel import report
 from kaigyou_intel.steps import (
@@ -63,12 +65,10 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     payload = build_input(conn, job, number)
 
     jobs.start_step(conn, job_id, number, payload, settings)
-    try:
-        output, usage, sources = runner(payload)
-    except Exception as exc:  # noqa: BLE001 - 失敗も結果として残す
-        jobs.fail_step(conn, job_id, number,
-                       f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}")
-        raise
+    # 例外はここでは握りません。やり直す価値があるかを判定してから記録します
+    # （_handle_failure）。ここで failed と書いてしまうと、やり直せる失敗まで
+    # 人がボタンを押しに行くことになります。
+    output, usage, sources = runner(payload)
 
     jobs.finish_step(conn, job_id, number, output, {
         "input_tokens": usage.input_tokens,
@@ -162,10 +162,7 @@ def advance(conn: psycopg.Connection, job_id: str,
         return {"job_id": job_id, "status": "blocked", "step": number,
                 "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
-        say(f"    失敗: {type(exc).__name__}: {exc}")
-        jobs.release_job(conn, job_id, "failed", f"STEP{number}: {exc}")
-        return {"job_id": job_id, "status": "failed", "step": number,
-                "error": f"{type(exc).__name__}: {exc}"}
+        return _handle_failure(conn, job_id, number, exc, say)
 
     done = jobs.next_step(conn, job_id) is None
     jobs.release_job(conn, job_id, "completed" if done else "queued")
@@ -173,6 +170,44 @@ def advance(conn: psycopg.Connection, job_id: str,
         say(f"    レポートを書き出しました: {result['_report_file']}")
     return {"job_id": job_id, "status": "completed" if done else "queued",
             "step": number, "report_file": result.get("_report_file")}
+
+
+def _handle_failure(conn: psycopg.Connection, job_id: str, number: int,
+                    exc: BaseException,
+                    say: Callable[[str], None]) -> dict[str, Any]:
+    """失敗を、やり直す価値があるかで分ける。
+
+    モデルの言い間違い（存在しない出典・参照の取り違え・長さの上限で切れた JSON）は
+    一定の確率で起きます。1 回で止めると、そのたびに人がボタンを押しに行くことに
+    なります。数回は黙って直させます。
+
+    ただし**何度やっても直らないもの**（残高不足・キー不正・安全性の拒否）を
+    繰り返すと、費用だけが増えます。そこは 1 回で止めます。
+    """
+    limit = _retry_limit()
+    detail = f"{type(exc).__name__}: {exc}"
+    attempts = jobs.attempts_for(conn, job_id, number)
+
+    if failures.is_retryable(exc) and attempts + 1 < limit:
+        count = jobs.retry_step(conn, job_id, number, detail)
+        say(f"    やり直します（{count}/{limit} 回目）: {exc}")
+        # queued のまま。次の呼び出しが同じステップを拾い直します。
+        jobs.release_job(conn, job_id, "queued")
+        return {"job_id": job_id, "status": "retrying", "step": number,
+                "attempt": count, "error": detail}
+
+    say(f"    失敗: {detail}")
+    say(f"    {failures.describe(exc, attempts + 1, limit)}")
+    jobs.fail_step(conn, job_id, number, f"{detail}\n"
+                   f"{traceback.format_exc(limit=3)}")
+    jobs.release_job(conn, job_id, "failed", f"STEP{number}: {exc}")
+    return {"job_id": job_id, "status": "failed", "step": number,
+            "attempt": attempts + 1, "error": detail}
+
+
+def _retry_limit() -> int:
+    settings = cfg.analysis_config().get("worker") or {}
+    return max(1, int(settings.get("max_attempts", 3)))
 
 
 def tick(conn: psycopg.Connection, *, stale_after_minutes: float = 20.0,
@@ -221,11 +256,15 @@ def run_job(conn: psycopg.Connection, job_id: str,
             jobs.release_job(conn, job_id, "blocked", str(exc))
             return "blocked"
         except Exception as exc:  # noqa: BLE001
-            say(f"    失敗: {type(exc).__name__}: {exc}")
-            say(f"    直したら: python -m kaigyou_etl analyze --once --job {job_id}"
-                f"  （STEP{number} からやり直します。済んだステップは残ります）")
-            jobs.release_job(conn, job_id, "failed", f"STEP{number}: {exc}")
-            return "failed"
+            # やり直す価値があるかは 1 か所で判定します。手元の worker と
+            # 関数の worker で、同じ失敗の扱いが違うと追えなくなります。
+            outcome = _handle_failure(conn, job_id, number, exc, say)
+            if outcome["status"] != "retrying":
+                say(f"    直したら: python -m kaigyou_etl analyze --once --job {job_id}"
+                    f"  （STEP{number} からやり直します。済んだステップは残ります）")
+                return "failed"
+            # queued に戻っているので、このまま次の周回で同じステップを拾い直します。
+            jobs.claim_specific(conn, job_id)
 
 
 def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,

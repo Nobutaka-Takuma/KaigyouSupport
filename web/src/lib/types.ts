@@ -378,6 +378,8 @@ export interface AnalysisStep {
   input_tokens?: number | null;
   output_tokens?: number | null;
   web_searches?: number | null;
+  /** やり直した回数。0 なら一発で通っています。 */
+  attempts?: number | null;
   cache_read_tokens?: number | null;
   cache_write_tokens?: number | null;
   model?: string | null;
@@ -522,4 +524,34 @@ export interface AnalysisListItem {
 export interface AnalysisList {
   items: AnalysisListItem[];
   quota: QuotaView | null;
+}
+
+export interface AdminAccount {
+  user_id: string;
+  email: string | null;
+  display_name: string | null;
+  organisation: string | null;
+  monthly_quota: number;
+  billing_day: number;
+  status: string;
+  is_admin: boolean;
+  note: string | null;
+  period_start: string;
+  used_this_period: number;
+  remaining: number;
+  api_cost_this_period_usd: number | null;
+}
+
+export interface AdminUsage {
+  accounts: AdminAccount[];
+  reports_this_period: number;
+  api_cost_this_period_usd: number | null;
+}
+
+export interface Me {
+  signed_in: boolean;
+  accounts_enabled: boolean;
+  email?: string | null;
+  is_admin?: boolean;
+  quota?: QuotaView | null;
 }

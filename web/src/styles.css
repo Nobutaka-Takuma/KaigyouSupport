@@ -838,3 +838,58 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .report__legend { margin-top: 1rem; font-size: 0.8rem; color: #6b7280; }
 .report__legend summary { cursor: pointer; }
 .report__legend ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+.analysis__retry { color: #b45309; }
+
+/* ------------------------------------------------------------ 管理画面 */
+.admin__actions { margin: 1rem 0; }
+.admin__actions button {
+  padding: 0.45rem 0.9rem;
+  border: 1px solid #2b6cb0;
+  border-radius: 6px;
+  background: #2b6cb0;
+  color: #fff;
+  cursor: pointer;
+}
+.admin__form {
+  margin: 0 0 1.2rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 10px;
+  background: var(--panel-alt, #fafbfc);
+}
+.admin__form h3 { margin: 0 0 0.6rem; font-size: 0.95rem; }
+.admin__form label { display: block; margin-bottom: 0.7rem; }
+.admin__form label > span {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+.admin__form input, .admin__form select {
+  width: 100%;
+  max-width: 30rem;
+  padding: 0.38rem 0.5rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 6px;
+}
+.admin__form small { display: block; color: #6b7280; font-size: 0.75rem; }
+.admin__form-actions { display: flex; gap: 0.4rem; }
+.admin__form-actions button:first-child {
+  padding: 0.4rem 1rem;
+  border: 1px solid #2b6cb0;
+  border-radius: 6px;
+  background: #2b6cb0;
+  color: #fff;
+  cursor: pointer;
+}
+.admin__table-wrap { overflow-x: auto; }
+.admin__table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.admin__table th, .admin__table td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--line, #e5e9ef);
+  text-align: left;
+  vertical-align: top;
+}
+.admin__table th { font-size: 0.78rem; color: #6b7280; white-space: nowrap; }
+.admin__table small { color: #6b7280; }
+.admin__table tr.is-out td { background: #fff7ed; }

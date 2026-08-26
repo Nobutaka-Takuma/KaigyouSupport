@@ -924,3 +924,16 @@ def test_the_saas_guide_covers_the_switch_to_pro():
     assert "コードの変更はありません" in text
     # Vercel 側で API キーが要る構成に変わることを、はっきり書く。
     assert "今度は必要です" in text
+
+
+def test_the_guide_explains_what_happens_when_a_step_fails():
+    """自動でやり直すもの／やり直さないものが書いてあること。"""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[2] / "docs" / "saas.md").read_text(
+        encoding="utf-8")
+    assert "自動でやり直します" in text
+    assert "max_attempts" in text
+    assert "残高不足" in text
+    # 発行が画面からできることも。
+    assert "管理 → アカウントを発行" in text

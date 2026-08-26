@@ -903,7 +903,11 @@ def test_step2_searches_once_and_then_writes_it_down(monkeypatch):
     assert cited["https://www.e-stat.go.jp/x"] is None, "引用されなかった出典も残す"
 
 
-def test_step2_refuses_an_output_citing_a_url_it_never_retrieved(monkeypatch):
+def test_step2_fails_only_when_nothing_survives_verification(monkeypatch):
+    """出典を確かめられた外部事実がひとつも残らないなら、それは調査ではありません。
+
+    1件だけなら落として続けます（上の _drop_unverifiable）。全部なら止めます。
+    """
     from kaigyou_intel.steps import step2_research
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
@@ -915,7 +919,7 @@ def test_step2_refuses_an_output_citing_a_url_it_never_retrieved(monkeypatch):
 
     monkeypatch.setattr(llm, "ask", fake_ask)
     payload = step2_research.build_input(_step1_for_step2(), {"location": {}})
-    with pytest.raises(step2_research.StepFailed, match="検索結果に無い URL"):
+    with pytest.raises(step2_research.StepFailed, match="ひとつも残りませんでした"):
         step2_research.run(payload)
 
 
@@ -2279,3 +2283,140 @@ def test_a_report_saved_before_a_rename_still_renders(dataset):
     markdown = to_markdown(old, to_jsonable(dataset))
     assert "古い形の設問" in markdown
     assert "## さらに深掘りすべき調査" in markdown
+
+
+# ------------------------------------------------ 止まらずに進む（自動やり直し）
+def test_a_model_slip_is_retried_instead_of_stopping(conn, dataset, monkeypatch):
+    """実測：出典を1つ書き間違えただけで STEP2 が止まり、人がボタンを押しに
+    行くことになりました。
+
+    モデルの言い間違いは一定の確率で起きます。数回は黙って直させます。
+    """
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    calls = {"n": 0}
+
+    def flaky(_payload):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("参照が解決しませんでした: 検索結果に無い URL です")
+        return {"ok": True}, llm.Usage(), []
+
+    monkeypatch.setattr(worker, "RUNNERS", {1: flaky})
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
+    try:
+        jobs.claim_specific(conn, job_id)
+        first = worker.advance(conn, job_id)
+        assert first["status"] == "retrying" and first["attempt"] == 1
+        # 失敗にしない。queued のまま、次の呼び出しが同じステップを拾い直す。
+        assert jobs.get_job(conn, job_id)["status"] == "queued"
+        assert jobs.next_step(conn, job_id) == 1
+
+        jobs.claim_specific(conn, job_id)
+        second = worker.advance(conn, job_id)
+        assert second["status"] == "queued" and second["step"] == 1
+        steps = {s["step_number"]: s for s in jobs.get_steps(conn, job_id)}
+        assert steps[1]["status"] == "completed"
+        assert steps[1]["attempts"] == 1, "やり直した回数が残ること"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_failure_that_will_never_pass_is_not_retried(conn, dataset, monkeypatch):
+    """残高不足を3回繰り返しても、増えるのは費用だけです。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    calls = {"n": 0}
+
+    def broke(_payload):
+        calls["n"] += 1
+        raise RuntimeError("Your credit balance is too low to access the Anthropic API")
+
+    monkeypatch.setattr(worker, "RUNNERS", {1: broke})
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
+    try:
+        jobs.claim_specific(conn, job_id)
+        outcome = worker.advance(conn, job_id)
+        assert outcome["status"] == "failed"
+        assert calls["n"] == 1, "1回で止めること"
+        assert jobs.get_job(conn, job_id)["status"] == "failed"
+    finally:
+        _drop_job(job_id)
+
+
+def test_retries_stop_at_the_limit(conn, dataset, monkeypatch):
+    """いつまでも繰り返さない。直らないものに払い続けないため。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+
+    def always(_payload):
+        raise RuntimeError("構造化出力を受け取れませんでした")
+
+    monkeypatch.setattr(worker, "RUNNERS", {1: always})
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
+    limit = worker._retry_limit()
+    try:
+        outcomes = []
+        for _ in range(limit + 2):
+            if jobs.get_job(conn, job_id)["status"] not in ("queued", "running"):
+                break
+            jobs.claim_specific(conn, job_id)
+            outcomes.append(worker.advance(conn, job_id)["status"])
+        assert outcomes[-1] == "failed"
+        assert outcomes.count("retrying") == limit - 1
+    finally:
+        _drop_job(job_id)
+
+
+def test_an_unverifiable_source_costs_one_fact_not_the_whole_step():
+    """12件中1件の URL のために、通った11件と $1 の実行を捨てない。
+
+    出典が実在しないレポートは出典が無いレポートより悪い、という判断は
+    変えていません。落としたことは unanswered に書き残します。
+    """
+    from kaigyou_intel.schemas import ExternalFact, Hypothesis
+    from kaigyou_intel.steps.step2_research import _drop_unverifiable
+
+    good = "https://www.city.chuo.lg.jp/toukei/jinkou.html"
+    output = _step2_output(
+        external_facts=[
+            ExternalFact(id="C001", pattern_id="P001", statement="s",
+                         source_url=good, source_title="t", confidence="high"),
+            ExternalFact(id="C002", pattern_id="P001", statement="s",
+                         source_url="https://www.e-stat.go.jp/stat-search/database?page=1",
+                         source_title="t", confidence="low"),
+        ],
+        hypotheses=[
+            Hypothesis(id="H001", pattern_id="P001", statement="s",
+                       status="SUPPORTED", evidence=["C001"], reasoning="r",
+                       confidence="high"),
+            Hypothesis(id="H002", pattern_id="P001", statement="s",
+                       status="SUPPORTED", evidence=["C002"], reasoning="r",
+                       confidence="low"),
+        ])
+
+    dropped = _drop_unverifiable(output, {good})
+    assert dropped == ["C002"]
+    assert [f.id for f in output.external_facts] == ["C001"]
+    # 根拠が全部消えた仮説も落とす。残すと根拠の無い判定になります。
+    assert [h.id for h in output.hypotheses] == ["H001"]
+    # 黙って落とさない。件数と id を残します。
+    assert any("C002" in entry for entry in output.unanswered)
+
+
+def test_failures_are_sorted_by_whether_retrying_helps():
+    from kaigyou_intel import failures
+
+    assert failures.is_retryable("検索結果に無い URL です")
+    assert failures.is_retryable("Invalid JSON: EOF while parsing")
+    assert failures.is_retryable("overloaded_error")
+    assert not failures.is_retryable("credit balance is too low")
+    assert not failures.is_retryable("モデルが応答を拒否しました")
+    # 分からないものはやり直しません。繰り返すのは費用だけが増える失敗の仕方です。
+    assert not failures.is_retryable("なにか未知の例外")

@@ -234,3 +234,66 @@ def test_an_unissued_account_is_told_so(conn, monkeypatch):
         "Authorization": f"Bearer {_jwt('never-issued')}"})
     assert response.status_code == 403
     assert "付与されていません" in response.json()["detail"]
+
+
+def test_the_admin_link_is_only_shown_to_admins(conn, monkeypatch):
+    """押せない場所への入口を増やさない。"""
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    monkeypatch.setenv(acc.JWT_SECRET_ENV, SECRET)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO accounts (user_id, monthly_quota, is_admin) "
+                    "VALUES ('boss-1', 5, true), ('client-1', 5, false) "
+                    "ON CONFLICT (user_id) DO NOTHING")
+        conn.commit()
+    client = TestClient(app)
+    try:
+        boss = client.get("/api/me", headers={
+            "Authorization": f"Bearer {_jwt('boss-1')}"}).json()
+        assert boss["is_admin"] is True and boss["quota"]["monthly_quota"] == 5
+
+        client_view = client.get("/api/me", headers={
+            "Authorization": f"Bearer {_jwt('client-1')}"}).json()
+        assert client_view["is_admin"] is False
+        assert client.get("/api/admin/usage", headers={
+            "Authorization": f"Bearer {_jwt('client-1')}"}).status_code == 403
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM accounts WHERE user_id IN ('boss-1','client-1')")
+            conn.commit()
+
+
+def test_an_account_can_be_issued_from_the_screen(conn, monkeypatch):
+    """発行を PowerShell の組み立てにしない。数クリックで済む作業です。"""
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    monkeypatch.setenv(acc.JWT_SECRET_ENV, SECRET)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO accounts (user_id, monthly_quota, is_admin) "
+                    "VALUES ('boss-2', 0, true) ON CONFLICT (user_id) DO NOTHING")
+        conn.commit()
+    client = TestClient(app)
+    head = {"Authorization": f"Bearer {_jwt('boss-2')}"}
+    try:
+        created = client.put("/api/admin/accounts/new-client", headers=head, json={
+            "email": "new@example.co.jp", "display_name": "担当者",
+            "organisation": "◯◯株式会社", "monthly_quota": 5, "billing_day": 15})
+        assert created.status_code == 200
+        assert created.json()["monthly_quota"] == 5
+
+        rows = client.get("/api/admin/usage", headers=head).json()["accounts"]
+        row = next(r for r in rows if r["user_id"] == "new-client")
+        assert row["organisation"] == "◯◯株式会社"
+        assert row["remaining"] == 5
+
+        # 締め日は 1〜28 だけ（29〜31は月により存在しません）。
+        assert client.put("/api/admin/accounts/new-client", headers=head, json={
+            "monthly_quota": 5, "billing_day": 31}).status_code == 400
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM accounts WHERE user_id IN ('boss-2','new-client')")
+            conn.commit()

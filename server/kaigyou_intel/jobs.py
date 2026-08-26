@@ -100,7 +100,7 @@ def get_steps(conn: psycopg.Connection, job_id: str) -> list[dict[str, Any]]:
         cur.execute(
             """
             SELECT step_number, step_name, status, output_json, error_message,
-                   started_at, completed_at, prompt_version, model,
+                   started_at, completed_at, prompt_version, model, attempts,
                    input_tokens, output_tokens, web_searches,
                    cache_read_tokens, cache_write_tokens
             FROM analysis_steps WHERE job_id = %s ORDER BY step_number
@@ -320,6 +320,36 @@ def fail_step(conn: psycopg.Connection, job_id: str, number: int, message: str) 
     conn.commit()
 
 
+def retry_step(conn: psycopg.Connection, job_id: str, number: int,
+               message: str) -> int:
+    """やり直せる失敗として記録し、そのステップを pending に戻す。
+
+    ``fail_step`` との違いは、Job を failed にしないことです。queued のまま
+    なので、次の呼び出しがそのまま拾い直します。人がボタンを押しに行く必要は
+    ありません。回数は数えておいて、いつまでも繰り返さないようにします。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE analysis_steps
+            SET status = 'pending', attempts = attempts + 1,
+                error_message = %s, started_at = NULL
+            WHERE job_id = %s AND step_number = %s
+            RETURNING attempts
+            """, (message[:4000], job_id, number))
+        row = cur.fetchone()
+    conn.commit()
+    return int(row["attempts"]) if row else 0
+
+
+def attempts_for(conn: psycopg.Connection, job_id: str, number: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempts FROM analysis_steps "
+                    "WHERE job_id = %s AND step_number = %s", (job_id, number))
+        row = cur.fetchone()
+    return int(row["attempts"]) if row else 0
+
+
 def reset_step(conn: psycopg.Connection, job_id: str, number: int) -> None:
     """このステップと、それ以降を pending に戻す。
 
@@ -331,7 +361,7 @@ def reset_step(conn: psycopg.Connection, job_id: str, number: int) -> None:
             """
             UPDATE analysis_steps
             SET status = 'pending', output_json = NULL, error_message = NULL,
-                started_at = NULL, completed_at = NULL
+                started_at = NULL, completed_at = NULL, attempts = 0
             WHERE job_id = %s AND step_number >= %s
             """, (job_id, number))
         cur.execute("DELETE FROM analysis_reports WHERE job_id = %s", (job_id,))

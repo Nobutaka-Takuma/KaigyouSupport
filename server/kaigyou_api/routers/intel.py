@@ -245,6 +245,26 @@ def retry_step(job_id: str, step_number: int,
     return {"job_id": job_id, "restarted_from": step_number, "status": "queued"}
 
 
+@router.get("/me", summary="いまサインインしている利用者")
+def whoami(conn: psycopg.Connection = Depends(get_conn),
+           account: acc.Account | None = Depends(acc.current_account),
+           ) -> dict[str, Any]:
+    """画面が「誰として動いているか」を知るための1本。
+
+    管理のリンクを全員に見せると、押せない場所への入口が増えます。かといって
+    リンクの出し分けのためだけに管理APIを叩かせるのも重い。
+    """
+    if account is None:
+        return {"signed_in": False, "accounts_enabled": acc.accounts_enabled()}
+    return {
+        "signed_in": True,
+        "accounts_enabled": True,
+        "email": account.email,
+        "is_admin": account.is_admin,
+        "quota": _quota_view(conn, account),
+    }
+
+
 @router.get("/analyses", summary="自分のレポート一覧")
 def list_analyses(limit: int = Query(50, ge=1, le=200),
                   conn: psycopg.Connection = Depends(get_conn),
