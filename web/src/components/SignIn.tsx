@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { auth, authConfigured, requestPasswordReset, storedSession } from "../lib/auth";
+import { auth, AuthUnreachable, authConfigured, requestPasswordReset, storedSession }
+  from "../lib/auth";
 
 /**
  * サインイン。
@@ -68,11 +69,15 @@ export function SignIn({ onChange }: { onChange?: (email: string | null) => void
     setError(null);
     try {
       await requestPasswordReset(email);
-    } catch {
-      /* 理由は伏せます。上のコメントの通り。 */
+      setNotice("登録されているアドレスであれば、再設定用のメールを送りました。");
+    } catch (err) {
+      // 「届かなかった」だけは伏せません。送れていないのに送ったと言うのは
+      // 嘘で、利用者はメールを待ち続けることになります。それ以外の理由
+      // （そのアドレスは無い等）は伏せたままにします。
+      if (err instanceof AuthUnreachable) setError(err.message);
+      else setNotice("登録されているアドレスであれば、再設定用のメールを送りました。");
     } finally {
       setBusy(false);
-      setNotice("登録されているアドレスであれば、再設定用のメールを送りました。");
     }
   }
 

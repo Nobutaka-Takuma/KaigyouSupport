@@ -43,16 +43,54 @@ function store(session: Session | null) {
   }
 }
 
+/**
+ * Supabase の Auth を叩く。届かなかったときは、届かなかったと言う。
+ *
+ * `fetch` は接続そのものに失敗すると TypeError("Failed to fetch") を投げます。
+ * これをそのまま画面に出すと、利用者には英語で「取得に失敗」とだけ見えて、
+ * パスワードを間違えたのか、こちらの設定が壊れているのか、回線が悪いのかが
+ * 区別できません。実際にこれで詰まりました。
+ *
+ * 分けられる情報は分けて出します。原因の切り分けはこちらの仕事で、
+ * 利用者に推測させるものではありません。
+ */
+export class AuthUnreachable extends Error {
+  constructor(readonly url: string) {
+    super("認証サーバに接続できませんでした。"
+      + "ネットワークか、サイト側の設定（接続先）に問題があります。"
+      + "しばらく待っても直らないときは、運営者にこの画面を伝えてください。");
+    this.name = "AuthUnreachable";
+  }
+}
+
+async function call(path: string, init: RequestInit): Promise<Response> {
+  if (!URL_KEY || !ANON_KEY) {
+    throw new Error("サインインの接続先が設定されていません。運営者にお知らせください。");
+  }
+  const url = `${URL_KEY.replace(/\/+$/, "")}/auth/v1${path}`;
+  try {
+    return await fetch(url, init);
+  } catch {
+    // ここに来るのは HTTP 応答が返らなかったときだけ。401 や 400 は下で扱います。
+    throw new AuthUnreachable(url);
+  }
+}
+
 async function post(path: string, body: unknown): Promise<Session> {
-  const res = await fetch(`${URL_KEY}/auth/v1${path}`, {
+  const res = await call(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: ANON_KEY },
     body: JSON.stringify(body),
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    // 資格情報の誤りだけは、はっきりそう言います。いちばん多い失敗で、
+    // かつ利用者が自分で直せる唯一の失敗だからです。
+    if (res.status === 400 || res.status === 401) {
+      throw new Error("メールアドレスかパスワードが違います。");
+    }
     throw new Error(data.error_description || data.msg || data.error
-      || "サインインできませんでした。");
+      || `サインインできませんでした（${res.status}）。`);
   }
   const session: Session = {
     access_token: data.access_token,
@@ -165,7 +203,7 @@ export function takeRecoveryGrant(): RecoveryGrant | { error: string } | null {
 export async function setPassword(password: string): Promise<void> {
   const session = storedSession();
   if (!session) throw new Error("セッションがありません。リンクをもう一度開いてください。");
-  const res = await fetch(`${URL_KEY}/auth/v1/user`, {
+  const res = await call("/user", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -183,7 +221,7 @@ export async function setPassword(password: string): Promise<void> {
 
 /** 再設定メールを送る。存在しないアドレスでも同じ応答を返します。 */
 export async function requestPasswordReset(email: string): Promise<void> {
-  const res = await fetch(`${URL_KEY}/auth/v1/recover`, {
+  const res = await call("/recover", {
     method: "POST",
     headers: { "Content-Type": "application/json", apikey: ANON_KEY },
     body: JSON.stringify({ email }),
