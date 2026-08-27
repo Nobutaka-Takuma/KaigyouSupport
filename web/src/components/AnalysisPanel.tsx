@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../lib/api";
+import { authConfigured, storedSession } from "../lib/auth";
 import type { AnalysisReport, AnalysisStatus, AnalysisStep } from "../lib/types";
 import { AnalysisReportView } from "./AnalysisReport";
 
@@ -14,6 +15,46 @@ import { AnalysisReportView } from "./AnalysisReport";
  * 進捗はポーリングで取ります。WebSocketにしないのは、Vercelの関数では
  * 保てないからで、これは実行時間の上限と同じ制約です。
  */
+
+/**
+ * この失敗は、下の「分析トークン」欄の話か。
+ *
+ * 401 が返る理由は2通りあり、直し方が正反対です。
+ *
+ *   アカウントを使わない環境 → 共有シークレット（この欄）が要る
+ *   アカウントを使う環境     → サインインの問題。この欄は見られもしない
+ *
+ * 以前は 401 と 503 なら何でも欄を出していたので、署名方式やアカウント権限の
+ * エラーが「分析トークン」の下に出て、利用者は無関係な欄を疑うことに
+ * なっていました。実際にそれで手が止まりました。
+ *
+ * 判定は状態コードではなくサーバの文言で行います。どちらの入口を使うかを
+ * 決めているのはサーバ（intel.py の create_analysis）で、こちらの設定から
+ * 推測すると、client と server の設定がずれたときに黙って食い違います。
+ * これらの語を出すのは _authorise の2つの失敗だけです。
+ */
+function aboutTheToken(err: ApiError): boolean {
+  return /X-Analysis-Token|KAIGYOU_ANALYSIS_TOKEN/.test(err.message);
+}
+
+/**
+ * サーバの言い分に、利用者が次にする一手を足す。
+ *
+ * 「ログインが必要です」は正しいが、サインイン欄は画面のいちばん上にあって
+ * ここからは見えません。どこを押せばいいかまで言わないと、正しい文言でも
+ * 迷わせます。
+ */
+function explain(err: ApiError): string {
+  if (!authConfigured()) return err.message;
+  // 共有シークレットの話なら、サーバの文言をそのまま。ここで「サインインを」と
+  // 言い換えると、押す場所のない案内になります（サーバはトークンで守っていて、
+  // サインインしても通りません）。client と server の設定がずれた環境で起きます。
+  if (aboutTheToken(err)) return err.message;
+  if (err.status === 401 && !storedSession()) {
+    return "分析を始めるにはサインインが必要です。画面右上からサインインしてください。";
+  }
+  return err.message;
+}
 
 const TOKEN_KEY = "kaigyou.analysisToken";
 const JOB_KEY = "kaigyou.lastJob";
@@ -132,10 +173,8 @@ export function AnalysisPanel({
       setAttempt((n) => n + 1);
       setNeedsToken(false);
     } catch (err) {
-      if (err instanceof ApiError && (err.status === 401 || err.status === 503)) {
-        setNeedsToken(true);
-      }
-      setError(err instanceof ApiError ? err.message : String(err));
+      if (err instanceof ApiError && aboutTheToken(err)) setNeedsToken(true);
+      setError(err instanceof ApiError ? explain(err) : String(err));
     } finally {
       setStarting(false);
     }
@@ -155,7 +194,7 @@ export function AnalysisPanel({
       await api.analysis.retryFrom(jobId, from, token || undefined);
       setAttempt((n) => n + 1);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(err instanceof ApiError ? explain(err) : String(err));
     }
   }
 
@@ -200,7 +239,9 @@ export function AnalysisPanel({
         数分かかり、1件あたり1ドル前後のAPI費用が発生します。
       </p>
 
-      {(needsToken || token) && (
+      {/* サーバが要求したときだけ。保存済みの値があっても、アカウント運用の
+          画面では出しません（使われないので、あるだけ誤解を招く）。 */}
+      {(needsToken || (token && !authConfigured())) && (
         <label className="analysis__token">
           <span>分析トークン</span>
           <input
