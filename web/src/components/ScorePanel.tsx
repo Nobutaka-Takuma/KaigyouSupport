@@ -204,6 +204,7 @@ export function LandPriceTable({ analysis }: { analysis: CandidateAnalysis }) {
       <p className="muted small">{land.note}</p>
 
       {land.by_use.length > 0 && (
+        <div className="panel-table">
         <table className="metrics">
           <thead>
             <tr>
@@ -232,6 +233,7 @@ export function LandPriceTable({ analysis }: { analysis: CandidateAnalysis }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       {land.nearest.length > 0 && (
@@ -359,6 +361,7 @@ export function PopulationOutlookTable({ analysis }: { analysis: CandidateAnalys
         {outlook.estimate_label}（基準年 {outlook.base_year}）。
         推計であって予測ではなく、出生・死亡・移動の仮定の上に成り立ちます。
       </p>
+      <div className="panel-table">
       <table className="metrics">
         <thead>
           <tr>
@@ -390,6 +393,12 @@ export function PopulationOutlookTable({ analysis }: { analysis: CandidateAnalys
           </tr>
         </tbody>
       </table>
+      </div>
+      {shown.some((y) => y.elderly_share == null) && (
+        <p className="muted small">
+          「—」は公表データに年齢内訳が無い年です（基準年は総人口のみ）。
+        </p>
+      )}
     </>
   );
 }

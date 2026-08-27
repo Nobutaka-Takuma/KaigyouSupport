@@ -2891,3 +2891,40 @@ def test_loading_one_prefecture_does_not_erase_another(conn, tmp_path, monkeypat
                         "WHERE source_id = 'mlit_future_population'")
             cur.execute("DELETE FROM data_sources WHERE id = 'mlit_future_population'")
         conn.commit()
+
+
+def test_a_year_without_an_age_breakdown_is_not_reported_as_zero(conn, dataset, monkeypatch):
+    """「分からない」を「いない」と言い換えない。
+
+    公表データの基準年（2020）は総人口のみで年齢内訳が無い。`or 0` と
+    書いていたので、画面に「65歳以上 0.0%」と出た。実際に指摘を受けた。
+    """
+    from kaigyou_core import dataset as ds
+
+    rows = [{"year": 2020, "base_year": 2020, "estimate_label": "x",
+             "source_date": None, "population": 20720.0, "age_0_14": None,
+             "age_15_64": None, "age_65_plus": None, "age_75_plus": None,
+             "mesh_count": 21},
+            {"year": 2040, "base_year": 2020, "estimate_label": "x",
+             "source_date": None, "population": 18731.0, "age_0_14": 2000.0,
+             "age_15_64": 10000.0, "age_65_plus": 6000.0, "age_75_plus": 3800.0,
+             "mesh_count": 21}]
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, *a, **k): pass
+        def fetchall(self): return rows
+
+    class FakeConn:
+        def cursor(self, *a, **k): return FakeCursor()
+
+    monkeypatch.setattr(ds, "table_exists", lambda *a, **k: True, raising=False)
+    import kaigyou_core.db as db
+    monkeypatch.setattr(db, "table_exists", lambda *a, **k: True)
+
+    out = ds.population_outlook(FakeConn(), 35.0, 139.0, 1000, 500)
+    by_year = {y["year"]: y for y in out["years"]}
+    assert by_year[2020]["elderly_share"] is None, "内訳が無い年は None のまま"
+    assert by_year[2020]["late_elderly_share"] is None
+    assert by_year[2040]["elderly_share"] == round(6000.0 / 18731.0, 3)

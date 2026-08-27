@@ -526,8 +526,12 @@ def population_outlook(conn: psycopg.Connection, lat: float, lng: float,
         "age_65_plus": _round(r["age_65_plus"]),
         # 75歳以上を分けて持つのは、通院と訪問で開業方針が変わるからです。
         "age_75_plus": _round(r["age_75_plus"]),
-        "elderly_share": (None if not r["population"]
-                          else round(float(r["age_65_plus"] or 0)
+        # `or 0` を書いてはいけないところ。年齢内訳が無い年（公表データの
+        # 2020 は総人口のみ）に 0 を入れると、画面に「65歳以上 0.0%」と出ます。
+        # **「分からない」を「いない」と言い換えたことになります。** 実際に
+        # そう表示され、指摘を受けました。無いものは None のまま渡します。
+        "elderly_share": (None if not r["population"] or r["age_65_plus"] is None
+                          else round(float(r["age_65_plus"])
                                      / float(r["population"]), 3)),
         "late_elderly_share": (None if not r["population"] or r["age_75_plus"] is None
                                else round(float(r["age_75_plus"])

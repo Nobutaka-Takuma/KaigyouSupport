@@ -543,6 +543,28 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .land-price__nearest { margin: 0.25rem 0 0.75rem; padding-left: 1.1rem; }
 .land-price__nearest li { margin-bottom: 0.25rem; }
 
+/* パネルの中の表。
+ *
+ * .metrics には基本のスタイルがなく、素の <table> のままでした。パネルは
+ * 420px しかないので、列が増えると見出しが「用途区/分」「地点/数」のように
+ * 折り返して崩れます。.datatable と同じ見た目に揃えます。 */
+.metrics { width: 100%; border-collapse: collapse; font-size: 13px; }
+.metrics th, .metrics td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.metrics th { color: var(--muted); font-weight: 600; font-size: 12px; }
+/* 数字は右寄せ。桁を比べるための列なので、揃っていないと読めません。 */
+.metrics td + td, .metrics th + th { text-align: right; white-space: nowrap; }
+/* 行の名前は折り返さない。「2020年=100」が2行になると表がずれて見えます。 */
+.metrics td:first-child, .metrics th:first-child { white-space: nowrap; }
+
+/* 狭いパネルに収まらない表は、縮めずに横スクロールさせます。詰め込むと
+ * 桁が読めなくなり、表としての用を成しません。 */
+.panel-table { overflow-x: auto; margin-bottom: 0.75rem; }
+
 /* 表示中のモデルの行。並べたときにどれを見ているかが分かるように。 */
 .metrics tr.is-active { background: var(--accent-soft, #eff6ff); font-weight: 600; }
 
