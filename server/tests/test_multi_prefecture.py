@@ -14,6 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import psycopg
+import pathlib
+
 import pytest
 
 from kaigyou_core import config as cfg
@@ -473,3 +475,29 @@ def test_the_etl_asks_for_a_longer_statement_timeout(db):
         with conn.cursor() as cur:
             cur.execute("SELECT 1 AS ok")
             assert cur.fetchone()["ok"] == 1
+
+
+def test_the_load_step_gets_the_longer_timeout(db, monkeypatch, tmp_path):
+    """取り込みで最も長い1文が、Web向けの短い上限で殺されないこと。
+
+    実測：街路ネットワークの noding が statement timeout で落ち、
+    374,151 本が 0 になった。延長する仕組みは db.py にあったのに、
+    スコア計算にしか繋いでいなかった。
+    """
+    from kaigyou_etl import pipeline
+
+    seen: list[int] = []
+    real = pipeline.relax_statement_timeout
+
+    def spy(conn, milliseconds=None):
+        seen.append(milliseconds if milliseconds is not None else -1)
+        return real(conn) if milliseconds is None else real(conn, milliseconds)
+
+    monkeypatch.setattr(pipeline, "relax_statement_timeout", spy)
+
+    # load まで到達する最小の経路。ここでは呼ばれたことだけを見ます。
+    from kaigyou_core.db import ETL_STATEMENT_TIMEOUT_MS
+    assert ETL_STATEMENT_TIMEOUT_MS >= 600_000, "noding が収まる長さであること"
+    assert "relax_statement_timeout(data_conn)" in \
+        (pathlib.Path(pipeline.__file__).read_text(encoding="utf-8")), \
+        "load の手前で延長すること"

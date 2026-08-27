@@ -15,6 +15,7 @@ from typing import Any, Mapping
 import psycopg
 
 from kaigyou_core import config as cfg
+from kaigyou_core.db import relax_statement_timeout
 from kaigyou_etl.acquisition import (
     AcquisitionError,
     AcquisitionLog,
@@ -138,6 +139,17 @@ def run_source(source_id: str, *, input_path: Path | None = None,
             result.error_type, result.error_message = exc.error_type, str(exc)
             _skip_rest(log, source_id, ("load",), result, exc)
             return result
+
+        # 取り込みはバッチです。managed な DB は Web リクエスト向けの短い
+        # statement_timeout を持っていて（Supabase は2分）、ETL でいちばん長い
+        # 1文はそれを超えます。実測：街路ネットワークの noding が
+        # `canceling statement due to statement timeout` で落ち、374,151 本が
+        # 0 になりました。延長する仕組みは db.py にあったのに、スコア計算
+        # （scores.py）にしか繋いでいませんでした。
+        #
+        # 断られても続けます。ほとんどの取り込みは短い文の繰り返しで、
+        # 延長できなくても通ります。
+        relax_statement_timeout(data_conn)
 
         try:
             with log.step(source_id, "load") as rec:
