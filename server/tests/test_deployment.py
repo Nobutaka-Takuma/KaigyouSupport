@@ -890,15 +890,50 @@ def test_the_hosted_worker_fits_inside_a_function_call():
     assert "queued" in source, "終わったら待ち行列に戻すこと"
 
 
-def test_the_function_timeout_is_within_the_hobby_limit():
-    """Hobby は300秒。ここを超える値を書くとデプロイが通りません。"""
+def test_the_function_timeout_matches_the_plan():
+    """Pro は800秒。プランの上限を超える値を書くとデプロイが通りません。"""
     import json
     from pathlib import Path
 
     config = json.loads((Path(__file__).resolve().parents[2] / "vercel.json")
                         .read_text(encoding="utf-8"))
     duration = config["functions"]["api/index.py"]["maxDuration"]
-    assert duration <= 300, "Pro に上げるまでは 300 秒以内"
+    assert duration <= 800, "Pro の上限は 800 秒"
+
+
+def test_the_worker_is_woken_on_a_schedule():
+    """Pro の Cron は分単位。Hobby のときは Supabase の pg_cron が代役だった。"""
+    import json
+    from pathlib import Path
+
+    config = json.loads((Path(__file__).resolve().parents[2] / "vercel.json")
+                        .read_text(encoding="utf-8"))
+    crons = config.get("crons") or []
+    assert any(c["path"] == "/api/worker/tick" for c in crons), \
+        "worker を起こすものが無ければ、Job は queued のまま止まる"
+
+
+def test_the_worker_budget_fits_the_function_limit():
+    """設定の秒数と vercel.json が食い違わないこと。
+
+    片方だけ直すと、殺される実行が増える（時間も費用も倍かかる）か、
+    使える時間を余らせて待ち時間が伸びるかのどちらかになります。
+    """
+    import json
+    from pathlib import Path
+
+    from kaigyou_core import config as cfg
+
+    root = Path(__file__).resolve().parents[2]
+    duration = json.loads((root / "vercel.json").read_text(encoding="utf-8"))[
+        "functions"]["api/index.py"]["maxDuration"]
+    worker = cfg.analysis_config().get("worker") or {}
+
+    assert worker["invocation_seconds"] <= duration, "設定が関数の上限を超えている"
+    assert worker["reserve_seconds"] < worker["invocation_seconds"], \
+        "1ステップぶんの余裕が、1呼び出しの持ち時間より大きい"
+    # 消えた実行に気づくまでの時間は、関数の上限より長く、倍よりは短く。
+    assert duration < worker["hosted_stale_after_minutes"] * 60 < duration * 2
 
 
 def test_the_schedule_example_is_not_applied_automatically():

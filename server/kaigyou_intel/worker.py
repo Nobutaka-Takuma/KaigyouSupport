@@ -260,12 +260,34 @@ def stale_after() -> float:
     return float(settings.get("stale_after_minutes", 20))
 
 
+def time_budget() -> tuple[float, float]:
+    """(1回の呼び出しに使える秒数, 1ステップの最長の見込み)。
+
+    手元の worker には上限が無いので、無限として扱います。
+    """
+    settings = cfg.analysis_config().get("worker") or {}
+    if not hosted():
+        return (float("inf"), 0.0)
+    return (float(settings.get("invocation_seconds", 800)),
+            float(settings.get("reserve_seconds", 420)))
+
+
 def tick(conn: psycopg.Connection, *, stale_after_minutes: float | None = None,
          progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    """外から定期的に叩かれる入口。1 回につき 1 ステップ。
+    """外から定期的に叩かれる入口。時間が許すかぎり続けて進めます。
 
     Vercel Cron（Pro なら1分ごと）か、Supabase の pg_cron から呼びます。
     どちらから叩いても同じことをします。
+
+    **1 呼び出し 1 ステップだと、ステップの間に cron の間隔がまるごと空きます。**
+    5 段で最大5分、平均2分半。ただ待っているだけの時間です。関数の上限が
+    800秒 になったので、残り時間が足りるうちは続けて回します。
+
+    判断は「足りるか分からないなら進まない」。次の段に必要な時間は事前には
+    分からないので、設定に置いた**1ステップの最長の見込み**（reserve_seconds）
+    を使い、それが残っていなければ queued に戻して次の呼び出しに任せます。
+    途中で殺されるとそのステップは丸ごとやり直しで、時間も費用も倍かかります。
+    早めに手を引くほうが安い。
     """
     say = progress or (lambda _m: None)
     if stale_after_minutes is None:
@@ -277,8 +299,32 @@ def tick(conn: psycopg.Connection, *, stale_after_minutes: float | None = None,
     job_id = jobs.claim_job(conn)
     if job_id is None:
         return {"claimed": None, "recovered": recovered, "status": "idle"}
-    outcome = advance(conn, job_id, progress=say)
-    return {**outcome, "claimed": job_id, "recovered": recovered}
+
+    budget, reserve = time_budget()
+    started = time.monotonic()
+    steps_done: list[int] = []
+    outcome: dict[str, Any] = {}
+
+    while True:
+        outcome = advance(conn, job_id, progress=say)
+        if outcome.get("step") is not None:
+            steps_done.append(int(outcome["step"]))
+        # 続きがあるときだけ queued に戻ります。それ以外（完了・失敗・
+        # 待ち・やり直し待ち）は、この呼び出しでは何もしません。
+        if outcome.get("status") != "queued":
+            break
+        spent = time.monotonic() - started
+        if spent + reserve >= budget:
+            say(f"  残り時間が足りないので、ここまで（{spent:.0f}秒使用）。"
+                "続きは次の呼び出しが拾います。")
+            break
+        # 続けて拾い直します。claim は running を立てるので、同時に走る
+        # 別の呼び出しがこの Job を横取りすることはありません。
+        if jobs.claim_specific(conn, job_id) is None:
+            break
+
+    return {**outcome, "claimed": job_id, "recovered": recovered,
+            "steps_completed": steps_done}
 
 
 def run_job(conn: psycopg.Connection, job_id: str,

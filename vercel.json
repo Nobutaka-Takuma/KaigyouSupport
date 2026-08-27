@@ -5,8 +5,14 @@
   "functions": {
     "api/index.py": {
       "memory": 1024,
-      "maxDuration": 300,
+      "maxDuration": 800,
       "includeFiles": "{config,server,web/dist}/**"
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/worker/tick",
+      "schedule": "* * * * *"
+    }
+  ]
 }

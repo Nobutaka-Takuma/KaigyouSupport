@@ -15,6 +15,12 @@ API 費用は運営者持ち、利用料は月額で請求（請求書は手で�
 | Hobby | 300秒（5分） | **1日1回のみ** |
 | Pro（$20/月） | 800秒（13分） | 1分ごと |
 
+**現在は Pro です。** `vercel.json` の `crons` が毎分 `/api/worker/tick` を叩き、
+1 回の呼び出しで**時間が許すかぎり続けて**進めます（`config/analysis.yaml` の
+`invocation_seconds` と `reserve_seconds`）。Supabase の pg_cron は不要になったので、
+`select cron.unschedule('kaigyou-worker-tick');` で止めてください。両方動いていても
+壊れませんが、無駄に関数を起こします。
+
 そこで `/api/worker/tick` は **1 回につき 1 ステップだけ**進めて、Job を待ち行列に
 戻します。次の呼び出しが続きを拾います。状態は全部 DB にあるので、途中で関数が
 消えても続きから流れます（消えた実行は `stale_after_minutes` で待ち行列に戻ります）。

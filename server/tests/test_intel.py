@@ -2531,5 +2531,69 @@ def test_the_wait_for_a_lost_run_matches_the_environment(monkeypatch):
     hosted = worker.stale_after()
 
     assert hosted < local, "関数のほうが短く待つ"
-    assert hosted * 60 > 300, "関数の上限（300秒）は超えて待つ。でないと生きた実行を殺す"
-    assert hosted * 60 < 600, "上限の倍も待たない。それは空白でしかない"
+    # 具体的な秒数は vercel.json と突き合わせて test_deployment 側で見ます。
+    # ここで見るのは「環境によって変わること」だけ。
+    assert hosted > 0
+
+
+def test_one_call_runs_as_many_steps_as_the_time_allows(conn, dataset, monkeypatch):
+    """ステップの間に cron の間隔をまるごと空けない。
+
+    1 呼び出し 1 ステップだと、5 段で最大5分（平均2分半）をただ待つことに
+    なる。関数の上限が 800秒 になったので、残り時間が足りるうちは続ける。
+    """
+    from kaigyou_intel import client as llm
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
+    monkeypatch.setattr(worker, "RUNNERS", {
+        n: (lambda _p: ({"ok": True}, llm.Usage(input_tokens=10, output_tokens=5), [])) for n in sorted(jobs.STEP_NAMES)})
+    monkeypatch.setattr(worker.report, "save", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(worker, "time_budget", lambda: (800.0, 420.0))
+    # tick は「いちばん古い queued」を拾います。他のテストが残した Job を
+    # 掴まないよう、この Job を指すよう固定します。
+    monkeypatch.setattr(jobs, "claim_job", lambda _conn: job_id)
+    try:
+        outcome = worker.tick(conn)
+        assert outcome["status"] == "completed"
+        assert outcome["steps_completed"] == sorted(jobs.STEP_NAMES), \
+            "時間が足りるなら1回で最後まで"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_call_stops_before_it_would_be_killed(conn, dataset, monkeypatch):
+    """足りるか分からないなら進まない。途中で殺されると丸ごとやり直しになる。"""
+    from kaigyou_intel import client as llm
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
+    monkeypatch.setattr(worker, "RUNNERS", {
+        n: (lambda _p: ({"ok": True}, llm.Usage(input_tokens=10, output_tokens=5), [])) for n in sorted(jobs.STEP_NAMES)})
+    # 残り時間が最初から足りない設定。1 段だけ進んで手を引くこと。
+    monkeypatch.setattr(worker, "time_budget", lambda: (100.0, 420.0))
+    monkeypatch.setattr(jobs, "claim_job", lambda _conn: job_id)
+    try:
+        outcome = worker.tick(conn)
+        assert outcome["steps_completed"] == [1], "1段で止める"
+        assert jobs.get_job(conn, job_id)["status"] == "queued", "続きは次の呼び出しへ"
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_local_worker_has_no_time_limit(monkeypatch):
+    """手元の worker は上限が無いので、時間を理由に手を引かない。"""
+    from kaigyou_intel import worker
+
+    for var in ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME", "K_SERVICE"):
+        monkeypatch.delenv(var, raising=False)
+    budget, reserve = worker.time_budget()
+    assert budget == float("inf") and reserve == 0.0
+
+    monkeypatch.setenv("VERCEL", "1")
+    budget, reserve = worker.time_budget()
+    assert budget > reserve > 0, "関数側は有限で、余裕を残す"
