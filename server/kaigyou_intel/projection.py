@@ -330,16 +330,30 @@ def allowed_numbers(payload: Mapping[str, Any]) -> set[str]:
             # 数値欄しか見ていなかったので、正しい引用が捏造として落ちました。
             for match in _NUMBER_IN_TEXT.finditer(node):
                 try:
-                    found.add(_canonical(float(match.group().replace(",", ""))))
+                    value = float(match.group(1).replace(",", ""))
                 except ValueError:
                     continue
+                # 書かれたままの値と、単位を掛けた値の**両方**を入れます。
+                # 「1.5万人」と書かれていれば、1.5 も 15000 も入力に現れた
+                # 数です。検査側（schemas._NUMBER）は単位を読んで 15000 を
+                # 探すので、こちらが 1.5 しか入れないと、前の段が書いた文章を
+                # 次の段がそのまま引用しただけで捏造として落ちます。
+                # 実測：STEP4 の「1.5万人」を STEP5 が引用して2回落ちました。
+                found.add(_canonical(value))
+                scale = _SCALE_IN_TEXT.get(match.group(2) or "")
+                if scale:
+                    found.add(_canonical(value * scale))
 
     walk(payload)
     return found
 
 
-#: 文章の中の数値。桁区切りと小数に対応します。
-_NUMBER_IN_TEXT = re.compile(r"\d[\d,]*(?:\.\d+)?")
+#: 文章の中の数値。桁区切り・小数・「万」「億」に対応します。
+#: **schemas._NUMBER と同じものを読むこと。** 集める側と検査する側で読み方が
+#: ずれると、正しい引用が捏造として落ちます。
+_NUMBER_IN_TEXT = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(万|億)?")
+
+_SCALE_IN_TEXT = {"万": 10_000.0, "億": 100_000_000.0}
 
 
 def _canonical(value: float) -> str:

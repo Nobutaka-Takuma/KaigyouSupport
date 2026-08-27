@@ -64,6 +64,22 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
 
     payload = build_input(conn, job, number)
 
+    # 前回落ちているなら、その理由を一緒に渡します。payload はそのまま
+    # JSON として user メッセージに載るので、どのステップでも同じように届きます。
+    #
+    # これが無いと、やり直しは**同じプロンプトの引き直し**でしかありません。
+    # 揺らぎで直る失敗（切れた JSON）は直りますが、決定的な失敗は何度でも
+    # 同じところで落ちます。実測：STEP5 が検算に落ち、2回とも同じ数字を
+    # 書いて2回とも落ちました。
+    previous = jobs.last_error(conn, job_id, number)
+    if previous:
+        payload = {**payload, "_前回の失敗": {
+            "内容": previous,
+            "指示": "同じ失敗を繰り返さないでください。指摘された箇所だけを直し、"
+                    "それ以外はこれまでどおりの方針で書いてください。"
+                    "数値は入力にあるものだけを使い、無いものは書かないでください。",
+        }}
+
     jobs.start_step(conn, job_id, number, payload, settings)
     # 例外はここでは握りません。やり直す価値があるかを判定してから記録します
     # （_handle_failure）。ここで failed と書いてしまうと、やり直せる失敗まで
@@ -153,6 +169,21 @@ def advance(conn: psycopg.Connection, job_id: str,
         return {"job_id": job_id, "status": "completed", "step": None}
 
     settings = llm.step_settings(number)
+
+    # 走らせる前に回数を見ます。_handle_failure は例外を捕まえたときにしか
+    # 通らないので、関数が強制終了された場合そこを通りません。ここで見ないと、
+    # 上限に収まらないステップが永久に回り続けます（費用だけが増えます）。
+    limit = _retry_limit()
+    attempts = jobs.attempts_for(conn, job_id, number)
+    if attempts >= limit:
+        reason = jobs.last_error(conn, job_id, number) or "原因は記録されていません。"
+        detail = f"STEP{number} を {attempts} 回試みましたが完了しませんでした: {reason}"
+        say(f"    打ち切り: {detail}")
+        jobs.fail_step(conn, job_id, number, detail)
+        jobs.release_job(conn, job_id, "failed", detail)
+        return {"job_id": job_id, "status": "failed", "step": number,
+                "attempt": attempts, "error": detail}
+
     say(f"  {job_id}: STEP{number} {settings['name']} …")
     try:
         result = run_step(conn, job_id, number)

@@ -187,9 +187,17 @@ def recover_stale(conn: psycopg.Connection, minutes: float) -> list[str]:
     済んだステップは触りません（要件 §32）。
     """
     with conn.cursor() as cur:
+        # 消えた実行も**1回の試行として数えます**。数えないと、上限を超える
+        # ステップ（Hobby の 300 秒に収まらない STEP2 など）が、記録も残さず
+        # 費用だけ増やしながら永久に回り続けます。関数が強制終了されるときは
+        # 例外が飛ばないので、_handle_failure を通らず attempts が増えません。
+        # 表に出る症状は「経過時間のカウンタが時々0に戻る」だけでした。
         cur.execute(
             """
-            UPDATE analysis_steps SET status = 'pending', started_at = NULL
+            UPDATE analysis_steps
+            SET status = 'pending', started_at = NULL, attempts = attempts + 1,
+                error_message = '実行が最後まで終わりませんでした'
+                                '（関数の実行時間の上限に当たった可能性があります）。'
             WHERE status = 'running' AND started_at < now() - make_interval(secs => %s)
             RETURNING job_id
             """, (minutes * 60.0,))
@@ -342,6 +350,23 @@ def retry_step(conn: psycopg.Connection, job_id: str, number: int,
     return int(row["attempts"]) if row else 0
 
 
+def last_error(conn: psycopg.Connection, job_id: str, number: int) -> str | None:
+    """このステップが前回どう失敗したか。
+
+    やり直しのときにモデルへ渡します。同じプロンプトを投げ直すだけでは、
+    **決定的な失敗は何度やっても同じところで落ちます**。実測：STEP5 が
+    「1.5万」を書いて検算に落ち、2回やり直して2回とも同じ数字を書きました。
+    理由を見せれば、その1点だけ直して書き直せます。
+
+    ``start_step`` が実行のたびに消すので、ここで読めるのは前回ぶんだけです。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT error_message FROM analysis_steps "
+                    "WHERE job_id = %s AND step_number = %s", (job_id, number))
+        row = cur.fetchone()
+    return (row["error_message"] or None) if row else None
+
+
 def attempts_for(conn: psycopg.Connection, job_id: str, number: int) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT attempts FROM analysis_steps "
@@ -360,10 +385,14 @@ def reset_step(conn: psycopg.Connection, job_id: str, number: int) -> None:
         cur.execute(
             """
             UPDATE analysis_steps
-            SET status = 'pending', output_json = NULL, error_message = NULL,
+            SET status = 'pending', output_json = NULL,
+                -- 起点のステップだけ、失敗の理由を残します。人がこのボタンを
+                -- 押した理由がまさにそれで、次の実行はそれを読んで書き直します
+                -- （run_step が payload に入れます）。後続は落ちていないので消します。
+                error_message = CASE WHEN step_number = %s THEN error_message END,
                 started_at = NULL, completed_at = NULL, attempts = 0
             WHERE job_id = %s AND step_number >= %s
-            """, (job_id, number))
+            """, (number, job_id, number))
         cur.execute("DELETE FROM analysis_reports WHERE job_id = %s", (job_id,))
         cur.execute(
             # started_at も消します。残すと、やり直した直後の画面に

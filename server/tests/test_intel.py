@@ -2420,3 +2420,94 @@ def test_failures_are_sorted_by_whether_retrying_helps():
     assert not failures.is_retryable("モデルが応答を拒否しました")
     # 分からないものはやり直しません。繰り返すのは費用だけが増える失敗の仕方です。
     assert not failures.is_retryable("なにか未知の例外")
+
+
+def test_a_number_the_previous_step_wrote_is_not_called_invented():
+    """前の段が「1.5万」と書いたら、次の段はそう引用してよい。
+
+    数値を集める側と検査する側で読み方がずれていた。集める側は「万」を
+    読まずに 1.5 だけを許可し、検査する側は 15000 を探した。前の段が書いた
+    文章を次の段がそのまま引用しただけで捏造として落ちる。しかも決定的なので、
+    やり直しても同じところで落ちる。実測：STEP5 が2回やり直して2回とも失敗。
+    """
+    from kaigyou_intel.projection import allowed_numbers
+    from kaigyou_intel.schemas import invented_numbers
+
+    known = allowed_numbers({"insight": "商圏人口はおよそ1.5万人です。"})
+    assert invented_numbers("商圏人口はおよそ1.5万人です。", known) == []
+    assert invented_numbers("市場は1.2億円", allowed_numbers({"n": "1.2億円の市場"})) == []
+    # 締めるところは締めたまま。書き換えは捕まえる。
+    assert invented_numbers("商圏人口は9.9万人です。", known) == ["9.9万"]
+    assert invented_numbers("48,000人", allowed_numbers({"population": 15234})) == ["48,000"]
+
+
+def test_a_retry_is_told_why_the_last_one_failed(conn, dataset, monkeypatch):
+    """同じプロンプトを投げ直すだけでは、決定的な失敗は永久に直らない。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    seen: list[dict] = []
+
+    def fussy(payload):
+        seen.append(dict(payload))
+        raise RuntimeError("構造化出力を受け取れませんでした")
+
+    monkeypatch.setattr(worker, "RUNNERS", {1: fussy})
+    monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {"a": 1})
+    try:
+        jobs.claim_specific(conn, job_id)
+        worker.advance(conn, job_id)
+        jobs.claim_specific(conn, job_id)
+        worker.advance(conn, job_id)
+
+        assert "_前回の失敗" not in seen[0], "1回目は前回が無い"
+        assert "構造化出力" in seen[1]["_前回の失敗"]["内容"], "2回目は理由を渡す"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_run_that_never_came_back_counts_as_an_attempt(conn, dataset):
+    """関数が強制終了されると例外が飛ばない。数えないと永久に回り続ける。"""
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+        with conn.cursor() as cur:   # 上限に当たって消えた実行を作る
+            cur.execute("UPDATE analysis_steps SET started_at = now() - interval '2 hours' "
+                        "WHERE job_id = %s AND step_number = 1", (job_id,))
+        conn.commit()
+
+        assert jobs.attempts_for(conn, job_id, 1) == 0
+        jobs.recover_stale(conn, 20)
+        assert jobs.attempts_for(conn, job_id, 1) == 1, "消えた実行も1回と数える"
+        assert "上限" in (jobs.last_error(conn, job_id, 1) or "")
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_step_that_keeps_dying_is_given_up_on(conn, dataset, monkeypatch):
+    """例外を経ずに消え続けるステップも、いつか打ち切る。"""
+    from kaigyou_intel import jobs, worker
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        for _ in range(worker._retry_limit()):
+            jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
+            with conn.cursor() as cur:
+                cur.execute("UPDATE analysis_steps SET started_at = now() - interval '2 hours' "
+                            "WHERE job_id = %s AND step_number = 1", (job_id,))
+            conn.commit()
+            jobs.recover_stale(conn, 20)
+
+        jobs.claim_specific(conn, job_id)
+        # RUNNERS を触らないので、走ってしまえば本物を呼ぼうとする。
+        # 走らせずに打ち切ることを確かめる。
+        outcome = worker.advance(conn, job_id)
+        assert outcome["status"] == "failed"
+        assert jobs.get_job(conn, job_id)["status"] == "failed"
+    finally:
+        _drop_job(job_id)
