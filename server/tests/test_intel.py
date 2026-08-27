@@ -2638,3 +2638,28 @@ def test_the_worker_says_so_when_no_secret_is_configured(monkeypatch):
     res = TestClient(app).post("/api/worker/tick")
     assert res.status_code == 503
     assert "CRON_SECRET" in res.json()["detail"]
+
+
+def test_the_worker_answers_a_get_because_that_is_what_cron_sends(monkeypatch):
+    """Vercel Cron は GET で叩く。POST だけにしていたので 404 を返していた。
+
+    実測（Vercel の Logs）：毎分きっちり呼ばれていて、毎回 404。
+    「cron が動いていない」ように見えるが、動いていて断られていた。
+    Supabase の pg_net は POST なので、両方受ける。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    monkeypatch.setenv("CRON_SECRET", "kagi")
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer kagi"}
+
+    for method in ("get", "post"):
+        res = getattr(client, method)("/api/worker/tick", headers=headers)
+        assert res.status_code != 404, f"{method.upper()} が 404 では cron が空振りする"
+        assert res.status_code != 405, f"{method.upper()} が 405 でも同じこと"
+
+    # 鍵が無ければ、どちらの方法でも断る。
+    assert client.get("/api/worker/tick").status_code == 401
+    assert client.post("/api/worker/tick").status_code == 401

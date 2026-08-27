@@ -330,7 +330,13 @@ def download_report(job_id: str,
 _WORKER_TOKEN_ENV = "KAIGYOU_WORKER_TOKEN"
 
 
-@router.post("/worker/tick", summary="分析を1ステップ進める（定期実行から呼ぶ）")
+# **GET も受けます。Vercel Cron は GET で叩きます。**
+# POST だけにしていたので、cron は毎分きっちり呼んでいたのに 404 が返り、
+# worker は一度も起きませんでした。ログを見るまで「cron が動いていない」
+# ように見えます（実際には動いていて、断られていた）。
+# Supabase の pg_net は POST で送るので、両方受けます。
+@router.api_route("/worker/tick", methods=["GET", "POST"],
+                  summary="分析を進める（定期実行から呼ぶ）")
 def worker_tick(
     x_worker_token: str | None = Header(None),
     authorization: str | None = Header(None),
