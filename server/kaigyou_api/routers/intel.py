@@ -357,9 +357,8 @@ def worker_tick(
 
     from kaigyou_intel.worker import tick
 
-    settings = cfg.analysis_config().get("worker") or {}
-    return tick(conn, stale_after_minutes=float(
-        settings.get("stale_after_minutes", 20)))
+    # 待ち方は worker 側が環境を見て決めます（関数の上限があるかどうか）。
+    return tick(conn)
 
 
 @router.get("/analysis/{job_id}/report", summary="最終レポート")

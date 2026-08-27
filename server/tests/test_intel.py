@@ -2511,3 +2511,25 @@ def test_a_step_that_keeps_dying_is_given_up_on(conn, dataset, monkeypatch):
         assert jobs.get_job(conn, job_id)["status"] == "failed"
     finally:
         _drop_job(job_id)
+
+
+def test_the_wait_for_a_lost_run_matches_the_environment(monkeypatch):
+    """関数の上限より長く待つのは、ただの空白。
+
+    手元の worker 用の 20 分をホスティング環境でも使っていたので、5 分で
+    死んだステップに気づくまで 15 分かかっていた。画面には経過時間だけが
+    増え続け、動いているように見える。実測：STEP4 が 15分7秒。
+    """
+    from kaigyou_intel import worker
+
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    local = worker.stale_after()
+
+    monkeypatch.setenv("VERCEL", "1")
+    hosted = worker.stale_after()
+
+    assert hosted < local, "関数のほうが短く待つ"
+    assert hosted * 60 > 300, "関数の上限（300秒）は超えて待つ。でないと生きた実行を殺す"
+    assert hosted * 60 < 600, "上限の倍も待たない。それは空白でしかない"

@@ -207,6 +207,17 @@ export function AnalysisPanel({
   // 数えはじめる時刻は「いま動いているステップが始まった時刻」。ジョブの作成
   // 時刻から数えると、worker を止めていた時間まで入ります（実測：worker を
   // 起動し直した直後に「経過 34分17秒」と出ました）。
+  // 応答が途絶えている疑い。ホスティングされた関数には実行時間の上限があり
+  // （Hobby 300秒）、それを超えて生きているステップは存在し得ません。にも
+  // かかわらず経過時間だけが増え続けると、動いているように見えます。実測：
+  // 5分で死んだ STEP4 の経過が15分まで伸びるのを、動作中として表示しました。
+  // 待ち行列に戻るまでは数分かかるので、そのことを言います。
+  const STALLED_AFTER_SEC = 330;
+  const stalledFor = runningStep?.started_at
+    ? (now - new Date(runningStep.started_at).getTime()) / 1000
+    : 0;
+  const stalled = stalledFor > STALLED_AFTER_SEC;
+
   const elapsed = queued
     ? null
     : since(runningStep?.started_at ?? status?.job.started_at, now);
@@ -267,6 +278,15 @@ export function AnalysisPanel({
             {elapsed && <> {elapsed}</>}
             {status.status_note && <> — {status.status_note}</>}
           </p>
+
+          {stalled && (
+            <p className="warn-inline">
+              STEP{runningStep?.step_number} からの応答が
+              {Math.floor(stalledFor / 60)}分以上ありません。実行が途中で
+              終わった可能性があります。数分のうちに自動でやり直します
+              （このまま待っていて構いません）。
+            </p>
+          )}
 
           {failedStep?.error_message && <FailureNote text={failedStep.error_message} />}
 

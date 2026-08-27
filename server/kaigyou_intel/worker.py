@@ -8,6 +8,7 @@ worker は記憶を持ちません。状態は全部 DB にあります。途中
 """
 from __future__ import annotations
 
+import os
 import time
 import traceback
 from typing import Any, Callable, Mapping
@@ -241,7 +242,25 @@ def _retry_limit() -> int:
     return max(1, int(settings.get("max_attempts", 3)))
 
 
-def tick(conn: psycopg.Connection, *, stale_after_minutes: float = 20.0,
+def hosted() -> bool:
+    """ホスティングされた関数の中か。
+
+    実行時間の上限があるかどうかで、待ち方を変えます。手元の worker は
+    好きなだけ動けるので、消えたと判断するまで長く待ってよい。関数は
+    上限で必ず殺されるので、上限より長く待つのはただの空白です。
+    """
+    return any(os.getenv(v) for v in ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME", "K_SERVICE"))
+
+
+def stale_after() -> float:
+    """消えたとみなすまでの分数。環境で変えます。"""
+    settings = cfg.analysis_config().get("worker") or {}
+    if hosted():
+        return float(settings.get("hosted_stale_after_minutes", 6))
+    return float(settings.get("stale_after_minutes", 20))
+
+
+def tick(conn: psycopg.Connection, *, stale_after_minutes: float | None = None,
          progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     """外から定期的に叩かれる入口。1 回につき 1 ステップ。
 
@@ -249,6 +268,8 @@ def tick(conn: psycopg.Connection, *, stale_after_minutes: float = 20.0,
     どちらから叩いても同じことをします。
     """
     say = progress or (lambda _m: None)
+    if stale_after_minutes is None:
+        stale_after_minutes = stale_after()
     recovered = jobs.recover_stale(conn, stale_after_minutes)
     if recovered:
         say(f"途中で止まっていたジョブ {len(recovered)} 件を待ち行列に戻しました。")
