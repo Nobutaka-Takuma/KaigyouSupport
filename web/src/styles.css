@@ -828,6 +828,58 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .signin--in { font-size: 0.82rem; color: #43506b; }
 .signin__error { flex: 1 1 100%; margin: 0; color: #b02a37; font-size: 0.8rem; }
 .signin__note { flex: 1 1 100%; margin: 0; color: #6b7280; font-size: 0.75rem; }
+/* 「パスワードを忘れた」。フォーム内の button なので、見た目だけ文字に戻します。 */
+.signin__link {
+  background: none;
+  border: none;
+  padding: 0 0.2rem;
+  color: #2b6cb0;
+  font-size: 0.78rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------- パスワードの設定 */
+/* メールのリンクで来た人に、まずこれだけをさせる。画面を覆うのは、
+ * この状態で他の操作をさせても意味が無いからです。 */
+.setup {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(18, 24, 38, 0.55);
+}
+.setup__card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: min(26rem, 100%);
+  padding: 1.6rem;
+  border-radius: 12px;
+  background: var(--panel, #fff);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+.setup__card h1 { margin: 0; font-size: 1.05rem; }
+.setup__card input {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line, #d9dee5);
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.setup__card input[hidden] { display: none; }
+.setup__card button {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid #2b6cb0;
+  border-radius: 6px;
+  background: #2b6cb0;
+  color: #fff;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.setup__error { margin: 0; color: #b02a37; font-size: 0.82rem; }
 
 /* ----------------------------------------------------- マイレポート */
 .reports { list-style: none; margin: 1rem 0 0; padding: 0; }

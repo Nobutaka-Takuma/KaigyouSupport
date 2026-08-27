@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { auth, authConfigured, storedSession } from "../lib/auth";
+import { auth, authConfigured, requestPasswordReset, storedSession } from "../lib/auth";
 
 /**
  * サインイン。
@@ -15,6 +15,7 @@ export function SignIn({ onChange }: { onChange?: (email: string | null) => void
   const [password, setPassword] = useState("");
   const [signedIn, setSignedIn] = useState(() => Boolean(storedSession()));
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -50,6 +51,31 @@ export function SignIn({ onChange }: { onChange?: (email: string | null) => void
     }
   }
 
+  /** 再設定メールを送る。
+   *
+   * 発行制なので「新規登録」はありませんが、パスワードを忘れる人は居ます。
+   * これが無いと、そのたびに運営者が Supabase の管理画面を開くことになります。
+   *
+   * 送れたかどうかに関わらず同じ文言を返します。どのアドレスが登録済みかを
+   * 画面から数えられるようにしないためです。
+   */
+  async function reset() {
+    if (!email) {
+      setError("メールアドレスを入力してから押してください。");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await requestPasswordReset(email);
+    } catch {
+      /* 理由は伏せます。上のコメントの通り。 */
+    } finally {
+      setBusy(false);
+      setNotice("登録されているアドレスであれば、再設定用のメールを送りました。");
+    }
+  }
+
   return (
     <form className="signin" onSubmit={submit}>
       <input type="email" placeholder="メールアドレス" value={email} required
@@ -59,7 +85,11 @@ export function SignIn({ onChange }: { onChange?: (email: string | null) => void
              autoComplete="current-password"
              onChange={(e) => setPassword(e.target.value)} />
       <button disabled={busy}>{busy ? "…" : "サインイン"}</button>
+      <button type="button" className="signin__link" disabled={busy} onClick={reset}>
+        パスワードを忘れた
+      </button>
       {error && <p className="signin__error">{error}</p>}
+      {notice && <p className="signin__note">{notice}</p>}
       <p className="signin__note">
         アカウントは発行制です。お持ちでない方は運営者にお問い合わせください。
       </p>

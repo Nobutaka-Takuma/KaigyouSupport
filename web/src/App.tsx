@@ -9,6 +9,7 @@ import { AboutPage } from "./pages/AboutPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AdminPage } from "./pages/AdminPage";
 import { SignIn } from "./components/SignIn";
+import { PasswordSetup } from "./components/PasswordSetup";
 
 export default function App() {
   // 管理のリンクは管理者にだけ。押せない場所への入口を増やさない。
@@ -21,6 +22,10 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* メールのリンクで来た人は、まずここ。断片を読むのは mount 時の一度きり
+          なので、いちばん外側に置きます。 */}
+      <PasswordSetup />
+
       <header className="app__header">
         <div className="app__brand">
           🦷 <span>Dental Location Analyzer</span>

@@ -93,3 +93,104 @@ export const auth = {
     }
   },
 };
+
+/* ------------------------------------------------------- パスワードの設定 */
+
+/**
+ * メールのリンクから戻ってきたときの URL 断片。
+ *
+ * Supabase の招待・パスワード復旧のリンクは、最終的に Site URL へ
+ * `#access_token=...&refresh_token=...&type=recovery` の形で戻します。
+ * トークンが `#` の後ろにあるのは、サーバのログに残さないためです。
+ * 誰も読まなければ、ただのトップページが表示されて終わります。
+ */
+export interface RecoveryGrant {
+  kind: "recovery" | "invite" | "signup" | "magiclink";
+  email?: string;
+}
+
+/** JWT の中身。検証はサーバ側の仕事で、ここでは表示のために覗くだけ。 */
+function claims(token: string): Record<string, unknown> {
+  try {
+    const body = token.split(".")[1];
+    return JSON.parse(atob(body.replace(/-/g, "+").replace(/_/g, "/")));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * URL 断片を読み、あれば取り込む。読んだ断片は履歴から消します。
+ *
+ * 消すのは、リロードや「戻る」でもう一度使われないようにするためと、
+ * アドレスバーにトークンを晒したままにしないためです。
+ */
+export function takeRecoveryGrant(): RecoveryGrant | { error: string } | null {
+  const hash = window.location.hash.replace(/^#/, "");
+  if (!hash.includes("access_token=") && !hash.includes("error=")) return null;
+  const params = new URLSearchParams(hash);
+  const clear = () =>
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+
+  const error = params.get("error_description") || params.get("error");
+  if (error) {
+    clear();
+    // 期限切れがいちばん多いので、そうと分かる言葉にします。
+    return { error: /expired|invalid/i.test(error)
+      ? "リンクの有効期限が切れています。もう一度パスワード再設定を依頼してください。"
+      : decodeURIComponent(error) };
+  }
+
+  const access_token = params.get("access_token");
+  const refresh_token = params.get("refresh_token");
+  if (!access_token || !refresh_token) return null;
+
+  const payload = claims(access_token);
+  store({
+    access_token,
+    refresh_token,
+    expires_at: Math.floor(Date.now() / 1000) + Number(params.get("expires_in") ?? 3600),
+    email: typeof payload.email === "string" ? payload.email : undefined,
+  });
+  clear();
+  const type = params.get("type") ?? "recovery";
+  return {
+    kind: (["recovery", "invite", "signup", "magiclink"].includes(type)
+      ? type : "recovery") as RecoveryGrant["kind"],
+    email: typeof payload.email === "string" ? payload.email : undefined,
+  };
+}
+
+/** いま持っているトークンで、自分のパスワードを設定する。 */
+export async function setPassword(password: string): Promise<void> {
+  const session = storedSession();
+  if (!session) throw new Error("セッションがありません。リンクをもう一度開いてください。");
+  const res = await fetch(`${URL_KEY}/auth/v1/user`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: ANON_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error_description || data.msg || data.error
+      || "パスワードを設定できませんでした。");
+  }
+}
+
+/** 再設定メールを送る。存在しないアドレスでも同じ応答を返します。 */
+export async function requestPasswordReset(email: string): Promise<void> {
+  const res = await fetch(`${URL_KEY}/auth/v1/recover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: ANON_KEY },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error_description || data.msg || data.error
+      || "メールを送信できませんでした。");
+  }
+}
