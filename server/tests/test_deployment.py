@@ -1004,3 +1004,24 @@ def test_a_missing_projection_is_named_rather_than_ignored(tmp_path):
     found = discover(tmp_path, cfg.sources_config()["sources"])
     assert any("将来推計人口" in n for n in found.optional_missing)
     assert any("将来推計人口" in n for n in found.notes)
+
+
+@pytest.mark.parametrize("name, code", [
+    ("500m_mesh_2024_22_SHP.zip", "22"),
+    ("500m_mesh_2024_13_SHP.zip", "13"),
+    ("500m_mesh_2024_01_SHP.zip", "01"),
+    # 年を都道府県と読まない。`_(\d{2})_` だけだと `_20` を拾う。
+    ("500m_mesh_2024_99_SHP.zip", None),
+    ("S12-25_GML.zip", None),
+])
+def test_the_projection_file_names_its_prefecture(name, code):
+    """フォルダの取り違えを、このファイルだけ素通りさせない。
+
+    メッシュ系は中身に都道府県が書かれていないので、名前が唯一の手がかり。
+    間違えると、静岡の数字が東京のラベルで入り、その置換が東京を消す。
+    """
+    from pathlib import Path
+
+    from kaigyou_etl.adapters._util import prefecture_from_filename
+
+    assert prefecture_from_filename(Path(name)) == code

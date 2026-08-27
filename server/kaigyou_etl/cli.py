@@ -132,7 +132,7 @@ def _prefecture_for(found: Any, requested: str | None) -> tuple[str, str | None]
 
     named: dict[str, list[str]] = {}
     for path in (found.mesh_current, found.mesh_baseline, found.mesh_business,
-                 found.municipalities, found.land_prices):
+                 found.municipalities, found.land_prices, found.future_population):
         if path is None:
             continue
         code = prefecture_from_filename(path)

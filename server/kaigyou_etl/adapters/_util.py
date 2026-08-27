@@ -211,8 +211,11 @@ def shape_to_wkt(shape: Any) -> str | None:
 #: does not read the name has to be told, and being told wrongly is silent:
 #: Shizuoka's figures land under Tokyo's label and delete Tokyo on the way in.
 _PREFECTURE_PATTERNS = (
-    re.compile(r"H(\d{2})$"),            # tblT001141H22
-    re.compile(r"_(\d{2})_GML$"),        # N03-20240101_22_GML
+    re.compile(r"H(\d{2})$"),                  # tblT001141H22
+    re.compile(r"_(\d{2})_GML$"),              # N03-20240101_22_GML
+    # 500m_mesh_2024_22_SHP。年（2024）を都道府県と読まないよう、
+    # 4桁の年を挟んだ形に限ります。`_(\d{2})_` だけだと `_20` を拾います。
+    re.compile(r"_\d{4}_(\d{2})_[A-Za-z]+$"),  # 500m_mesh_2024_22_SHP
 )
 
 
