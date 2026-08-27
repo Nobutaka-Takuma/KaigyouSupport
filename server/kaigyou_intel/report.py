@@ -539,6 +539,14 @@ def write_file(conn: psycopg.Connection, job_id: str,
 
     同じジョブを何度やり直しても同じ名前に上書きします。日付ごとに増やすと、
     どれが最新か分からなくなります。
+
+    **書けなければ黙って諦めます。** ホスティングされた関数のファイル
+    システムは読み取り専用です（実測：Vercel で
+    ``OSError: [Errno 30] Read-only file system: 'reports'``）。
+    レポート本体は DB に入っていて、画面からも ``/report.md`` からも
+    取り出せます。ここで書き出すのは手元で回すときの便宜であって、
+    成果物そのものではありません。おまけの失敗で、$1.29 かけて仕上がった
+    レポートを失うのは筋が通りません。
     """
     from kaigyou_core import config as cfg
 
@@ -547,14 +555,17 @@ def write_file(conn: psycopg.Connection, job_id: str,
         return None
     settings = (cfg.analysis_config().get("report") or {})
     target = Path(directory or settings.get("output_dir") or DEFAULT_OUTPUT_DIR)
-    target.mkdir(parents=True, exist_ok=True)
 
     with conn.cursor() as cur:
         cur.execute("SELECT location_name, latitude, longitude, radius_m, created_at "
                     "FROM analysis_jobs WHERE id = %s", (job_id,))
         job = cur.fetchone()
-    path = target / _file_name(job_id, job)
-    path.write_text(markdown, encoding="utf-8")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / _file_name(job_id, job)
+        path.write_text(markdown, encoding="utf-8")
+    except OSError:
+        return None
     return path
 
 

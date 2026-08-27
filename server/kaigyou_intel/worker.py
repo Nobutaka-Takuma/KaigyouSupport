@@ -104,7 +104,15 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
         report.save(conn, job_id, output, job["base_data"])
         # ファイルにも書き出します。DB の中にあることと、手元にファイルが
         # あることは違います。追加のコマンドを要求しません。
-        path = report.write_file(conn, job_id)
+        #
+        # ただし**これは成果物ではなく便宜**です。ここで落ちても、上の save で
+        # レポートは DB に入っています。書けない環境（読み取り専用の関数）で
+        # 例外を上げると、仕上がったレポートを持ったままステップが失敗し、
+        # やり直しにもう $1 かかります。実測でそうなりました。
+        try:
+            path = report.write_file(conn, job_id)
+        except OSError:
+            path = None
         if path is not None:
             output = {**output, "_report_file": str(path)}
     return output

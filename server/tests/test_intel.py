@@ -17,6 +17,7 @@ LLM は呼びません（API キーが要るうえ、呼ぶたびに結果が変
 from __future__ import annotations
 
 import json
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -2663,3 +2664,41 @@ def test_the_worker_answers_a_get_because_that_is_what_cron_sends(monkeypatch):
     # 鍵が無ければ、どちらの方法でも断る。
     assert client.get("/api/worker/tick").status_code == 401
     assert client.post("/api/worker/tick").status_code == 401
+
+
+def test_a_read_only_disk_does_not_throw_away_the_report(conn, dataset, monkeypatch, tmp_path):
+    """おまけの書き出しの失敗で、$1.29 のレポートを捨てない。
+
+    ホスティングされた関数のファイルシステムは読み取り専用。実測：
+    OSError: [Errno 30] Read-only file system: 'reports'。
+    レポート本体は DB に入っているので、ファイルは便宜でしかない。
+    """
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 5, {}, {"prompt_version": "v", "model": "m"})
+        monkeypatch.setattr(report, "markdown_for", lambda *a, **k: "# レポート\n")
+
+        def read_only(*_a, **_k):
+            raise OSError(30, "Read-only file system", "reports")
+
+        monkeypatch.setattr(pathlib.Path, "mkdir", read_only)
+        assert report.write_file(conn, job_id, str(tmp_path)) is None, "例外を上げない"
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_report_file_is_still_written_where_it_can_be(conn, dataset, monkeypatch, tmp_path):
+    """手元で回すときは、これまでどおりファイルが手に入る。"""
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        monkeypatch.setattr(report, "markdown_for", lambda *a, **k: "# レポート\n")
+        path = report.write_file(conn, job_id, str(tmp_path))
+        assert path is not None and path.read_text(encoding="utf-8") == "# レポート\n"
+    finally:
+        _drop_job(job_id)
