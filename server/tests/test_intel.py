@@ -2597,3 +2597,44 @@ def test_the_local_worker_has_no_time_limit(monkeypatch):
     monkeypatch.setenv("VERCEL", "1")
     budget, reserve = worker.time_budget()
     assert budget > reserve > 0, "関数側は有限で、余裕を残す"
+
+
+def test_either_configured_secret_wakes_the_worker(monkeypatch):
+    """移行期は両方が設定されている。片方だけを正解にすると cron が黙って落ちる。
+
+    以前は `KAIGYOU_WORKER_TOKEN or CRON_SECRET` で先に見つかったほうだけを
+    正解にしていた。両方を別々の値で設定すると、Vercel Cron が送る
+    Bearer <CRON_SECRET> が KAIGYOU_WORKER_TOKEN と比べられて 401 になる。
+    cron の失敗は画面に出ないので、Job が「順番待ち」のまま止まるだけに見えた。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    monkeypatch.setenv("KAIGYOU_WORKER_TOKEN", "pg-cron-no-kagi")
+    monkeypatch.setenv("CRON_SECRET", "vercel-cron-no-kagi")
+    client = TestClient(app)
+
+    # Supabase の pg_cron はヘッダで送る。
+    assert client.post("/api/worker/tick",
+                       headers={"X-Worker-Token": "pg-cron-no-kagi"}).status_code != 401
+    # Vercel Cron は Bearer で送る。
+    assert client.post("/api/worker/tick",
+                       headers={"Authorization": "Bearer vercel-cron-no-kagi"}
+                       ).status_code != 401
+    # 知らない鍵は通さない。
+    assert client.post("/api/worker/tick",
+                       headers={"X-Worker-Token": "shiranai"}).status_code == 401
+    assert client.post("/api/worker/tick").status_code == 401
+
+
+def test_the_worker_says_so_when_no_secret_is_configured(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    monkeypatch.delenv("KAIGYOU_WORKER_TOKEN", raising=False)
+    monkeypatch.delenv("CRON_SECRET", raising=False)
+    res = TestClient(app).post("/api/worker/tick")
+    assert res.status_code == 503
+    assert "CRON_SECRET" in res.json()["detail"]

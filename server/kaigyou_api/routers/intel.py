@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Any
 
@@ -346,12 +347,20 @@ def worker_tick(
     Supabase の pg_cron からでも、同じことをします。Vercel の Cron は
     ``Authorization: Bearer <CRON_SECRET>`` を送るので、そちらも受けます。
     """
-    expected = os.getenv(_WORKER_TOKEN_ENV) or os.getenv("CRON_SECRET")
-    if not expected:
+    # **設定されている鍵の「どれか」に一致すればよい**。以前は
+    # `A or B` で先に見つかったほうだけを正解にしていたので、両方を別々の値で
+    # 設定すると、Vercel Cron が送る Bearer <CRON_SECRET> が
+    # KAIGYOU_WORKER_TOKEN と比べられて 401 になりました。cron の失敗は
+    # 画面に出ないので、Job が「順番待ち」のまま止まるだけに見えます。
+    # 移行期には両方が設定されているのが普通なので、両方を正解にします。
+    accepted = [v for v in (os.getenv(_WORKER_TOKEN_ENV), os.getenv("CRON_SECRET")) if v]
+    if not accepted:
         raise HTTPException(
-            503, detail=f"{_WORKER_TOKEN_ENV} が未設定のため、worker を起動できません。")
-    bearer = (authorization or "").removeprefix("Bearer ").strip()
-    if x_worker_token != expected and bearer != expected:
+            503, detail=f"{_WORKER_TOKEN_ENV} も CRON_SECRET も未設定のため、"
+                        "worker を起動できません。")
+    offered = [v for v in (x_worker_token,
+                           (authorization or "").removeprefix("Bearer ").strip()) if v]
+    if not any(hmac.compare_digest(o, e) for o in offered for e in accepted):
         raise HTTPException(401, detail="worker トークンが一致しません。")
     _require_tables(conn)
 
