@@ -453,6 +453,101 @@ def _competitor_distances(conn: psycopg.Connection, lat: float, lng: float,
     }
 
 
+
+def population_outlook(conn: psycopg.Connection, lat: float, lng: float,
+                       radius_m: int, mesh_size_m: int) -> dict[str, Any]:
+    """商圏の将来推計人口。取れなければ、取れないと言う。
+
+    総合スコアの「成長」は 2015→2020 の実績で決まっています。過去 5 年です。
+    歯科の開業は 20〜30 年の意思決定なので、いちばん重い問いにいちばん弱い
+    指標で答えていることになります。ここはその埋め合わせです。
+
+    重み付けは既存のメッシュ集計と**同じ面積按分**にします。別の数え方に
+    すると、現在人口と将来人口を並べたときに、差が推計の差なのか数え方の
+    差なのか分からなくなります。ジオメトリは population_mesh のものを
+    mesh_code で借ります（同じ格子なので複製する理由がありません）。
+
+    データが無い環境では ``{"available": False, ...}`` を返します。無いものを
+    埋めません（要件 §3）。
+    """
+    from kaigyou_core.db import table_exists
+
+    if not table_exists(conn, "mesh_population_projection"):
+        return {"available": False,
+                "reason": "not_migrated",
+                "note": "将来推計人口のテーブルがありません（kaigyou-etl migrate）。"}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH buf AS (
+                SELECT ST_Buffer(ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
+                                 %(radius)s)::geometry AS g
+            ),
+            share AS (
+                SELECT m.mesh_code,
+                       LEAST(1.0, GREATEST(0.0,
+                           ST_Area(ST_Intersection(m.geom, buf.g)::geography)
+                           / NULLIF(ST_Area(m.geom::geography), 0))) AS w
+                  FROM population_mesh m, buf
+                 WHERE m.mesh_size_m = %(mesh)s
+                   AND m.geom && buf.g AND ST_Intersects(m.geom, buf.g)
+            )
+            SELECT p.projection_year        AS year,
+                   MIN(p.base_year)         AS base_year,
+                   MIN(p.estimate_label)    AS estimate_label,
+                   MAX(p.source_date)       AS source_date,
+                   SUM(p.population  * s.w) AS population,
+                   SUM(p.age_0_14    * s.w) AS age_0_14,
+                   SUM(p.age_15_64   * s.w) AS age_15_64,
+                   SUM(p.age_65_plus * s.w) AS age_65_plus,
+                   count(*)                 AS mesh_count
+              FROM mesh_population_projection p
+              JOIN share s ON s.mesh_code = p.mesh_code
+             WHERE p.mesh_size_m = %(mesh)s
+             GROUP BY p.projection_year
+             ORDER BY p.projection_year
+            """,
+            {"lat": lat, "lng": lng, "radius": radius_m, "mesh": mesh_size_m})
+        rows = cur.fetchall()
+
+    if not rows:
+        return {"available": False,
+                "reason": "not_loaded",
+                "note": "この地域の将来推計人口は取り込まれていません。"
+                        "成長の評価は 2015→2020 の実績のみに基づきます。"}
+
+    years = [{
+        "year": int(r["year"]),
+        "population": _round(r["population"]),
+        "age_0_14": _round(r["age_0_14"]),
+        "age_15_64": _round(r["age_15_64"]),
+        "age_65_plus": _round(r["age_65_plus"]),
+        "elderly_share": (None if not r["population"]
+                          else round(float(r["age_65_plus"] or 0)
+                                     / float(r["population"]), 3)),
+        "mesh_count": int(r["mesh_count"]),
+    } for r in rows]
+
+    # 基準年に対する比。読み手が欲しいのは「いま比べて何割か」です。
+    base_year = rows[0]["base_year"]
+    base = next((y for y in years if y["year"] == base_year), years[0])
+    for y in years:
+        y["index_vs_base"] = (None if not base["population"]
+                              else round(y["population"] / base["population"], 3))
+
+    return {
+        "available": True,
+        "base_year": (int(base_year) if base_year is not None else base["year"]),
+        "estimate_label": rows[0]["estimate_label"],
+        "source_date": rows[0]["source_date"],
+        "years": years,
+        "definition": ("500m メッシュ別の将来推計人口を、現在人口と同じ面積按分で"
+                       "商圏に切り出したもの。推計であって予測ではなく、"
+                       "出生・死亡・移動の仮定の上に成り立つ。"),
+    }
+
+
 def _catchment_shape(conn: psycopg.Connection, lat: float, lng: float,
                      radius_m: int, mesh_size_m: int) -> dict[str, Any] | None:
     """How the catchment's population is spread across the meshes inside it.
@@ -844,6 +939,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 if k in ("population", "age_0_14", "age_15_64", "age_65_plus",
                          "households", "population_growth", "mesh_count")}
                 for r, vals in by_radius.items()}},
+            # 20〜30年の意思決定に、過去5年の増減だけで答えない。
+            "outlook": population_outlook(conn, lat, lng, radius_m, mesh_size_m or 1000),
             "daytime": {
                 "by_radius": {r: {k: vals[k] for k in ("workers", "establishments")}
                               for r, vals in by_radius.items()},

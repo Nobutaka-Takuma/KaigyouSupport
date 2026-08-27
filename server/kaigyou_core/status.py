@@ -29,11 +29,12 @@ ADAPTER_TABLES = {
     "mlit_municipalities": "municipalities",
     "osm_walk_network": "walk_network",
     "mlit_land_prices": "land_prices",
+    "mlit_future_population": "mesh_population_projection",
 }
 
 _TABLES = ("facilities", "facility_features", "population_mesh",
            "mesh_business", "stations", "municipalities", "walk_network",
-           "land_prices")
+           "land_prices", "mesh_population_projection")
 
 _TABLE_LABELS = {
     "facilities": "歯科医院",
@@ -44,6 +45,7 @@ _TABLE_LABELS = {
     "municipalities": "行政区域",
     "walk_network": "街路ネットワーク",
     "land_prices": "地価公示",
+    "mesh_population_projection": "将来推計人口メッシュ",
 }
 
 

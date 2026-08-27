@@ -2702,3 +2702,114 @@ def test_the_report_file_is_still_written_where_it_can_be(conn, dataset, monkeyp
         assert path is not None and path.read_text(encoding="utf-8") == "# レポート\n"
     finally:
         _drop_job(job_id)
+
+
+def test_the_outlook_says_when_it_was_not_obtained():
+    """無いものを黙って省かない。読み手が「明るいから触れていない」と読める。"""
+    from kaigyou_intel.report import to_markdown
+
+    md = to_markdown({"title": "t", "sections": []},
+                     {"demand": {"outlook": {"available": False,
+                                             "note": "この地域の将来推計人口は取り込まれていません。"}}})
+    assert "将来推計人口" in md
+    assert "取得できていません" in md
+
+
+def test_the_outlook_is_shown_as_published_with_its_basis():
+    """基準年と推計の名前を落とさない。「2040年の人口」だけでは出典を辿れない。"""
+    from kaigyou_intel.report import to_markdown
+
+    md = to_markdown({"title": "t", "sections": []}, {"demand": {"outlook": {
+        "available": True,
+        "base_year": 2020,
+        "estimate_label": "平成30年国政局推計",
+        "years": [
+            {"year": 2020, "population": 16167, "age_0_14": 2307,
+             "age_65_plus": 4200, "elderly_share": 0.26, "index_vs_base": 1.0},
+            {"year": 2040, "population": 12610, "age_0_14": 1420,
+             "age_65_plus": 5300, "elderly_share": 0.42, "index_vs_base": 0.78},
+        ]}}})
+    assert "平成30年国政局推計" in md and "基準年 2020" in md
+    assert "推計であって予測ではなく" in md
+    assert "12,610" in md and "42.0%" in md
+    assert "78" in md, "基準年比の指数"
+
+
+def _fake_projection_shapefile(tmp_path, fields, rows):
+    """本物と同じ形の 500m メッシュ shapefile を作る（zip 入り）。"""
+    import shapefile
+    import zipfile
+
+    base = tmp_path / "500m_mesh_suikei"
+    writer = shapefile.Writer(str(base), shapeType=shapefile.POLYGON)
+    for name in fields:
+        writer.field(name, "C", size=32)
+    for row in rows:
+        writer.poly([[[138.86, 35.10], [138.87, 35.10],
+                      [138.87, 35.11], [138.86, 35.11], [138.86, 35.10]]])
+        writer.record(*[row.get(f, "") for f in fields])
+    writer.close()
+
+    archive = tmp_path / "mesh.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for suffix in (".shp", ".shx", ".dbf"):
+            zf.write(str(base) + suffix, "500m_mesh_suikei" + suffix)
+    return archive
+
+
+def _projection_adapter(spec_overrides=None):
+    from kaigyou_core import config as cfg
+    from kaigyou_etl.adapters import AdapterContext
+    from kaigyou_etl.adapters.mlit_future_population import MLITFuturePopulationAdapter
+
+    spec = dict(cfg.sources_config()["sources"]["mlit_future_population"])
+    spec.update(spec_overrides or {})
+    return MLITFuturePopulationAdapter(
+        AdapterContext(source_id="mlit_future_population", spec=spec,
+                       defaults={}, raw_dir=pathlib.Path("."),
+                       prefecture_override="22"))
+
+
+def test_future_population_is_read_year_by_year(tmp_path):
+    """年を行にしてあるので、手に入った年だけが入る。"""
+    fields = ["MESH_ID", "PTN_2020", "PTA_2020", "PTC_2020", "PTN_2040", "PTC_2040"]
+    archive = _fake_projection_shapefile(tmp_path, fields, [
+        {"MESH_ID": "52386278", "PTN_2020": "1200.5", "PTA_2020": "180",
+         "PTC_2020": "300", "PTN_2040": "930.２".replace("２", "2"), "PTC_2040": "410"},
+    ])
+    adapter = _projection_adapter({"years": [2020, 2040, 2050]})
+
+    facts = adapter.validate(archive)
+    assert facts["years_loaded"] == [2020, 2040]
+    assert facts["years_configured_but_missing"] == [2050], "無い年は無いと言う"
+    # round(1200.5) は 1200（偶数丸め）。集計の要約なので実害は無い。
+    # 保存されるのは 1200.5 のまま（下の transform で確かめる）。
+    assert facts["population_total_by_year"] == {2020: 1200, 2040: 930}
+
+    rows = list(adapter.transform(archive))
+    assert {r["projection_year"] for r in rows} == {2020, 2040}
+    got = {r["projection_year"]: r for r in rows}
+    assert got[2040]["population"] == 930.2
+    assert got[2040]["age_65_plus"] == 410.0
+    assert got[2040]["age_0_14"] is None, "その年に無い列は空のまま。0 で埋めない"
+    assert got[2020]["population"] == 1200.5, "推計値は按分の結果。丸めない"
+    assert got[2020]["base_year"] == 2020 and got[2020]["mesh_size_m"] == 500
+
+
+def test_a_changed_release_fails_loudly_instead_of_loading_nothing(tmp_path):
+    """属性名が合わないとき、0 件で終わらせない。
+
+    「0 件」だと、人が住んでいないのか列名が違うのかが区別できない。
+    実際の属性名を並べて落とす。
+    """
+    from kaigyou_etl.acquisition import AcquisitionError
+
+    archive = _fake_projection_shapefile(
+        tmp_path, ["MESH_ID", "POP2020", "POP2040"],
+        [{"MESH_ID": "52386278", "POP2020": "1200", "POP2040": "930"}])
+    adapter = _projection_adapter()
+
+    with pytest.raises(AcquisitionError) as caught:
+        adapter.validate(archive)
+    assert "POP2020" in str(caught.value), "実際の属性名を見せる"
+    assert "sources.yaml" in str(caught.value), "直す場所を示す"

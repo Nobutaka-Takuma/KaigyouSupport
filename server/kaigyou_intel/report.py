@@ -169,9 +169,45 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
              _num(((c.get("hours") or {}) or {}).get("weekly_hours"), "h")]
             for c in clinics])
 
+    lines += _outlook_figures(dataset)
     lines += _access_figures(dataset)
     lines += _cost_figures(dataset)
     return lines
+
+
+
+def _outlook_figures(dataset: Mapping[str, Any]) -> list[str]:
+    """将来推計人口。取れていないときは、取れていないと書く。
+
+    無言で省くと、読み手は「この商圏は将来が明るいから触れていない」とも
+    「調べていない」とも読めます。売り物の文書で、その曖昧さは残せません。
+    """
+    outlook = ((dataset.get("demand") or {}).get("outlook")) or {}
+    if not outlook:
+        return []
+    if not outlook.get("available"):
+        return ["### 将来推計人口", "",
+                f"**取得できていません。** {outlook.get('note', '')}", ""]
+
+    years = outlook.get("years") or []
+    if not years:
+        return []
+    head = ["年"] + [str(y["year"]) for y in years]
+    rows = [
+        ["総人口"] + [_num(y.get("population")) for y in years],
+        ["0〜14歳"] + [_num(y.get("age_0_14")) for y in years],
+        ["65歳以上"] + [_num(y.get("age_65_plus")) for y in years],
+        ["65歳以上の割合"] + ["—" if y.get("elderly_share") is None
+                              else f"{y['elderly_share'] * 100:.1f}%" for y in years],
+        [f"{outlook.get('base_year')}年=100"]
+        + ["—" if y.get("index_vs_base") is None
+           else f"{y['index_vs_base'] * 100:.0f}" for y in years],
+    ]
+    return (["### 将来推計人口", "",
+             f"出典: {outlook.get('estimate_label') or '将来推計人口'}"
+             f"（基準年 {outlook.get('base_year')}）。"
+             "推計であって予測ではなく、出生・死亡・移動の仮定の上に成り立ちます。", ""]
+            + _table(head, rows))
 
 
 def _access_figures(dataset: Mapping[str, Any]) -> list[str]:
