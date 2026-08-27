@@ -2813,3 +2813,36 @@ def test_a_changed_release_fails_loudly_instead_of_loading_nothing(tmp_path):
         adapter.validate(archive)
     assert "POP2020" in str(caught.value), "実際の属性名を見せる"
     assert "sources.yaml" in str(caught.value), "直す場所を示す"
+
+
+def test_the_outlook_table_stays_readable():
+    """公表は 5年刻みで 11 点。全部並べると 11 列になり、読み物にならない。
+
+    40代で開業する人にとって 2070 年は引退のはるか先で、意思決定に効かない。
+    10年刻みで 30年先まで。絞ったことは黙らずに書く。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    years = [{"year": y, "population": 1000 - (y - 2020),
+              "age_65_plus": 300, "elderly_share": 0.3,
+              "index_vs_base": 1.0} for y in range(2020, 2075, 5)]
+    md = to_markdown({"title": "t", "sections": []}, {"demand": {"outlook": {
+        "available": True, "base_year": 2020,
+        "estimate_label": "令和6年国政局推計", "years": years}}})
+
+    table = [ln for ln in md.splitlines() if ln.startswith("| 年 |")][0]
+    shown = [c.strip() for c in table.split("|")[2:-1]]
+    assert shown == ["2020", "2030", "2040", "2050"], f"出た年: {shown}"
+    assert "2070" not in table, "引退のはるか先まで並べない"
+    assert "10年刻みで抜粋" in md, "絞ったことを黙らない"
+
+
+def test_a_short_series_is_shown_in_full():
+    """点が少ないなら絞らない。表が消えるより並ぶほうがまし。"""
+    from kaigyou_intel.report import to_markdown
+
+    years = [{"year": y, "population": 1000, "index_vs_base": 1.0}
+             for y in (2020, 2040)]
+    md = to_markdown({"title": "t", "sections": []}, {"demand": {"outlook": {
+        "available": True, "base_year": 2020, "estimate_label": "x", "years": years}}})
+    assert "2040" in md and "抜粋" not in md

@@ -501,6 +501,7 @@ def population_outlook(conn: psycopg.Connection, lat: float, lng: float,
                    SUM(p.age_0_14    * s.w) AS age_0_14,
                    SUM(p.age_15_64   * s.w) AS age_15_64,
                    SUM(p.age_65_plus * s.w) AS age_65_plus,
+                   SUM(p.age_75_plus * s.w) AS age_75_plus,
                    count(*)                 AS mesh_count
               FROM mesh_population_projection p
               JOIN share s ON s.mesh_code = p.mesh_code
@@ -523,9 +524,14 @@ def population_outlook(conn: psycopg.Connection, lat: float, lng: float,
         "age_0_14": _round(r["age_0_14"]),
         "age_15_64": _round(r["age_15_64"]),
         "age_65_plus": _round(r["age_65_plus"]),
+        # 75歳以上を分けて持つのは、通院と訪問で開業方針が変わるからです。
+        "age_75_plus": _round(r["age_75_plus"]),
         "elderly_share": (None if not r["population"]
                           else round(float(r["age_65_plus"] or 0)
                                      / float(r["population"]), 3)),
+        "late_elderly_share": (None if not r["population"] or r["age_75_plus"] is None
+                               else round(float(r["age_75_plus"])
+                                          / float(r["population"]), 3)),
         "mesh_count": int(r["mesh_count"]),
     } for r in rows]
 

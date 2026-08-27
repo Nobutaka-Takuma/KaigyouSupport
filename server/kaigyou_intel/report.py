@@ -176,6 +176,34 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
 
 
 
+
+#: レポートの表に載せる年の間隔と、どこまで先を見るか。
+#:
+#: 公表データは 2070 年まで 5 年刻みで 11 点あります。全部並べると 11 列に
+#: なり、読み物として成立しません（読みづらいという指摘を実際に受けました）。
+#: それに 40代で開業する人にとって 2070 年は引退のはるか先で、意思決定に
+#: 効きません。**10 年刻みで 30 年先まで**に絞ります。
+#:
+#: 絞るのは表示だけです。データセットには全年次が入っているので、LLM も
+#: JSON 出力も全部を見られます。
+_OUTLOOK_STEP_YEARS = 10
+_OUTLOOK_HORIZON_YEARS = 30
+
+
+def _readable_years(years: list[Mapping[str, Any]],
+                    base_year: Any) -> list[Mapping[str, Any]]:
+    if len(years) <= 4:
+        return list(years)
+    base = int(base_year) if base_year else int(years[0]["year"])
+    limit = base + _OUTLOOK_HORIZON_YEARS
+    picked = [y for y in years
+              if int(y["year"]) <= limit
+              and (int(y["year"]) - base) % _OUTLOOK_STEP_YEARS == 0]
+    # 基準年しか残らないなら、絞らずに元のまま出します。刻みが合わない
+    # 版が来たときに、表が消えるより並びすぎるほうがましです。
+    return picked if len(picked) >= 2 else list(years)
+
+
 def _outlook_figures(dataset: Mapping[str, Any]) -> list[str]:
     """将来推計人口。取れていないときは、取れていないと書く。
 
@@ -189,7 +217,7 @@ def _outlook_figures(dataset: Mapping[str, Any]) -> list[str]:
         return ["### 将来推計人口", "",
                 f"**取得できていません。** {outlook.get('note', '')}", ""]
 
-    years = outlook.get("years") or []
+    years = _readable_years(outlook.get("years") or [], outlook.get("base_year"))
     if not years:
         return []
     head = ["年"] + [str(y["year"]) for y in years]
@@ -199,6 +227,9 @@ def _outlook_figures(dataset: Mapping[str, Any]) -> list[str]:
         ["65歳以上"] + [_num(y.get("age_65_plus")) for y in years],
         ["65歳以上の割合"] + ["—" if y.get("elderly_share") is None
                               else f"{y['elderly_share'] * 100:.1f}%" for y in years],
+        ["75歳以上"] + [_num(y.get("age_75_plus")) for y in years],
+        ["75歳以上の割合"] + ["—" if y.get("late_elderly_share") is None
+                              else f"{y['late_elderly_share'] * 100:.1f}%" for y in years],
         [f"{outlook.get('base_year')}年=100"]
         + ["—" if y.get("index_vs_base") is None
            else f"{y['index_vs_base'] * 100:.0f}" for y in years],
@@ -206,7 +237,10 @@ def _outlook_figures(dataset: Mapping[str, Any]) -> list[str]:
     return (["### 将来推計人口", "",
              f"出典: {outlook.get('estimate_label') or '将来推計人口'}"
              f"（基準年 {outlook.get('base_year')}）。"
-             "推計であって予測ではなく、出生・死亡・移動の仮定の上に成り立ちます。", ""]
+             "推計であって予測ではなく、出生・死亡・移動の仮定の上に成り立ちます。"
+             + (f"（公表は{years[0]['year']}〜{outlook['years'][-1]['year']}年の5年刻み。"
+                "表は10年刻みで抜粋）" if len(outlook.get("years") or []) > len(years) else ""),
+             ""]
             + _table(head, rows))
 
 

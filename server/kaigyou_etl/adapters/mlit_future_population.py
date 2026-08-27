@@ -158,6 +158,7 @@ class MLITFuturePopulationAdapter(SourceAdapter):
                     "age_0_14": _to_float(values.get(cols.get("age_0_14", ""))),
                     "age_15_64": _to_float(values.get(cols.get("age_15_64", ""))),
                     "age_65_plus": _to_float(values.get(cols.get("age_65_plus", ""))),
+                    "age_75_plus": _to_float(values.get(cols.get("age_75_plus", ""))),
                     "base_year": int(base_year) if base_year else None,
                     "estimate_label": label,
                     "source_date": source_date,
@@ -175,11 +176,11 @@ class MLITFuturePopulationAdapter(SourceAdapter):
                 INSERT INTO mesh_population_projection (
                     source_id, mesh_code, mesh_size_m, prefecture_code,
                     projection_year, population, age_0_14, age_15_64, age_65_plus,
-                    base_year, estimate_label, source_date, last_updated
+                    age_75_plus, base_year, estimate_label, source_date, last_updated
                 ) VALUES (
                     %(source_id)s, %(mesh_code)s, %(mesh_size_m)s, %(prefecture_code)s,
                     %(projection_year)s, %(population)s, %(age_0_14)s, %(age_15_64)s,
-                    %(age_65_plus)s, %(base_year)s, %(estimate_label)s,
+                    %(age_65_plus)s, %(age_75_plus)s, %(base_year)s, %(estimate_label)s,
                     %(source_date)s, now()
                 )
                 ON CONFLICT (source_id, mesh_code, projection_year) DO UPDATE SET
@@ -187,6 +188,7 @@ class MLITFuturePopulationAdapter(SourceAdapter):
                     age_0_14     = EXCLUDED.age_0_14,
                     age_15_64    = EXCLUDED.age_15_64,
                     age_65_plus  = EXCLUDED.age_65_plus,
+                    age_75_plus  = EXCLUDED.age_75_plus,
                     last_updated = now()
                 """,
                 rows,
