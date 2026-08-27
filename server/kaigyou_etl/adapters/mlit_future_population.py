@@ -168,8 +168,13 @@ class MLITFuturePopulationAdapter(SourceAdapter):
              records: Iterable[dict[str, Any]]) -> int:
         rows = list(records)
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM mesh_population_projection WHERE source_id = %s",
-                        (self.source_id,))
+            # **都道府県で絞って置換します。** source_id だけで消すと、
+            # 静岡を入れたあとに東京を入れた時点で静岡が消えます（実測：
+            # 127,985 行が 59,917 行になりました）。1ファイル=1都道府県で
+            # 配布されるので、置換の単位も都道府県です。estat_mesh も同じ形。
+            cur.execute("DELETE FROM mesh_population_projection "
+                        "WHERE source_id = %s AND prefecture_code = %s",
+                        (self.source_id, self.ctx.prefecture_code))
             return self.insert_many(
                 cur,
                 """

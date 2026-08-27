@@ -29,7 +29,7 @@ from kaigyou_core.analysis import (
     resolve_mesh_size,
     walk_network_status,
 )
-from kaigyou_core.dataset import build_dataset
+from kaigyou_core.dataset import build_dataset, population_outlook
 from kaigyou_core import specialties as vocab
 from kaigyou_core.scoring import (
     ScoringModel,
@@ -303,6 +303,12 @@ def candidate_analysis(
     # land_prices_near. Absent (null) rather than empty when L01 is not loaded,
     # so the UI can say "not obtained" instead of "no land here".
     result["land_price"] = land_prices_near(conn, lat, lng, radius)
+    # 将来推計人口。レポートにしか出していなかったので、地図の画面で候補地を
+    # 見比べている段階では見えませんでした。開業は 20〜30 年の判断なので、
+    # 候補地を絞る時点でこそ要ります。取れていないときは available: false を
+    # 返し、画面にもそう出します（黙って空欄にはしません）。
+    result["population_outlook"] = population_outlook(
+        conn, lat, lng, radius, mesh_size_m)
     if catchment == "walk" and result.get("catchment_kind") != "walk":
         status = walk_network_status(conn)
         result["warnings"].insert(0, {

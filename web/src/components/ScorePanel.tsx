@@ -314,3 +314,82 @@ export function ProfileComparison({ analysis }: { analysis: CandidateAnalysis })
     </>
   );
 }
+
+export function PopulationOutlookTable({ analysis }: { analysis: CandidateAnalysis }) {
+  /**
+   * 将来推計人口。
+   *
+   * 開業は 20〜30 年の判断なので、候補地を絞っているこの画面でこそ要ります。
+   * レポートにしか出していなかったので、比較の段階では見えませんでした。
+   *
+   * **取れていないときは、取れていないと書きます。** 黙って省くと「将来が
+   * 明るいから触れていない」とも読めます。総合スコアの「成長」は 2015→2020 の
+   * 実績なので、そこも併せて言います。
+   *
+   * 推計であって予測ではありません。売上・患者数の予測は要件で禁じており、
+   * ここも「公表された推計をそのまま切り出したもの」以上のことはしません。
+   */
+  const outlook = analysis.population_outlook;
+  if (!outlook) return null;
+
+  if (!outlook.available) {
+    return (
+      <>
+        <h3>将来推計人口</h3>
+        <p className="warn-inline">取得できていません。{outlook.note}</p>
+      </>
+    );
+  }
+
+  const years = (outlook.years ?? []).filter(
+    (y) => outlook.base_year != null && (y.year - outlook.base_year) % 10 === 0
+           && y.year - outlook.base_year <= 30);
+  const shown = years.length >= 2 ? years : (outlook.years ?? []);
+  if (shown.length === 0) return null;
+
+  const pct = (v: number | null | undefined) =>
+    v == null ? "—" : `${(v * 100).toFixed(1)}%`;
+  const num = (v: number | null | undefined) =>
+    v == null ? "—" : v.toLocaleString();
+
+  return (
+    <>
+      <h3>将来推計人口</h3>
+      <p className="muted small">
+        {outlook.estimate_label}（基準年 {outlook.base_year}）。
+        推計であって予測ではなく、出生・死亡・移動の仮定の上に成り立ちます。
+      </p>
+      <table className="metrics">
+        <thead>
+          <tr>
+            <th>年</th>
+            {shown.map((y) => <th key={y.year}>{y.year}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>総人口</td>
+            {shown.map((y) => <td key={y.year}>{num(y.population)}</td>)}
+          </tr>
+          <tr>
+            <td>{outlook.base_year}年=100</td>
+            {shown.map((y) => (
+              <td key={y.year}>
+                {y.index_vs_base == null ? "—" : Math.round(y.index_vs_base * 100)}
+              </td>
+            ))}
+          </tr>
+          <tr>
+            <td>65歳以上</td>
+            {shown.map((y) => <td key={y.year}>{pct(y.elderly_share)}</td>)}
+          </tr>
+          <tr>
+            {/* 通院できるかどうかが分かれるので、65歳以上とは別に見せます。 */}
+            <td>75歳以上</td>
+            {shown.map((y) => <td key={y.year}>{pct(y.late_elderly_share)}</td>)}
+          </tr>
+        </tbody>
+      </table>
+    </>
+  );
+}

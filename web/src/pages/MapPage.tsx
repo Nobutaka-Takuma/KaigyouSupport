@@ -17,7 +17,8 @@ import { lastCenter, usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
 import type { CandidateAnalysis, Meta, SpecialtyOption } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
-import { AccessTable, CatchmentNote, LandPriceTable, PopulationTable,
+import { AccessTable, CatchmentNote, LandPriceTable, PopulationOutlookTable,
+         PopulationTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
 import { DatasetExport } from "../components/DatasetExport";
 import { AnalysisPanel } from "../components/AnalysisPanel";
@@ -784,6 +785,8 @@ export function MapPage() {
               <SpecialtyProfiles analysis={analysis} />
 
               <ProfileComparison analysis={analysis} />
+
+              <PopulationOutlookTable analysis={analysis} />
 
               <LandPriceTable analysis={analysis} />
 

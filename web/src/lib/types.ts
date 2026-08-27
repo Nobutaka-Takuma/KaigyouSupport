@@ -75,6 +75,7 @@ export interface CandidateAnalysis {
   prefecture_name?: string;
   /** 参考表示のみ。取り込んでいないときは null。 */
   land_price?: LandPriceSummary | null;
+  population_outlook?: PopulationOutlook | null;
   /** コスト軸の入力。商圏内の地価公示の中央値。 */
   land_price_yen_per_sqm?: number | null;
   land_price_points?: number | null;
@@ -554,4 +555,29 @@ export interface Me {
   email?: string | null;
   is_admin?: boolean;
   quota?: QuotaView | null;
+}
+
+
+/** 将来推計人口。取れていないときは available: false で理由が入る。 */
+export interface PopulationOutlook {
+  available: boolean;
+  reason?: string;
+  note?: string;
+  base_year?: number;
+  estimate_label?: string | null;
+  years?: OutlookYear[];
+  definition?: string;
+}
+
+export interface OutlookYear {
+  year: number;
+  population: number | null;
+  age_0_14: number | null;
+  age_15_64: number | null;
+  age_65_plus: number | null;
+  age_75_plus: number | null;
+  elderly_share: number | null;
+  late_elderly_share: number | null;
+  index_vs_base: number | null;
+  mesh_count: number;
 }

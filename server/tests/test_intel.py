@@ -2846,3 +2846,48 @@ def test_a_short_series_is_shown_in_full():
     md = to_markdown({"title": "t", "sections": []}, {"demand": {"outlook": {
         "available": True, "base_year": 2020, "estimate_label": "x", "years": years}}})
     assert "2040" in md and "抜粋" not in md
+
+
+def test_loading_one_prefecture_does_not_erase_another(conn, tmp_path, monkeypatch):
+    """東京を入れたら静岡が消えた、を繰り返さない。
+
+    source_id だけで置換すると、1ファイル=1都道府県で配布されるデータでは
+    後から入れたほうしか残らない。実測：静岡 127,985 行を入れたあとに東京を
+    入れて、59,917 行になった。load は成功と報告する。
+    """
+    from kaigyou_etl.adapters import AdapterContext
+    from kaigyou_etl.adapters.mlit_future_population import MLITFuturePopulationAdapter
+    from kaigyou_core import config as cfg
+
+    spec = dict(cfg.sources_config()["sources"]["mlit_future_population"])
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO data_sources (id, name, publisher, dataset_kind) "
+                    "VALUES ('mlit_future_population','x','x','official') "
+                    "ON CONFLICT (id) DO NOTHING")
+    conn.commit()
+
+    def load(prefecture, mesh_code):
+        adapter = MLITFuturePopulationAdapter(AdapterContext(
+            source_id="mlit_future_population", spec=spec, defaults={},
+            raw_dir=tmp_path, prefecture_override=prefecture))
+        return adapter.load(conn, [{
+            "source_id": "mlit_future_population", "mesh_code": mesh_code,
+            "mesh_size_m": 500, "prefecture_code": prefecture,
+            "projection_year": 2040, "population": 100.0, "age_0_14": None,
+            "age_15_64": None, "age_65_plus": None, "age_75_plus": None,
+            "base_year": 2020, "estimate_label": "x", "source_date": None}])
+
+    try:
+        load("22", "52386278")
+        load("13", "53393292")
+        with conn.cursor() as cur:
+            cur.execute("SELECT prefecture_code, count(*) n "
+                        "FROM mesh_population_projection GROUP BY 1 ORDER BY 1")
+            got = {r["prefecture_code"]: r["n"] for r in cur.fetchall()}
+        assert got == {"13": 1, "22": 1}, f"両方残ること: {got}"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM mesh_population_projection "
+                        "WHERE source_id = 'mlit_future_population'")
+            cur.execute("DELETE FROM data_sources WHERE id = 'mlit_future_population'")
+        conn.commit()
