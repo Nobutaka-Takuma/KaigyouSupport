@@ -388,25 +388,35 @@ sources:
     name: 国土数値情報 500mメッシュ別将来推計人口
     publisher: 国土交通省
     dataset_kind: official
-    homepage_url: https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-mesh500h30.html
+    homepage_url: https://nlftp.mlit.go.jp/ksj/
     license: 国土数値情報 利用約款
     notes: "社人研の推計を 500m メッシュに按分したもの。推計であって予測ではない。"
     mesh_size_m: 500
     # 推計の基準年。レポートで「いま比べて何割か」を出すのに使います。
     base_year: 2020
     # 公表されている推計の名前をそのまま。こちらで言い換えると出典を辿れません。
-    estimate_label: "平成30年国政局推計（500mメッシュ別将来推計人口）"
+    # **ダウンロードした版に合わせること。** 画面に出ている名前をそのまま写します
+    #（例: 500m_mesh_2024_22_SHP.zip なら「令和6年国政局推計」）。
+    # ここが実物と違うと、レポートに間違った出典が載ります。
+    estimate_label: "令和6年国政局推計（500mメッシュ別将来推計人口）"
     shapefile_member: "500m_mesh"
     encoding: cp932
     columns:
       mesh_code: ["MESH_ID", "MESH_CODE", "KEY_CODE", "MESHCODE"]
     # 年ごとの属性名の雛形。{year} が置き換わります。
+    #
+    # **取り込む前に実物を見てください。**
+    #   python tools/inspect_shapefile.py 500m_mesh_2024_22_SHP.zip
+    # 属性名が違えば、実際の属性名を並べて落ちます（0 件では終わりません）。
     year_fields:
       population:  "PTN_{year}"
       age_0_14:    "PTA_{year}"
       age_15_64:   "PTB_{year}"
       age_65_plus: "PTC_{year}"
-    years: [2020, 2025, 2030, 2035, 2040, 2045, 2050]
+    # 多めに書いておきます。無い年は「取得できなかった年」として報告されるので、
+    # 書きすぎても害はありません。逆に書き漏らすと、あるのに取り込まれません。
+    years: [2020, 2025, 2030, 2035, 2040, 2045, 2050,
+            2055, 2060, 2065, 2070]
 
   osm_walk_network:
     adapter: osm_walk_network
