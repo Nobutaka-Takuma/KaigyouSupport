@@ -94,21 +94,36 @@ STEP2 は Web 検索のたびに文脈を読み直すので、**検索回数が�
 
 ### 最初の1回だけ：自分を管理者にする
 
-鶏と卵なので、ここだけ SQL です。Supabase の **Authentication → Users** で
-自分を招待し、一覧に出た **User UID** を使います。
+鶏と卵なので、ここだけ SQL です。**Authentication → Users** で自分を追加し、
+SQL Editor でこれを流します（UID は自分で探さなくても引けます）。
 
 ```sql
-insert into accounts (user_id, email, monthly_quota, is_admin)
-values ('<あなたのUID>', 'you@example.com', 999, true)
-on conflict (user_id) do update set is_admin = true;
+insert into accounts (user_id, email, display_name, monthly_quota, billing_day, is_admin)
+select id::text, email, '運営者', 999, 1, true
+  from auth.users where email = 'you@example.com'
+on conflict (user_id) do update
+   set is_admin = true, monthly_quota = 999, status = 'active';
 ```
+
+パスワードは Admin API で直接入れます（メールを待つ必要はありません）。
+
+```powershell
+$SR = '<service_role キー>'   # Project Settings → API。全権限があるので厳重に
+curl.exe -X PUT "https://<PROJECT>.supabase.co/auth/v1/admin/users/<UID>" `
+  -H "apikey: $SR" -H "Authorization: Bearer $SR" -H "Content-Type: application/json" `
+  -d '{\"password\":\"<決めたパスワード>\",\"email_confirm\":true}'
+```
+
+`email_confirm` を付けるのは、確認メールを踏んでいないとサインインが
+弾かれるからです。
 
 これ以降、**画面の「管理」タブ**から操作します（管理者にだけ表示されます）。
 
 ### 利用者を1人増やすたび
 
 1. Supabase の **Authentication → Users → Invite user** でメールアドレスを招待
-   （利用者にはパスワード設定のメールが届きます）
+   （利用者には「パスワードを設定してください」のメールが届きます）。
+   **独自 SMTP を設定していないと、ここでほぼ確実に詰まります。次項参照。**
 2. 一覧に出た **User UID** をコピー
 3. アプリの **管理 → アカウントを発行** に貼り付け、会社名・担当者名・
    月あたりの上限・締め日を入れて保存
@@ -118,6 +133,41 @@ on conflict (user_id) do update set is_admin = true;
 
 上限を変える・止めるときも、同じ画面の「編集」から。**月あたりの上限を 0 に
 すると、新規の分析を開始できなくなります**（走っている分析は止めません）。
+
+### メールは独自 SMTP に。売り始める前に
+
+Supabase が最初から用意しているメール送信は動作確認用で、**1時間に2通**しか
+通しません。確認メール・招待・パスワード再設定を合わせての数字です。超えた分は
+静かに捨てられ、画面にはエラーが出ません。標準の送信元は SPF/DKIM が自分の
+ドメインに紐づかないので、届いても迷惑メールに入りがちです。宛先が組織メンバーに
+制限されることもあります。
+
+利用者 3 人に招待を出した時点で詰まります。**Project Settings → Authentication →
+SMTP Settings** で外部の送信サービス（Resend、Amazon SES など）を設定し、
+送信元ドメインの DNS に SPF と DKIM を立ててください。設定すると
+**Authentication → Rate Limits** の上限も引き上げられます。
+
+届かないときに見る場所は **Authentication → Logs**。`over_email_send_rate_limit`
+や 429 が出ていれば上限です。
+
+急ぐときは、メールを経由せず Admin API で作れます。
+
+```powershell
+curl.exe -X POST "https://<PROJECT>.supabase.co/auth/v1/admin/users" `
+  -H "apikey: $SR" -H "Authorization: Bearer $SR" -H "Content-Type: application/json" `
+  -d '{\"email\":\"user@example.com\",\"password\":\"<初期パスワード>\",\"email_confirm\":true}'
+```
+
+### 利用者がパスワードを設定する画面
+
+招待と再設定のリンクは、Site URL に `#access_token=...&type=recovery` を付けて
+戻ってくるだけです。受ける画面が `web/src/components/PasswordSetup.tsx` で、
+断片を読んでパスワード設定のフォームを出します。**Authentication → URL
+Configuration** の Site URL と Redirect URLs を正しく設定していないと、
+リンクが localhost やトップページに落ちます。
+
+利用者が自分で再設定できるよう、サインイン欄に「パスワードを忘れた」を
+置いてあります。これも SMTP が要ります。
 
 ---
 
