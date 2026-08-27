@@ -34,6 +34,7 @@ class Discovery:
     mesh_business: Path | None = None
     walk_network: Path | None = None
     land_prices: Path | None = None
+    future_population: Path | None = None
     stations: Path | None = None
     municipalities: Path | None = None
     unmatched: list[Path] = field(default_factory=list)
@@ -64,6 +65,8 @@ class Discovery:
             out.append("診療科目・診療時間（標榜科目別の競合分析に使用）")
         if not self.walk_network:
             out.append("OpenStreetMap 道路（徒歩圏の算出に使用）")
+        if not self.future_population:
+            out.append("500mメッシュ別将来推計人口（20〜30年先の商圏を見るのに使用）")
         return out
 
     def as_dict(self) -> dict[str, str | None]:
@@ -75,6 +78,8 @@ class Discovery:
             "mesh_business": str(self.mesh_business) if self.mesh_business else None,
             "walk_network": str(self.walk_network) if self.walk_network else None,
             "land_prices": str(self.land_prices) if self.land_prices else None,
+            "future_population": (str(self.future_population)
+                                  if self.future_population else None),
             "stations": str(self.stations) if self.stations else None,
             "municipalities": str(self.municipalities) if self.municipalities else None,
         }
@@ -144,6 +149,10 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
                 _assign(found, "land_prices", path)
             elif "n03-" in members or "n03" in path.name.lower():
                 _assign(found, "municipalities", path)
+            # 500m メッシュ別将来推計人口。中身の .shp 名（500m_mesh_2024_22）で
+            # 見ます。ファイル名だけだと、ブラウザが付ける (1) などで外れます。
+            elif "500m_mesh" in members or "500m_mesh" in path.name.lower():
+                _assign(found, "future_population", path)
             else:
                 found.unmatched.append(path)
             continue
@@ -198,6 +207,12 @@ def discover(directory: Path, sources: Mapping[str, Any]) -> Discovery:
             "地価公示（L01）のファイルがないため、地価は表示されません。"
             "分析・スコアには影響しません。"
         )
+    if found.future_population is None:
+        found.notes.append(
+            "500mメッシュ別将来推計人口のファイルがないため、レポートに"
+            "将来人口は載りません。成長の評価は 2015→2020 の実績のみに"
+            "基づきます（20〜30年の判断としては弱いことに留意）。"
+        )
     if found.mesh_business is None:
         found.notes.append(
             "経済センサスのメッシュファイルがないため、従業者数（昼の需要）は"
@@ -239,6 +254,7 @@ def describe(found: Discovery) -> Iterable[str]:
         "stations": "駅別乗降客数",
         "municipalities": "行政区域",
         "land_prices": "地価公示（L01）",
+        "future_population": "500mメッシュ別将来推計人口",
     }
     for slot, label in labels.items():
         path = getattr(found, slot)

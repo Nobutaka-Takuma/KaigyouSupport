@@ -972,3 +972,35 @@ def test_the_guide_explains_what_happens_when_a_step_fails():
     assert "残高不足" in text
     # 発行が画面からできることも。
     assert "管理 → アカウントを発行" in text
+
+
+def test_load_local_finds_the_future_population_file(tmp_path):
+    """load-local が新しい情報源を拾えること。
+
+    アダプタを足しても discover に登録しなければ、ファイルは「未分類」に
+    落ちて黙って取り込まれない。人は download/22 に置いたつもりでいるので、
+    気づくのはレポートに将来人口が載らないときになる。
+    """
+    import zipfile
+
+    from kaigyou_core import config as cfg
+    from kaigyou_etl.discover import discover
+
+    archive = tmp_path / "500m_mesh_2024_22_SHP.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for suffix in (".shp", ".shx", ".dbf"):
+            zf.writestr("500m_mesh_2024_22" + suffix, b"x")
+
+    found = discover(tmp_path, cfg.sources_config()["sources"])
+    assert found.future_population == archive
+    assert archive not in found.unmatched
+
+
+def test_a_missing_projection_is_named_rather_than_ignored(tmp_path):
+    """無いものは無いと言う。黙って落とすと、弱い指標のまま気づけない。"""
+    from kaigyou_core import config as cfg
+    from kaigyou_etl.discover import discover
+
+    found = discover(tmp_path, cfg.sources_config()["sources"])
+    assert any("将来推計人口" in n for n in found.optional_missing)
+    assert any("将来推計人口" in n for n in found.notes)

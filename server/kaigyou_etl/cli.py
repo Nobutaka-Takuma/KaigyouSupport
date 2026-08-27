@@ -246,6 +246,7 @@ def cmd_load_local(args: argparse.Namespace) -> int:
         ("mlit_stations", found.stations, None),
         ("mlit_municipalities", found.municipalities, None),
         ("mlit_land_prices", found.land_prices, None),
+        ("mlit_future_population", found.future_population, None),
     ]
     failures = 0
     for source_id, input_path, baseline in plan:
