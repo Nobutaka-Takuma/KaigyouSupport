@@ -17,7 +17,12 @@ from kaigyou_core import config as cfg
 # Which table each adapter fills, for the row counts below.
 ADAPTER_TABLES = {
     "mhlw_clinics": "facilities",
-    "mhlw_specialties": "facility_specialties",
+    # 行数は facility_features で数えます。facility_specialties /
+    # facility_hours は公表値の控えで、検索経路には入っていません
+    # （kg_analyze_point も地図 API も facility_features しか読みません）。
+    # 容量のために控えを消しても「取れていない」と表示されないように、
+    # 実際に使われているほうを数えます。
+    "mhlw_specialties": "facility_features",
     "estat_mesh": "population_mesh",
     "estat_business_mesh": "mesh_business",
     "mlit_stations": "stations",
@@ -26,13 +31,13 @@ ADAPTER_TABLES = {
     "mlit_land_prices": "land_prices",
 }
 
-_TABLES = ("facilities", "facility_specialties", "population_mesh",
+_TABLES = ("facilities", "facility_features", "population_mesh",
            "mesh_business", "stations", "municipalities", "walk_network",
            "land_prices")
 
 _TABLE_LABELS = {
     "facilities": "歯科医院",
-    "facility_specialties": "診療科目・診療時間",
+    "facility_features": "診療科目・診療時間（施設数）",
     "population_mesh": "人口メッシュ",
     "mesh_business": "事業所・従業者メッシュ",
     "stations": "駅",
