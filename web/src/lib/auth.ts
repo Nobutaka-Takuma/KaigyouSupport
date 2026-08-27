@@ -103,8 +103,12 @@ async function post(path: string, body: unknown): Promise<Session> {
 }
 
 export const auth = {
+  // パス は `/token`。ここを落とすと `/auth/v1?grant_type=password` になり、
+  // Supabase は 404 を返す。その 404 には CORS ヘッダが付かないので、
+  // ブラウザには CORS 違反として見え、fetch は "Failed to fetch" を投げる。
+  // 原因（パスの間違い）から最も遠い症状が出るので、一度これで詰まった。
   signIn: (email: string, password: string) =>
-    post("?grant_type=password", { email, password }),
+    post("/token?grant_type=password", { email, password }),
 
   signOut() {
     store(null);
