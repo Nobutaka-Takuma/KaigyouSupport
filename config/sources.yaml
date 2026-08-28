@@ -148,9 +148,60 @@ sources:
       orthodontics:    ["矯正"]
       oral_surgery:    ["口腔外科"]
       pediatric:       ["小児歯科", "こども歯科", "小児"]
-    #: 歯科以外の標榜科（内科・皮膚科など。歯科口腔外科を併設する病院に出る）。
-    #: 歯科の競合数には混ぜず、この 1 つのキーにまとめます。
+    #: この語彙に含まれない標榜科（歯科にとっての内科・皮膚科など。歯科口腔外科を
+    #: 併設する病院に出ます）。競合数には混ぜず、この 1 つのキーにまとめます。
     non_dental_key: other_medical
+
+    # ------------------------------------------------------------ 表示名と並び順
+    # **コードの表と同じ場所に置きます。** ここが Python の dict にあったころは、
+    # 告示が科目を増やすたびに YAML とコードの 2 か所を直すことになり、片方だけ
+    # 直すと「キーはあるのに表示名が英字のまま」という状態になりました。
+    #
+    # 業態が増えたときは、その業態のソース定義に同じ形で書きます。医科の科目は
+    # 数十あるので、コードと表示名が離れているとまず追えません。
+    specialty_labels:
+      general:                "一般歯科"
+      pediatric:              "小児歯科"
+      orthodontics:           "矯正歯科"
+      pediatric_orthodontics: "小児矯正歯科"
+      oral_surgery:           "歯科口腔外科"
+      implant:                "インプラント"
+      cosmetic:               "審美・ホワイトニング"
+      home_visit:             "訪問歯科診療"
+      periodontal:            "歯周病"
+      preventive:             "予防歯科"
+      special_needs:          "障害者歯科"
+      dental_anesthesia:      "歯科麻酔"
+      prosthodontics:         "補綴・義歯"
+      endodontics:            "歯内療法"
+      sleep_apnea:            "睡眠時無呼吸"
+      other:                  "その他（歯科）"
+      other_medical:          "歯科以外の標榜科"
+    #: 表示順。標榜科目が先、自由記載が後。ここに無いキーは末尾に回ります。
+    specialty_order:
+      - general
+      - pediatric
+      - orthodontics
+      - pediatric_orthodontics
+      - oral_surgery
+      - implant
+      - cosmetic
+      - home_visit
+      - periodontal
+      - preventive
+      - special_needs
+      - prosthodontics
+      - endodontics
+      - dental_anesthesia
+      - sleep_apnea
+      - other
+      - other_medical
+    #: 診療時間から導く印。API と UI が共有する表示名です。
+    hours_labels:
+      saturday: "土曜診療"
+      sunday:   "日曜診療"
+      holiday:  "祝日診療"
+      evening:  "夜間診療"
 
     # ---------------------------------------------------------------- 診療時間
     # 曜日 8 種 × 診療時間帯 3 種 × (診療/外来受付) の開始・終了。

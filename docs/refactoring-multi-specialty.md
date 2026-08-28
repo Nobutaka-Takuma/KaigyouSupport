@@ -112,7 +112,7 @@ config/sources.yaml    2ブロック  mhlw_dental_clinics / mhlw_dental_specialt
 
 ## 進める順序
 
-進捗: **1 済** / **2 済** / 3 未 / 4 未 / 5 未
+進捗: **1 済** / **2 済** / **3 済** / 4 未 / 5 未
 
 ### 1. スコア鍵に業態を入れる（C）— 唯一、間違った答えが出る箇所 ✔ 済（030）
 
@@ -154,11 +154,27 @@ config/sources.yaml    2ブロック  mhlw_dental_clinics / mhlw_dental_specialt
 いないことは `test_the_business_type_is_defined_in_one_place` が見張ります
 （SQL の既定値と合成データの生成だけ除外）。
 
-### 3. 語彙を設定へ出す（D）
+### 3. 語彙を設定へ出す（D）✔ 済
 
-`specialties.py` の `LABELS` / `ORDER` / `SOURCE_ID` を業態ごとの設定に移します。
-`config/sources.yaml` の `specialty_codes` の隣が自然な置き場所です。
-**歯科の語彙は同じ内容のまま移すだけ**で、出力は1文字も変わらないこと。
+`LABELS` / `ORDER` / `HOURS_LABELS` を `config/sources.yaml` の
+`specialty_codes` の隣へ移しました。**内容は 1 文字も変えていません**
+（移す前の Python の dict と一致することをテストが持っています）。
+
+**どの語彙かは業態が決めます。** `SOURCE_ID` 固定をやめ、`specialty_codes` を
+持つソースの `facility_category` で引きます。見つからないときは**空を返し、
+他業態の語彙で代用しません。** 歯科の科目名で内科を分類したものは、
+間違っていてもそれらしく見えます。
+
+取り込み側（`mhlw_specialties`）も、そのファイル自身の業態で語彙を引くように
+しました。既定（歯科）で固定したままだと、医科のファイルを歯科の科目表で
+分類してほぼ全部が「その他の標榜科」に落ち、**しかも取り込みは成功と
+表示します。**
+
+`measures.py` のキー名（`dental_clinics` など）と `web/types.ts` のフィールド名は
+**まだ歯科の語です。** ここは DB・API・UI を横断して名前が流れているので、
+5 段目（医科のデータモデル）で医科の指標を足すときに、両方の名前を持てる形に
+します。今それだけを改名しても、歯科版の API の形が変わるだけで得るものが
+ありません。
 
 ### 4. 設定の置き場所を分ける（E）
 

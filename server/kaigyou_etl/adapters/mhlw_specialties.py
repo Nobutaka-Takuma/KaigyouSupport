@@ -102,6 +102,12 @@ class MHLWSpecialtiesAdapter(SourceAdapter):
         return self._hour_columns()[field].format(day=self._weekdays()[weekday])
 
     # -------------------------------------------------------------- validate
+    def _category(self) -> str:
+        """このファイルがどの業態のものか。語彙の選択に使います。"""
+        from kaigyou_core.scoring import DEFAULT_FACILITY_CATEGORY
+
+        return str(self.spec.get("facility_category") or DEFAULT_FACILITY_CATEGORY)
+
     def validate(self, artifact: Path) -> dict[str, Any]:
         headers, rows = self._rows(artifact)
         if not rows:
@@ -126,18 +132,22 @@ class MHLWSpecialtiesAdapter(SourceAdapter):
         free_text_names: Counter[str] = Counter()
         rows_with_hours = 0
         unmapped_codes: Counter[str] = Counter()
-        known = set(vocab.code_map())
+        # **語彙はこのソース自身の業態から引きます。** 既定（歯科）で固定すると、
+        # 医科のファイルを歯科の科目表で分類することになり、ほぼ全部が
+        # 「その他の標榜科」に落ちます。しかも取り込みは成功と表示します。
+        category = self._category()
+        known = set(vocab.code_map(category))
         for r in rows:
             fid = (r.get(resolved["facility_id"]) or "").strip()
             if fid:
                 facilities.add(fid)
             code = (r.get(resolved["specialty_code"]) or "").strip()
             name = (r.get(resolved["specialty_name"]) or "").strip()
-            key, free = vocab.classify(code, name)
+            key, free = vocab.classify(code, name, category)
             by_key[key] += 1
             if free:
                 free_text_names[name] += 1
-            if code not in known and code != vocab.free_text_code():
+            if code not in known and code != vocab.free_text_code(category):
                 unmapped_codes[code] += 1
             if any(_parse_time(r.get(self._hour_header("opens", d)))
                    for d in self._weekdays() if self._hour_header("opens", d) in present):
@@ -182,7 +192,8 @@ class MHLWSpecialtiesAdapter(SourceAdapter):
             code = (row.get(col["specialty_code"]) or "").strip()
             name = (row.get(col["specialty_name"]) or "").strip()
             if code or name:
-                specialties[fid][(code, name)] = vocab.classify(code, name)
+                specialties[fid][(code, name)] = vocab.classify(
+                    code, name, self._category())
 
             band = 1
             if band_col:

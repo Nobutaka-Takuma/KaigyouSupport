@@ -260,7 +260,7 @@ def _specialty_block(metrics: dict[str, Any]) -> dict[str, Any]:
             "declared": hours.get("declared"),
             "counts": [
                 {"key": key, "label": label, "count": hours.get(key)}
-                for key, label in vocab.HOURS_LABELS.items()
+                for key, label in vocab.hours_labels().items()
             ],
             "weekly_hours_median": _round(
                 metrics.get("facility_weekly_hours_median"), 1),

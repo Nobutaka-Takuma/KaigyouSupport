@@ -1366,7 +1366,7 @@ def _hours_block(metrics: dict[str, Any]) -> dict[str, Any]:
             {"key": key, "label": label, "count": counts.get(key),
              "share": (None if not declared or counts.get(key) is None
                        else round(counts[key] / declared, 3))}
-            for key, label in vocab.HOURS_LABELS.items()
+            for key, label in vocab.hours_labels().items()
         ],
         "weekly_hours_median": _round(metrics.get("facility_weekly_hours_median"), 1),
         "note": ("診療時間は医療機能情報提供制度の届出値。曜日ごとの開始・終了時刻から"

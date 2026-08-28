@@ -395,3 +395,84 @@ def test_a_catchment_without_specialty_data_still_analyses(conn, catchment):
     assert m["population"] == pytest.approx(10000, rel=0.01)
     assert m["facilities_with_specialty_data"] == 0
     assert m["facility_specialty_counts"] == {}
+
+
+# ------------------------------------------------------- 語彙は設定にあること
+#
+# 医科への拡張の 3 段目。コード表は YAML、表示名と並び順は Python の dict、
+# という割れた状態でした。告示が科目を増やすたびに 2 か所を直すことになり、
+# 片方だけ直すと「キーはあるのに表示名が英字のまま」になります。
+# 詳細は docs/refactoring-multi-specialty.md。
+
+def test_the_vocabulary_comes_from_the_configuration():
+    """表示名も並び順も設定から来ること。**コードに戻すと 2 か所になります。**"""
+    import ast
+    from pathlib import Path
+
+    module = Path(vocab.__file__)
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    literals = {
+        node.targets[0].id
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, (ast.Dict, ast.Tuple, ast.List))
+    }
+    assert not literals, (
+        f"語彙がコードに戻っています: {sorted(literals)}。"
+        "config/sources.yaml の specialty_labels / specialty_order へ")
+
+    # 中身は設定から引けていること（空の dict を返して素通りしない）。
+    assert vocab.labels()["pediatric"] == "小児歯科"
+    assert vocab.order()[0] == "general"
+    assert vocab.hours_labels()["holiday"] == "祝日診療"
+
+
+def test_moving_the_vocabulary_did_not_change_a_single_label():
+    """**歯科版は商談で使われています。** 移し替えで表示が変わってはいけない。
+
+    ここに書いてあるのは、移す前に Python の dict にあったものそのままです。
+    """
+    assert vocab.labels() == {
+        "general": "一般歯科",
+        "pediatric": "小児歯科",
+        "orthodontics": "矯正歯科",
+        "pediatric_orthodontics": "小児矯正歯科",
+        "oral_surgery": "歯科口腔外科",
+        "implant": "インプラント",
+        "cosmetic": "審美・ホワイトニング",
+        "home_visit": "訪問歯科診療",
+        "periodontal": "歯周病",
+        "preventive": "予防歯科",
+        "special_needs": "障害者歯科",
+        "dental_anesthesia": "歯科麻酔",
+        "prosthodontics": "補綴・義歯",
+        "endodontics": "歯内療法",
+        "sleep_apnea": "睡眠時無呼吸",
+        "other": "その他（歯科）",
+        "other_medical": "歯科以外の標榜科",
+    }
+    assert vocab.order() == (
+        "general", "pediatric", "orthodontics", "pediatric_orthodontics",
+        "oral_surgery", "implant", "cosmetic", "home_visit", "periodontal",
+        "preventive", "special_needs", "prosthodontics", "endodontics",
+        "dental_anesthesia", "sleep_apnea", "other", "other_medical")
+    assert vocab.hours_labels() == {
+        "saturday": "土曜診療", "sunday": "日曜診療",
+        "holiday": "祝日診療", "evening": "夜間診療"}
+
+
+def test_the_vocabulary_is_chosen_by_business_type():
+    """歯科と医科では科目の体系そのものが別です。1 つの表に混ぜられません。
+
+    **見つからないときに他業態の語彙で代用しません。** 歯科の科目名で内科を
+    分類したものは、間違っていてもそれらしく見えます。
+    """
+    from kaigyou_core.analysis import DEFAULT_CATEGORY
+
+    assert vocab.spec(DEFAULT_CATEGORY).get("specialty_codes"), \
+        "歯科の語彙は業態から引けること"
+    assert vocab.spec("medical_clinic") == {}, \
+        "まだ無い業態に、歯科の語彙を返さないこと"
+    assert vocab.labels("medical_clinic") == {}
+    assert vocab.label("pediatric", "medical_clinic") == "pediatric", \
+        "語彙が無ければキーをそのまま返す（歯科の表示名を借りない）"
