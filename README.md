@@ -246,11 +246,37 @@ kaigyou-etl run estat_population_mesh --input <最新年メッシュ> --baseline
 kaigyou-etl run mlit_stations         --input <S12 zip>
 kaigyou-etl run mlit_municipalities   --input <N03 zip>
 
+# 任意。取り込まなくても分析は成立しますが、そのぶん分からないことが増えます。
+# 取り込んでいない項目は、レポートに「取得できていません」と出ます。
+kaigyou-etl run mlit_future_population --input <500mメッシュ将来推計 SHP zip> --prefecture 13
+kaigyou-etl run estat_daytime_mesh     --input <従業地・通学地メッシュ>
+
 kaigyou-etl drop-sample      # 合成データを削除（残すと二重計上になります）
 kaigyou-etl refresh-stats    # スコア基準を実データの分布で再計算
 kaigyou-etl compute-scores   # ランキング・ヒートマップ用スコアを再計算
 kaigyou-etl status           # 4/4 になっていることを確認
 ```
+
+### 昼間人口（通学者を数える）
+
+経済センサスの「従業者数」は、そこで**働いている人**だけです。通学者は
+1 人も入りません。大学や専門学校の門前では、これが致命的に効きます。
+
+実測：早稲田駅前（半径1km）のレポートは、従業者数 52,688 人を昼間の人の
+代理として使い、**大学生に一言も触れませんでした**。
+
+国勢調査の従業地・通学地メッシュを取り込むと、通学者まで数えられます。
+
+- e-Stat 統計GIS →「令和2年国勢調査に関する地域メッシュ統計」
+  →「人口移動、就業状態等及び従業地・通学地」（2022年12月13日公表）
+- 500m メッシュ（2分の1地域メッシュ）で提供されます
+- **列 ID は必ずダウンロード元の「統計表の定義書」で確認してください。**
+  `config/sources.yaml` の `estat_daytime_mesh.columns` に書いてある ID は
+  未検証の候補です。合わなければ、ファイルにある列を並べて落ちます
+  （静かに 0 件にはなりません）
+
+取り込むと、レポートの付録に昼間人口の内訳（働いている人／通学している人／
+それ以外）が出ます。取り込んでいなければ「取得できていません」と出ます。
 
 ### 確認方法
 

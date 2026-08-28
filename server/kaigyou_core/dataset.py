@@ -220,8 +220,13 @@ def _dataset_caveats() -> list[str]:
     return [
         "スコアは相対値であり、開業の成否・売上・患者数を予測するものではありません。",
         "スコアは同一都道府県内で正規化しています。都道府県をまたいだスコアの比較はできません。",
-        "「従業者数」は昼間人口ではありません。通学者・来街者は含まれず、"
-        "繁華街の来街需要は捕捉できていません。",
+        "経済センサスの「従業者数」は昼間人口ではありません。**通学者が"
+        "含まれません。** 大学や専門学校の門前では、そこにいる人の大半が"
+        "従業者数に現れないことがあります。国勢調査の従業地・通学地メッシュ"
+        "（demand.daytime.census_daytime）を取り込むと通学者まで数えられます。"
+        "取り込んでいない地域では、そう表示されます。",
+        "昼間人口を取り込んでいても、来街者（買い物・観光）は含まれません。"
+        "繁華街の来街需要は、どちらの調査でも捕捉できていません。",
         "「地価」は土地の価格であり賃料ではありません。そこから賃料の目安を"
         "収益還元の考え方で機械的に換算していますが（cost.rent_estimate）、"
         "建物の状態・階数・契約条件・実際の募集事例を一切含まない粗い目安です。"
@@ -378,8 +383,91 @@ VINTAGE_LONG_AGO_YEARS = 30
 VINTAGE_RECENT_YEARS = 5
 
 
+def daytime_population(conn: psycopg.Connection, lat: float, lng: float,
+                       radius_m: int, mesh_size_m: int) -> dict[str, Any]:
+    """商圏の昼間人口（従業地・通学地による人口）。取れなければ、取れないと言う。
+
+    **なぜ要るか。** 「昼間そこにいる人」を経済センサスの従業者数だけで
+    測っていました。従業者は昼間人口の一部でしかなく、**通学者が丸ごと
+    落ちます**。
+
+    実測：早稲田駅前（半径1km）のレポートは、従業者数 52,688 人を昼間人口の
+    代理として使い、大学生に一言も触れませんでした。早稲田大学の学生は
+    従業者ではないので、経済センサスには 1 人も現れません。
+
+    重み付けは他のメッシュ集計と**同じ面積按分**にします。別の数え方に
+    すると、常住人口と並べたときに差が調査の差なのか数え方の差なのか
+    分からなくなります。
+    """
+    if not table_exists(conn, "mesh_daytime_population"):
+        return {"available": False, "reason": "not_migrated",
+                "note": "昼間人口のテーブルがまだありません"
+                        "（kaigyou-etl migrate を実行してください）。"}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH buf AS (
+                SELECT ST_Buffer(ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
+                                 %(radius)s)::geometry AS g
+            ),
+            share AS (
+                SELECT m.mesh_code,
+                       LEAST(1.0, GREATEST(0.0,
+                           ST_Area(ST_Intersection(m.geom, buf.g)::geography)
+                           / NULLIF(ST_Area(m.geom::geography), 0))) AS w
+                  FROM population_mesh m, buf
+                 WHERE m.mesh_size_m = %(mesh)s
+                   AND m.geom && buf.g AND ST_Intersects(m.geom, buf.g)
+            )
+            SELECT SUM(d.daytime_population * s.w) AS daytime,
+                   SUM(d.workers_here       * s.w) AS workers,
+                   SUM(d.students_here      * s.w) AS students,
+                   SUM(d.night_population   * s.w) AS night,
+                   count(*)                        AS mesh_count,
+                   count(d.students_here)          AS meshes_with_students,
+                   MAX(d.source_date)              AS source_date
+              FROM mesh_daytime_population d
+              JOIN share s ON s.mesh_code = d.mesh_code
+             WHERE d.mesh_size_m = %(mesh)s
+            """,
+            {"lat": lat, "lng": lng, "radius": radius_m, "mesh": mesh_size_m})
+        row = cur.fetchone()
+
+    if not row or not row["mesh_count"]:
+        return {"available": False, "reason": "not_loaded",
+                "note": "この地域の昼間人口（国勢調査 従業地・通学地メッシュ）は"
+                        "取り込まれていません。**昼間の人については、働いて"
+                        "いる人しか数えられていません。** 通学者（大学生など）は"
+                        "含まれていません。"}
+
+    daytime = _round(row["daytime"])
+    students = _round(row["students"])
+    workers = _round(row["workers"])
+    # 就業者でも通学者でもない昼間人口（在宅の常住者・乳幼児・高齢者など）。
+    # 引き算なので、そう名乗ります。
+    other = (None if daytime is None or workers is None or students is None
+             else max(0, daytime - workers - students))
+    return {
+        "available": True,
+        "population": daytime,
+        "workers_here": workers,
+        "students_here": students,
+        "other_here": other,
+        "night_population": _round(row["night"]),
+        "mesh_count": int(row["mesh_count"]),
+        # 通学者が取れなかったメッシュの数。0 と「分からない」を混ぜないため。
+        "meshes_without_students": int(row["mesh_count"]) - int(row["meshes_with_students"]),
+        "source_date": row["source_date"],
+        "definition": ("従業地・通学地による人口（昼間人口）を、現在人口と同じ"
+                       "面積按分で商圏に切り出したもの。**経済センサスの"
+                       "「従業者数」とは調査も定義も違うので、足さないで"
+                       "ください。** 通学者はこちらにしか現れません。"),
+    }
+
+
 def _industry_mix(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
-                  mesh_size_m: int) -> dict[str, Any] | None:
+                  mesh_size_m: int,
+                  total: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     """Workers by industry division, apportioned like every other mesh figure.
 
     Stored per mesh as jsonb and never surfaced until now. It is what separates
@@ -415,10 +503,107 @@ def _industry_mix(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         rows = cur.fetchall()
     if not rows:
         return None
-    return {
+    measured = {
         r["division"]: {"workers": round(r["workers"] or 0),
                         "establishments": round(r["establishments"] or 0)}
         for r in rows
+    }
+    return _industry_tree(measured, total)
+
+
+#: 産業分類の親子関係。**これが無いと、表が MECE に見えません。**
+#:
+#: 実測：「第3次産業 49,203」「教育・学習支援 13,245」「第2次産業 3,474」
+#: 「医療・福祉 5,978」…と並べていました。1行目に3行目以降が含まれている
+#: のに、同じ字下げで並んでいます。読み手は足し算ができず、合計を取ると
+#: 二重計上になります。
+#:
+#: 取り込む分類は config/sources.yaml の industry_columns で決まります。
+#: ここは**その親子関係**だけを持ちます（どれを取り込むかは設定、
+#: 取り込んだものがどう入れ子になっているかは統計の定義）。
+INDUSTRY_TREE: tuple[tuple[str, str, str | None], ...] = (
+    ("primary", "第1次産業", None),
+    ("secondary", "第2次産業", None),
+    ("tertiary", "第3次産業", None),
+    ("wholesale_retail", "卸売・小売", "tertiary"),
+    ("accommodation_food", "宿泊・飲食", "tertiary"),
+    ("education", "教育・学習支援", "tertiary"),
+    ("health_welfare", "医療・福祉", "tertiary"),
+)
+
+
+def _industry_tree(measured: Mapping[str, Mapping[str, Any]],
+                   total: Mapping[str, Any] | None) -> dict[str, Any]:
+    """測った分類を、足し合わせられる形に組み直す。
+
+    **残差を明示します。** 「第3次産業 49,203」のうち名前の付いた4つを
+    引くと 21,382 残ります。その行を出さないと、読み手は「4つで全部」と
+    読むか、足りない分を探すかのどちらかになります。どちらも間違いです。
+
+    残差は測った値ではなく引き算の結果なので、``derived`` で区別します。
+    按分の丸めで負になりうるので 0 で止め、止めたことも残します。
+    """
+    def value(key: str, field: str) -> float:
+        return float((measured.get(key) or {}).get(field) or 0)
+
+    rows: list[dict[str, Any]] = []
+    children: dict[str, list[str]] = {}
+    for key, _label, parent in INDUSTRY_TREE:
+        if parent:
+            children.setdefault(parent, []).append(key)
+
+    labels = {key: label for key, label, _p in INDUSTRY_TREE}
+    for key, label, parent in INDUSTRY_TREE:
+        if parent is not None or key not in measured:
+            continue
+        rows.append({"key": key, "label": label, "parent": None,
+                     "derived": False, **measured[key]})
+        named = [c for c in children.get(key, []) if c in measured]
+        for child in named:
+            rows.append({"key": child, "label": labels[child], "parent": key,
+                         "derived": False, **measured[child]})
+        if not named:
+            continue
+        # 残差は内訳の**いちばん最後**に置きます。名前の付いたものの前に
+        # 出すと、「その他」が何の残りなのか読み取れません。
+        rest = {field: value(key, field) - sum(value(c, field) for c in named)
+                for field in ("workers", "establishments")}
+        clamped = any(v < 0 for v in rest.values())
+        rows.append({
+            "key": f"{key}_other", "label": f"その他の{label}", "parent": key,
+            "derived": True,
+            "workers": max(0, round(rest["workers"])),
+            "establishments": max(0, round(rest["establishments"])),
+            "note": ("按分の丸めで内訳の合計が親を超えたため 0 にしました"
+                     if clamped else None),
+        })
+
+    top = [k for k, _l, parent in INDUSTRY_TREE if parent is None and k in measured]
+    unclassified = None
+    if total and total.get("workers") is not None:
+        rest = {field: float(total.get(field) or 0)
+                - sum(value(k, field) for k in top)
+                for field in ("workers", "establishments")}
+        # 全産業から第1次〜第3次を引いた残り。分類不能の事業所と、取り込んで
+        # いない分類（config で選んでいないもの）がここに落ちます。0 でも
+        # 行を出すのは、「合計が合う」ことを読み手が確かめられるようにする
+        # ためです。
+        unclassified = {
+            "key": "unclassified", "label": "分類不能・未取得（差分）",
+            "parent": None, "derived": True,
+            "workers": max(0, round(rest["workers"])),
+            "establishments": max(0, round(rest["establishments"])),
+        }
+
+    return {
+        "total": dict(total or {}),
+        "divisions": rows + ([unclassified] if unclassified else []),
+        "note": ("親子の関係があります。第1次・第2次・第3次が全産業の内訳で、"
+                 "卸売・小売などはさらに第3次産業の内訳です。**足し合わせる"
+                 "ときは同じ段のものだけを足してください。** 「その他」と"
+                 "「差分」は測った値ではなく、親から名前の付いた内訳を"
+                 "引いた残りです。取り込む分類は config/sources.yaml の "
+                 "industry_columns で決まります。"),
     }
 
 
@@ -574,6 +759,46 @@ def _competitor_distances(conn: psycopg.Connection, lat: float, lng: float,
                        "この階段が短ければ密集、長ければ分散を意味する。"),
     }
 
+
+
+def _outlook_with_actual(outlook: dict[str, Any],
+                         residents: Mapping[str, Any]) -> dict[str, Any]:
+    """推計の基準年に、国勢調査の実績を並べる。
+
+    **なぜ要るか。** 将来推計の公表値は、基準年（2020）については総人口しか
+    ありません。年齢内訳は 2025 年以降だけです。表にすると基準年の列が
+    「—」だらけになり、読み手には「分からない」に見えます。ところが 2020 年の
+    年齢内訳は国勢調査にあり、この商圏について既に集計済みです。
+
+    **合わせて 1 つの数にはしません。** 推計値と実績値は別の集合を別の方法で
+    数えたもので、実測でも総人口が 66,965（推計の基準年）と 66,817（国勢調査）
+    のように少し違います。足したり置き換えたりすると、どちらの数字を見て
+    いるのか分からなくなります。列を分けて、違う理由を書きます。
+    """
+    if not outlook.get("available") or not residents:
+        return outlook
+    population = residents.get("population")
+    elderly = residents.get("age_65_plus")
+    return {**outlook, "actual": {
+        "year": outlook.get("base_year"),
+        "source": "総務省統計局 国勢調査（e-Stat 統計GIS）",
+        "population": population,
+        "age_0_14": residents.get("age_0_14"),
+        "age_15_64": residents.get("age_15_64"),
+        "age_65_plus": elderly,
+        "households": residents.get("households"),
+        "elderly_share": (None if not population or elderly is None
+                          else round(float(elderly) / float(population), 3)),
+        # 75歳以上は国勢調査メッシュの取り込み対象に入っていません
+        #（population_mesh に列がありません）。**0 ではなく、無いのです。**
+        "age_75_plus": None,
+        "late_elderly_share": None,
+        "note": ("基準年の年齢内訳は将来推計の公表値には含まれないため、"
+                 "同じ商圏の国勢調査の集計を並べています。**推計値とは"
+                 "別の数え方**なので、総人口が推計の基準年と少し違います。"
+                 "75歳以上は国勢調査メッシュの取り込み対象に入っていないため"
+                 "空欄です（0 ではありません）。"),
+    }}
 
 
 def population_outlook(conn: psycopg.Connection, lat: float, lng: float,
@@ -1078,12 +1303,24 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                          "households", "population_growth", "mesh_count")}
                 for r, vals in by_radius.items()}},
             # 20〜30年の意思決定に、過去5年の増減だけで答えない。
-            "outlook": population_outlook(conn, lat, lng, radius_m, mesh_size_m or 1000),
+            "outlook": _outlook_with_actual(
+                population_outlook(conn, lat, lng, radius_m, mesh_size_m or 1000),
+                by_radius.get(str(radius_m)) or {}),
             "daytime": {
                 "by_radius": {r: {k: vals[k] for k in ("workers", "establishments")}
                               for r, vals in by_radius.items()},
-                "industry_mix": _industry_mix(conn, lat, lng, radius_m,
-                                              mesh_size_m or 1000),
+                # 経済センサスの従業者数では、通学者が丸ごと落ちます。
+                # 大学の門前で「昼間人口 5 万人」と書きながら学生を数え落とす、
+                # ということが実際に起きました。
+                "census_daytime": daytime_population(
+                    conn, lat, lng, radius_m, mesh_size_m or 1000),
+                # 全産業の合計も渡します。渡さないと「分類不能・未取得」の
+                # 差分が出せず、内訳を足しても合計に届かない理由が読み手に
+                # 分かりません。
+                "industry_mix": _industry_mix(
+                    conn, lat, lng, radius_m, mesh_size_m or 1000,
+                    total={k: (by_radius.get(str(radius_m)) or {}).get(k)
+                           for k in ("workers", "establishments")}),
             },
         },
         "competition": {

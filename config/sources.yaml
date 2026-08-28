@@ -257,6 +257,43 @@ sources:
       education:          ["T001147017", "T001147038"]   # Ｏ 教育，学習支援業
       health_welfare:     ["T001147018", "T001147039"]   # Ｐ 医療，福祉
 
+  estat_daytime_mesh:
+    adapter: estat_daytime_mesh
+    name: "国勢調査 500mメッシュ 従業地・通学地による人口（昼間人口）"
+    publisher: "総務省統計局 / e-Stat 統計GIS"
+    dataset_kind: official
+    homepage_url: "https://www.e-stat.go.jp/gis/statmap-search?type=1&toukeiCode=00200521"
+    license: "政府統計の総合窓口（e-Stat）利用規約 / CC BY 4.0 相当"
+    # 令和2年国勢調査に関する地域メッシュ統計「人口移動、就業状態等及び
+    # 従業地・通学地」（2022年12月13日公表）。他の 統計GIS 表と同じ形なので、
+    # 落とし方も同じです。
+    #
+    #   kaigyou-etl run estat_daytime_mesh --input <ダウンロードしたファイル>
+    #
+    # **なぜ要るか。** 経済センサスの「従業者数」だけを昼間の人の代理に
+    # していたので、**通学者が丸ごと落ちていました**。早稲田駅前のレポートが
+    # 大学生に一言も触れなかったのはこれが理由です。学生は従業者ではないので、
+    # 経済センサスには 1 人も現れません。
+    url: null
+    encoding: cp932
+    # ダウンロードしたページの表示と必ず突き合わせてください。ここが違うと、
+    # 画面に違う年の調査だと書かれます。ファイル自体は年を持ちません。
+    source_date: 2020-10-01
+    # ---------------------------------------------------------------- 列 ID
+    # **必ずダウンロード元の「統計表の定義書」で確認してください。**
+    # 下の ID は未検証の候補です。合っていなければ validate が、実際に
+    # ファイルにある列を並べて落とします（静かに 0 件にはなりません）。
+    #
+    # 必須は mesh_code と daytime_population だけです。内訳は取れなければ
+    # NULL のままで、レポートには「取得できていない」と出ます。0 では
+    # 埋めません——「通学者が 0 人」と「通学者が分からない」は別のことです。
+    columns:
+      mesh_code:          ["KEY_CODE", "MESH_ID", "メッシュコード"]
+      daytime_population: ["昼間人口", "従業地・通学地による人口"]
+      workers_here:       ["従業者数", "従業地による就業者数"]
+      students_here:      ["通学者数", "通学地による通学者数"]
+      night_population:   ["夜間人口", "常住人口"]
+
   mlit_stations:
     adapter: mlit_stations
     name: "国土数値情報 駅別乗降客数（S12）"

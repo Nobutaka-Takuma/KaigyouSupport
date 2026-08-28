@@ -77,6 +77,73 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
 # LLM を通さないので、桁の取り違えも書き落としも起きません。トークンも
 # 使いません。
 
+def _daytime_block(daytime: Mapping[str, Any] | None) -> list[str]:
+    """昼間人口（従業地・通学地）。取れていないときは、取れていないと書く。
+
+    実測：早稲田駅前のレポートは、経済センサスの従業者数 52,688 人を昼間の
+    人の代理として使い、**大学生に一言も触れませんでした**。学生は従業者では
+    ないので、経済センサスには 1 人も現れません。黙って省くと、読み手には
+    「そこに学生はいない」と読めます。
+    """
+    if not daytime:
+        return []
+    if not daytime.get("available"):
+        return ["#### 昼間人口（従業地・通学地）", "",
+                f"**取得できていません。** {daytime.get('note', '')}", ""]
+    rows = [
+        ["昼間人口（従業地・通学地による人口）", _num(daytime.get("population"))],
+        ["　うち この場所で働いている人", _num(daytime.get("workers_here"))],
+        ["　うち この場所に通学している人", _num(daytime.get("students_here"))],
+        ["　うち それ以外＊", _num(daytime.get("other_here"))],
+        ["（参考）同じ調査の常住人口", _num(daytime.get("night_population"))],
+    ]
+    lines = ["#### 昼間人口（従業地・通学地）", ""]
+    lines += _table(["区分", "人数"], rows)
+    lines += ["＊ 引き算で出した残りです（在宅の常住者など）。", ""]
+    if daytime.get("meshes_without_students"):
+        lines += [f"通学者が取得できなかったメッシュが "
+                  f"{daytime['meshes_without_students']} 件あります。"
+                  "その分は合計に入っていません（0 として数えてはいません）。", ""]
+    if daytime.get("definition"):
+        lines += [str(daytime["definition"]), ""]
+    return lines
+
+
+def _industry_block(mix: Mapping[str, Any] | None) -> list[str]:
+    """産業別を、足し合わせられる形で出す。
+
+    実測：「第3次産業 49,203」「教育・学習支援 13,245」「第2次産業 3,474」…
+    と同じ字下げで並べていました。1行目に3行目以降が含まれているので、
+    読み手が合計を取ると二重計上になります。
+
+    親子を字下げで示し、名前の付いた内訳を引いた残りも行として出します。
+    残差を出さないと「4つで全部」と読まれます。
+    """
+    if not mix or not mix.get("divisions"):
+        return []
+    total = mix.get("total") or {}
+    rows: list[list[Any]] = []
+    if total.get("workers") is not None:
+        rows.append(["**全産業**", _num(total.get("workers")),
+                     _num(total.get("establishments"))])
+    for item in mix["divisions"]:
+        # 全角スペースで段を作ります。Markdown の表はセル先頭の半角空白を
+        # 落とすので、半角では字下げが消えます。
+        indent = "　" if item.get("parent") is None else "　　"
+        label = f"{indent}{item.get('label')}"
+        if item.get("derived"):
+            label += "＊"
+        rows.append([label, _num(item.get("workers")),
+                     _num(item.get("establishments"))])
+    lines = ["#### 産業別（商圏内）", ""]
+    lines += _table(["産業", "従業者数", "事業所数"], rows)
+    if any(item.get("derived") for item in mix["divisions"]):
+        lines += ["＊ 印は測った値ではなく、親から名前の付いた内訳を引いた残りです。", ""]
+    if mix.get("note"):
+        lines += [str(mix["note"]), ""]
+    return lines
+
+
 def _table(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> list[str]:
     if not rows:
         return []
@@ -126,15 +193,8 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
             [label] + [_num((daytime.get(r) or {}).get(key)) for r in radii]
             for label, key in (("従業者数", "workers"), ("事業所数", "establishments"))
         ])
-        mix = (demand.get("daytime") or {}).get("industry_mix") or {}
-        if mix:
-            labels = {"tertiary": "第3次産業", "secondary": "第2次産業",
-                      "wholesale_retail": "卸売・小売", "accommodation_food": "宿泊・飲食",
-                      "health_welfare": "医療・福祉", "education": "教育・学習支援"}
-            lines += ["#### 産業別（商圏内）", ""]
-            lines += _table(["産業", "従業者数", "事業所数"], [
-                [labels.get(key, key), _num(v.get("workers")), _num(v.get("establishments"))]
-                for key, v in mix.items()])
+        lines += _daytime_block((demand.get("daytime") or {}).get("census_daytime"))
+        lines += _industry_block((demand.get("daytime") or {}).get("industry_mix"))
 
     by_radius = competition.get("by_radius") or {}
     if by_radius:
@@ -247,28 +307,47 @@ def _outlook_figures(dataset: Mapping[str, Any]) -> list[str]:
     years = _readable_years(outlook.get("years") or [], outlook.get("base_year"))
     if not years:
         return []
-    head = ["年"] + [str(y["year"]) for y in years]
+
+    # 基準年の実績（国勢調査）を先頭の列に置きます。将来推計の公表値は基準年に
+    # ついて総人口しか持たないので、そのままだと基準年の列が「—」だらけに
+    # なり、読み手には「分からない」に見えます。**別の数え方なので列を分け、
+    # 混ぜません。**
+    actual = outlook.get("actual") or {}
+    columns: list[tuple[str, Mapping[str, Any]]] = []
+    if actual.get("population") is not None:
+        columns.append((f"{actual.get('year')}（実績）", actual))
+    columns += [(str(y["year"]) + ("（推計基準年）" if y["year"] == outlook.get("base_year")
+                                   else ""), y) for y in years]
+
+    def pct(entry: Mapping[str, Any], key: str) -> str:
+        value = entry.get(key)
+        return "—" if value is None else f"{value * 100:.1f}%"
+
+    head = ["年"] + [name for name, _ in columns]
     rows = [
-        ["総人口"] + [_num(y.get("population")) for y in years],
-        ["0〜14歳"] + [_num(y.get("age_0_14")) for y in years],
-        ["65歳以上"] + [_num(y.get("age_65_plus")) for y in years],
-        ["65歳以上の割合"] + ["—" if y.get("elderly_share") is None
-                              else f"{y['elderly_share'] * 100:.1f}%" for y in years],
-        ["75歳以上"] + [_num(y.get("age_75_plus")) for y in years],
-        ["75歳以上の割合"] + ["—" if y.get("late_elderly_share") is None
-                              else f"{y['late_elderly_share'] * 100:.1f}%" for y in years],
+        ["総人口"] + [_num(e.get("population")) for _n, e in columns],
+        ["0〜14歳"] + [_num(e.get("age_0_14")) for _n, e in columns],
+        ["15〜64歳"] + [_num(e.get("age_15_64")) for _n, e in columns],
+        ["65歳以上"] + [_num(e.get("age_65_plus")) for _n, e in columns],
+        ["65歳以上の割合"] + [pct(e, "elderly_share") for _n, e in columns],
+        ["75歳以上"] + [_num(e.get("age_75_plus")) for _n, e in columns],
+        ["75歳以上の割合"] + [pct(e, "late_elderly_share") for _n, e in columns],
         [f"{outlook.get('base_year')}年=100"]
-        + ["—" if y.get("index_vs_base") is None
-           else f"{y['index_vs_base'] * 100:.0f}" for y in years],
+        + ["—" if e.get("index_vs_base") is None
+           else f"{e['index_vs_base'] * 100:.0f}" for _n, e in columns],
     ]
-    return (["### 将来推計人口", "",
-             f"出典: {outlook.get('estimate_label') or '将来推計人口'}"
+    lines = ["### 人口の実績と将来推計", "",
+             f"出典: 実績は{actual.get('source') or '国勢調査'}、"
+             f"推計は{outlook.get('estimate_label') or '将来推計人口'}"
              f"（基準年 {outlook.get('base_year')}）。"
              "推計であって予測ではなく、出生・死亡・移動の仮定の上に成り立ちます。"
              + (f"（公表は{years[0]['year']}〜{outlook['years'][-1]['year']}年の5年刻み。"
                 "表は10年刻みで抜粋）" if len(outlook.get("years") or []) > len(years) else ""),
              ""]
-            + _table(head, rows))
+    lines += _table(head, rows)
+    if actual.get("note"):
+        lines += [str(actual["note"]), ""]
+    return lines
 
 
 def _access_figures(dataset: Mapping[str, Any]) -> list[str]:

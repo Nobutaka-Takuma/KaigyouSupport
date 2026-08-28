@@ -9,6 +9,7 @@ from typing import Type
 
 from kaigyou_etl.adapters.base import AdapterContext, SourceAdapter
 from kaigyou_etl.adapters.estat_business_mesh import EStatBusinessMeshAdapter
+from kaigyou_etl.adapters.estat_daytime_mesh import EStatDaytimeMeshAdapter
 from kaigyou_etl.adapters.estat_mesh import EStatMeshAdapter
 from kaigyou_etl.adapters.mhlw_clinics import MHLWClinicsAdapter
 from kaigyou_etl.adapters.mhlw_specialties import MHLWSpecialtiesAdapter
@@ -23,6 +24,7 @@ ADAPTERS: dict[str, Type[SourceAdapter]] = {
     "mhlw_specialties": MHLWSpecialtiesAdapter,
     "estat_mesh": EStatMeshAdapter,
     "estat_business_mesh": EStatBusinessMeshAdapter,
+    "estat_daytime_mesh": EStatDaytimeMeshAdapter,
     "mlit_stations": MLITStationsAdapter,
     "mlit_municipalities": MLITMunicipalitiesAdapter,
     "mlit_land_prices": MLITLandPriceAdapter,

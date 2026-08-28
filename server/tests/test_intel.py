@@ -3579,9 +3579,209 @@ def test_the_outlook_table_stays_readable():
 
     table = [ln for ln in md.splitlines() if ln.startswith("| 年 |")][0]
     shown = [c.strip() for c in table.split("|")[2:-1]]
-    assert shown == ["2020", "2030", "2040", "2050"], f"出た年: {shown}"
+    assert shown == ["2020（推計基準年）", "2030", "2040", "2050"], f"出た年: {shown}"
     assert "2070" not in table, "引退のはるか先まで並べない"
     assert "10年刻みで抜粋" in md, "絞ったことを黙らない"
+
+
+def test_the_daytime_population_counts_the_people_who_are_not_workers(dataset):
+    """実測：早稲田駅前のレポートは、経済センサスの従業者数 52,688 人を
+    昼間の人の代理として使い、**大学生に一言も触れませんでした**。
+
+    学生は従業者ではないので、経済センサスには1人も現れません。歯科医院に
+    とって、20代前半の数万人がそこにいるかどうかは診療内容も診療時間も
+    変える情報です。
+    """
+    daytime = (dataset["demand"]["daytime"]).get("census_daytime")
+    assert daytime is not None, "取れていないなら、取れていないと言う欄が要ります"
+    if not daytime["available"]:
+        # 取り込んでいない環境。**黙って0にせず、理由を名乗ること。**
+        assert daytime["reason"] in ("not_loaded", "not_migrated")
+        assert "通学者" in daytime["note"]
+        return
+    assert daytime["students_here"] is not None
+    # 内訳が総数を超えないこと。就業者も通学者も昼間人口の内数です。
+    assert (daytime["workers_here"] + daytime["students_here"]
+            <= daytime["population"])
+    assert daytime["other_here"] >= 0
+
+
+def test_the_daytime_block_says_so_when_it_is_not_loaded():
+    """黙って省くと、読み手には「そこに学生はいない」と読めます。"""
+    from kaigyou_intel.report import _daytime_block
+
+    text = "\n".join(_daytime_block(
+        {"available": False, "reason": "not_loaded",
+         "note": "取り込まれていません。通学者（大学生など）は含まれていません。"}))
+    assert "取得できていません" in text and "通学者" in text
+    # 欄そのものが無いときは、見出しも出しません（そういう版のレポート）。
+    assert _daytime_block(None) == []
+
+
+def test_the_two_daytime_figures_are_not_added_together(dataset):
+    """経済センサスの従業者数と、国勢調査の従業地・通学地による就業者数は、
+    調査も定義も違います。足すと二重計上です。
+
+    別のキーで持ち、ラベルにもそう書きます。
+    """
+    from kaigyou_intel.projection import citable_keys, for_step1
+
+    keys = citable_keys(for_step1(dataset))
+    if "daytime.population" not in keys:
+        pytest.skip("この環境には昼間人口が取り込まれていません")
+    payload = for_step1(dataset)
+    entries = {c["key"]: c for c in payload["citable"]}
+    assert "足さないこと" in entries["daytime.population"]["note"]
+    assert "経済センサスには現れない" in entries["daytime.students_here"]["note"]
+
+
+def test_the_caveats_name_what_the_worker_count_misses():
+    """「従業者数は昼間人口ではありません」だけでは、何が抜けているのかが
+    読み手に伝わりません。**通学者**と名指しします。"""
+    from kaigyou_core.dataset import _dataset_caveats
+
+    text = " ".join(_dataset_caveats())
+    assert "通学者が" in text and "大学" in text
+    assert "来街者" in text, "買い物・観光の来街はどちらの調査にも入りません"
+
+
+def test_the_daytime_adapter_is_registered():
+    """設定に書いてもアダプタが無ければ、`run` はそこで止まります。"""
+    from kaigyou_core import config as _cfg
+    from kaigyou_etl.adapters import ADAPTERS
+
+    spec = _cfg.sources_config()["sources"]["estat_daytime_mesh"]
+    assert spec["adapter"] in ADAPTERS
+    # 必須は 2 つだけ。内訳は取れなければ NULL のまま（0 で埋めない）。
+    assert {"mesh_code", "daytime_population"} <= set(spec["columns"])
+
+
+def test_the_industry_table_adds_up():
+    """実測：「第3次産業 49,203」「教育・学習支援 13,245」「第2次産業 3,474」
+    「医療・福祉 5,978」…と同じ字下げで並べていました。
+
+    1行目に3行目以降が含まれているのに、見た目が同じです。読み手が合計を
+    取ると二重計上になります。親子を字下げで示し、名前の付いた内訳を引いた
+    残りも行として出します。
+    """
+    from kaigyou_core.dataset import _industry_tree
+
+    mix = _industry_tree(
+        {"secondary": {"workers": 3474, "establishments": 407},
+         "tertiary": {"workers": 49203, "establishments": 2583},
+         "wholesale_retail": {"workers": 5180, "establishments": 534},
+         "accommodation_food": {"workers": 3418, "establishments": 351},
+         "education": {"workers": 13245, "establishments": 119},
+         "health_welfare": {"workers": 5978, "establishments": 264}},
+        {"workers": 52688, "establishments": 2992})
+
+    rows = {r["key"]: r for r in mix["divisions"]}
+    # 第3次の内訳が、名前つき4つ＋残りで親に一致すること。
+    children = ["wholesale_retail", "accommodation_food", "education",
+                "health_welfare", "tertiary_other"]
+    assert sum(rows[k]["workers"] for k in children) == rows["tertiary"]["workers"]
+    # 上位の3分類＋差分が全産業に一致すること。
+    assert (rows["secondary"]["workers"] + rows["tertiary"]["workers"]
+            + rows["unclassified"]["workers"]) == 52688
+    # 引き算で出したものは、そう名乗ること。
+    assert rows["tertiary_other"]["derived"] and rows["unclassified"]["derived"]
+    assert not rows["education"]["derived"]
+    # 残りは内訳のいちばん最後。前に出すと何の残りか読み取れません。
+    order = [r["key"] for r in mix["divisions"]]
+    assert order.index("tertiary_other") == order.index("health_welfare") + 1
+
+
+def test_the_industry_table_shows_the_nesting():
+    from kaigyou_core.dataset import _industry_tree
+    from kaigyou_intel.report import _industry_block
+
+    mix = _industry_tree(
+        {"tertiary": {"workers": 100, "establishments": 10},
+         "education": {"workers": 40, "establishments": 4}},
+        {"workers": 120, "establishments": 12})
+    text = "\n".join(_industry_block(mix))
+    assert "| **全産業** | 120 | 12 |" in text
+    # 全角スペースで段を作ります。Markdown は半角の字下げを落とします。
+    assert "| 　第3次産業 |" in text
+    assert "| 　　教育・学習支援 |" in text
+    assert "| 　　その他の第3次産業＊ | 60 | 6 |" in text
+    assert "測った値ではなく" in text
+
+
+def test_a_rounding_overshoot_does_not_produce_a_negative_row():
+    """按分の丸めで内訳の合計が親を超えることがあります。**負の従業者数は
+    出しません。** 止めたことは残します。"""
+    from kaigyou_core.dataset import _industry_tree
+
+    mix = _industry_tree(
+        {"tertiary": {"workers": 100, "establishments": 10},
+         "education": {"workers": 103, "establishments": 11}},
+        {"workers": 100, "establishments": 10})
+    rest = next(r for r in mix["divisions"] if r["key"] == "tertiary_other")
+    assert rest["workers"] == 0 and rest["establishments"] == 0
+    assert "0 にしました" in rest["note"]
+
+
+def test_the_industry_keys_stay_citable_with_their_nesting(dataset):
+    """「教育・学習支援の従業者数」と「第3次産業の従業者数」を、同じ段の
+    数字として足されると困ります。ラベルに親を書きます。"""
+    from kaigyou_intel.projection import for_step1
+
+    citable = {c["key"]: c for c in for_step1(dataset)["citable"]}
+    nested = [c for k, c in citable.items() if k.startswith("industry.")]
+    if not nested:
+        pytest.skip("この環境には産業別のデータがありません")
+    child = citable.get("industry.education.workers")
+    if child:
+        assert "内訳" in child["label"]
+
+
+def test_the_base_year_is_filled_in_from_the_census():
+    """将来推計の公表値は、基準年について総人口しか持ちません。
+
+    そのままだと基準年の列が「—」だらけになり、読み手には「分からない」に
+    見えます。ところが 2020 年の年齢内訳は国勢調査にあり、この商圏について
+    既に集計済みです。
+
+    **ただし合わせて1つの数にはしません。** 実測でも総人口が 66,965（推計の
+    基準年）と 66,817（国勢調査）のように少し違います。別の集合を別の方法で
+    数えたものなので、列を分けて、違う理由を書きます。
+    """
+    from kaigyou_core.dataset import _outlook_with_actual
+    from kaigyou_intel.report import to_markdown
+
+    outlook = _outlook_with_actual(
+        {"available": True, "base_year": 2020, "estimate_label": "令和6年国政局推計",
+         "years": [{"year": 2020, "population": 66965, "index_vs_base": 1.0},
+                   {"year": 2030, "population": 71096, "age_65_plus": 13647,
+                    "elderly_share": 0.192, "index_vs_base": 1.06}]},
+        {"population": 66817, "age_0_14": 5709, "age_15_64": 42450,
+         "age_65_plus": 12981, "households": 41574})
+    md = to_markdown({"title": "t", "sections": []},
+                     {"demand": {"outlook": outlook}})
+
+    table = [ln for ln in md.splitlines() if ln.startswith("| 年 |")][0]
+    shown = [c.strip() for c in table.split("|")[2:-1]]
+    assert shown[0] == "2020（実績）" and shown[1] == "2020（推計基準年）"
+    # 実績の年齢内訳が入っていること。
+    assert "| 0〜14歳 | 5,709 |" in md
+    assert "| 65歳以上の割合 | 19.4% |" in md
+    # 混ぜていないこと。推計の基準年の総人口はそのまま。
+    assert "| 総人口 | 66,817 | 66,965 |" in md
+    assert "別の数え方" in md
+    # 75歳以上は国勢調査メッシュに無い。**0 と書かない。**
+    row = [ln for ln in md.splitlines() if ln.startswith("| 75歳以上 |")][0]
+    assert row.split("|")[2].strip() == "—"
+
+
+def test_the_base_year_column_is_dropped_when_there_is_no_census_to_show():
+    """実績が無ければ、列も出しません。空の列は「取れなかった」ではなく
+    「そういう年がある」に見えます。"""
+    from kaigyou_core.dataset import _outlook_with_actual
+
+    outlook = {"available": True, "base_year": 2020, "years": [{"year": 2020}]}
+    assert "actual" not in _outlook_with_actual(outlook, {})
+    assert "actual" not in _outlook_with_actual({"available": False}, {"population": 1})
 
 
 def test_a_short_series_is_shown_in_full():

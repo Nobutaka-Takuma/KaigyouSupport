@@ -172,9 +172,36 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     # --- 産業・雇用 --------------------------------------------------------
     mix = ((dataset.get("demand") or {}).get("daytime") or {}).get("industry_mix") or {}
-    for division, values in mix.items():
-        add(f"industry.{division}.workers", f"{division}の従業者数",
-            (values or {}).get("workers"), "人", "economy", CENSUS_BIZ)
+    for item in mix.get("divisions") or []:
+        # 親子があるので、ラベルにそう書きます。「教育・学習支援の従業者数」と
+        # 「第3次産業の従業者数」を同じ段の数字として足されると困ります。
+        parent = item.get("parent")
+        label = (f"{item.get('label')}の従業者数"
+                 + (f"（{parent} の内訳）" if parent else ""))
+        add(f"industry.{item.get('key')}.workers", label,
+            item.get("workers"), "人", "economy", CENSUS_BIZ,
+            note=("測った値ではなく、親から名前の付いた内訳を引いた残りです。"
+                  if item.get("derived") else None))
+
+    # --- 昼間人口（従業地・通学地） ----------------------------------------
+    # 経済センサスの従業者数では通学者が落ちます。大学の門前で「昼間人口
+    # 5万人」と書きながら学生を数え落とす、ということが実際に起きました。
+    census_daytime = ((dataset.get("demand") or {}).get("daytime")
+                      or {}).get("census_daytime") or {}
+    if census_daytime.get("available"):
+        label = "国勢調査 従業地・通学地"
+        add("daytime.population", "昼間人口（従業地・通学地による人口）",
+            census_daytime.get("population"), "人", "economy", label,
+            note="経済センサスの従業者数とは調査も定義も違います。足さないこと。")
+        add("daytime.workers_here", "昼間人口のうち、この場所で働いている人",
+            census_daytime.get("workers_here"), "人", "economy", label)
+        add("daytime.students_here", "昼間人口のうち、この場所に通学している人",
+            census_daytime.get("students_here"), "人", "economy", label,
+            note="**経済センサスには現れない層です。** 大学・専門学校の"
+                 "門前ではここが最大の昼間人口になります。")
+        add("daytime.other_here", "昼間人口のうち、就業者でも通学者でもない人",
+            census_daytime.get("other_here"), "人", "economy", label,
+            note="引き算で出した残りです。")
 
     # --- 将来推計 ----------------------------------------------------------
     outlook = (dataset.get("demand") or {}).get("outlook") or {}
