@@ -77,6 +77,35 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
 # LLM を通さないので、桁の取り違えも書き落としも起きません。トークンも
 # 使いません。
 
+def _basis_note(dataset: Mapping[str, Any]) -> list[str]:
+    """「人数」の数え方が3通りあることを、表の並びの中で1回だけ言う。
+
+    **ここを混ぜると、足してはいけないものを足します。** 実測（早稲田駅・
+    半径1km）で、同じ「働く人」が経済センサス 52,688 人（従業地基準）に
+    対して国勢調査 22,322 人（常住地基準）。2.4 倍違いますが誤差ではなく、
+    前者は昼間そこにいる人、後者は夜そこにいる人です。
+    """
+    demand = dataset.get("demand") or {}
+    profile = (demand.get("residents") or {}).get("profile") or {}
+    census = (demand.get("daytime") or {}).get("census_daytime") or {}
+    rows = [["経済センサス 従業者数", "従業地基準", "そこで**働いている**人"]]
+    if profile.get("available"):
+        rows.append(["国勢調査 就業状態等基本集計", "常住地基準",
+                     "そこに**住んでいる**人（通勤手段・居住期間・在学者）"])
+    rows.append([
+        "国勢調査 従業地・通学地集計", "従業地・通学地基準",
+        ("そこに**来る**人（＝昼間人口。通学者を含む）"
+         if census.get("available") else "**未取得。** 通学者は数えられていません")])
+    return (["#### この表の「人数」の数え方", ""]
+            + _table(["出典", "基準", "何を数えているか"], rows)
+            + ["**基準の違う数字を足さないでください。** 実測（早稲田駅・"
+               "半径1km）では、経済センサスの従業者 52,688 人に対して、"
+               "国勢調査の「当地に常住する就業者」は 22,322 人でした。"
+               "2.4 倍の差は誤差ではなく、前者が昼間そこにいる人、後者が夜"
+               "そこにいる人だからです。同じように、在学者（常住地基準）は"
+               "**そこに住んでいる学生**であって、通ってくる学生ではありません。", ""])
+
+
 def _resident_profile_block(profile: Mapping[str, Any] | None) -> list[str]:
     """住んでいる人の性格。交通手段・居住期間・在学。
 
@@ -89,7 +118,7 @@ def _resident_profile_block(profile: Mapping[str, Any] | None) -> list[str]:
         return ["#### 居住者の通勤手段・居住期間", "",
                 f"**取得できていません。** {profile.get('note', '')}", ""]
 
-    lines = ["#### 居住者の通勤・通学手段（**常住地基準。昼間人口ではありません**）", ""]
+    lines = ["#### 居住者の通勤・通学手段（国勢調査・**常住地基準**）", ""]
     modes = profile.get("commute_modes") or []
     lines += _table(["手段", "人数", "割合"], [
         [m.get("label"), _num(m.get("people")),
@@ -268,7 +297,7 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
 
     daytime = (demand.get("daytime") or {}).get("by_radius") or {}
     if daytime:
-        lines += ["### 昼間（従業者・事業所）", ""]
+        lines += ["### 従業者・事業所（経済センサス・**従業地基準**）", ""]
         lines += _table(head, [
             [label] + [_num((daytime.get(r) or {}).get(key)) for r in radii]
             for label, key in (("従業者数", "workers"), ("事業所数", "establishments"))
@@ -279,6 +308,9 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
         lines += _municipality_daytime_block(
             (dataset.get("location") or {}).get("daytime"))
         lines += _industry_block((demand.get("daytime") or {}).get("industry_mix"))
+
+    if daytime or (demand.get("residents") or {}).get("profile"):
+        lines += _basis_note(dataset)
 
     by_radius = competition.get("by_radius") or {}
     if by_radius:

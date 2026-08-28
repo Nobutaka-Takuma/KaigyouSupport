@@ -388,6 +388,27 @@ VINTAGE_RECENT_YEARS = 5
 _STUDENT_AGE_ORDERS = (2, 3)   # 15〜19歳, 20〜24歳
 
 
+#: 「人数」の**数え方の基準**。ここを混ぜると、足してはいけないものを足します。
+#:
+#: 実測（早稲田駅・半径1km）で、同じ「働く人」がこうなります。
+#:
+#:     経済センサス 従業者数            52,688 人  ← 従業地基準（そこで働く人）
+#:     国勢調査 当地に常住する就業者    22,322 人  ← 常住地基準（そこに住む働き手）
+#:
+#: 2.4 倍違いますが、これは調査の誤差ではありません。**別のものを数えて
+#: います。** 前者は昼間そこにいる人、後者は夜そこにいる人です。「同じ
+#: 国勢調査だから」という理由で後者に揃えると、昼間の人が半分以下になります。
+#:
+#: 在学者も同じです。T001108 の在学者は**そこに住んでいる学生**で、
+#: 大学に通ってくる学生ではありません。従業者数に足しても昼間人口には
+#: なりません。
+MEASUREMENT_BASES = {
+    "workplace": "従業地基準（そこで働いている人）",
+    "residence": "常住地基準（そこに住んでいる人）",
+    "workplace_or_school": "従業地・通学地基準（そこで働く人＋そこに通う人＝昼間人口）",
+}
+
+
 #: 通勤・通学の交通手段。**1人が複数を使うので合計は人数と一致しません。**
 #: 比率で読むものなので、割合も一緒に返します。
 _COMMUTE_MODES = (("commute_walk", "徒歩のみ"), ("commute_rail", "鉄道・電車"),
@@ -495,6 +516,8 @@ def resident_profile(conn: psycopg.Connection, lat: float, lng: float,
             "workers_living_here": values.get("workers_living_here"),
             "students_living_here": values.get("students_living_here"),
         },
+        "basis": "residence",
+        "basis_label": MEASUREMENT_BASES["residence"],
         "definition": ("国勢調査 就業状態等基本集計を、現在人口と同じ面積按分で"
                        "商圏に切り出したもの。**常住地基準であり、昼間人口では"
                        "ありません。** 交通手段は通勤・通学の手段で、来院手段"
@@ -657,6 +680,8 @@ def daytime_population(conn: psycopg.Connection, lat: float, lng: float,
         # 通学者が取れなかったメッシュの数。0 と「分からない」を混ぜないため。
         "meshes_without_students": int(row["mesh_count"]) - int(row["meshes_with_students"]),
         "source_date": row["source_date"],
+        "basis": "workplace_or_school",
+        "basis_label": MEASUREMENT_BASES["workplace_or_school"],
         "definition": ("従業地・通学地による人口（昼間人口）を、現在人口と同じ"
                        "面積按分で商圏に切り出したもの。**経済センサスの"
                        "「従業者数」とは調査も定義も違うので、足さないで"
@@ -797,6 +822,8 @@ def _industry_tree(measured: Mapping[str, Mapping[str, Any]],
     return {
         "total": dict(total or {}),
         "divisions": rows + ([unclassified] if unclassified else []),
+        "basis": "workplace",
+        "basis_label": MEASUREMENT_BASES["workplace"],
         "note": ("親子の関係があります。第1次・第2次・第3次が全産業の内訳で、"
                  "卸売・小売などはさらに第3次産業の内訳です。**足し合わせる"
                  "ときは同じ段のものだけを足してください。** 「その他」と"
@@ -1519,6 +1546,12 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 population_outlook(conn, lat, lng, radius_m, mesh_size_m or 1000),
                 by_radius.get(str(radius_m)) or {}),
             "daytime": {
+                # **経済センサスの従業者数です。従業地基準。** 同じ商圏の
+                # 「そこに住んでいる働き手」（国勢調査・常住地基準）とは別物で、
+                # 実測では 52,688 対 22,322 と 2.4 倍違います。誤差ではなく、
+                # 別のものを数えています。
+                "basis": "workplace",
+                "basis_label": MEASUREMENT_BASES["workplace"],
                 "by_radius": {r: {k: vals[k] for k in ("workers", "establishments")}
                               for r, vals in by_radius.items()},
                 # 経済センサスの従業者数では、通学者が丸ごと落ちます。

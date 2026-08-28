@@ -3584,6 +3584,62 @@ def test_the_outlook_table_stays_readable():
     assert "10年刻みで抜粋" in md, "絞ったことを黙らない"
 
 
+def test_every_headcount_says_how_it_was_counted():
+    """**ここを混ぜると、足してはいけないものを足します。**
+
+    実測（早稲田駅・半径1km）で、同じ「働く人」が経済センサス 52,688 人
+    （従業地基準）に対して国勢調査 22,322 人（常住地基準）。2.4 倍の差は
+    誤差ではなく、前者が昼間そこにいる人、後者が夜そこにいる人だからです。
+    「同じ国勢調査だから」という理由で後者に揃えると、昼間の人が半分以下に
+    なります。
+    """
+    from kaigyou_core.dataset import MEASUREMENT_BASES
+
+    assert set(MEASUREMENT_BASES) == {"workplace", "residence",
+                                      "workplace_or_school"}
+    text = cfg.prompt_text("step1_features.md")
+    assert "数え方が3通り" in text
+    assert "52,688" in text and "22,322" in text, "差を数字で見せる"
+    # 足し算の禁止を、具体例で書いていること。
+    assert "書けない：「昼間人口は 56,490 人" in text
+    assert "この商圏に学生はいない" in text, "数えていないことと居ないことは別"
+
+
+def test_the_basis_note_appears_next_to_the_tables(dataset):
+    """表の並びの中で1回だけ言います。離れた場所の注記は読まれません。"""
+    from kaigyou_intel.report import _basis_note
+
+    text = "\n".join(_basis_note(dataset))
+    assert "従業地基準" in text and "常住地基準" in text
+    assert "基準の違う数字を足さないでください" in text
+    assert "52,688" in text and "22,322" in text
+    # 昼間人口が未取得なら、そう名乗ること。
+    census = ((dataset.get("demand") or {}).get("daytime")
+              or {}).get("census_daytime") or {}
+    if not census.get("available"):
+        assert "未取得" in text and "通学者は数えられていません" in text
+
+
+def test_the_student_count_says_it_is_residents_not_arrivals(dataset):
+    """在学者は既に取り込んであります。ただし**そこに住んでいる学生**です。
+
+    早稲田駅前の商圏に住む大学・大学院生は 3,802 人。早稲田大学に通ってくる
+    数万人は、この数字に1人も含まれていません。従業者数に足しても昼間人口には
+    なりません。
+    """
+    from kaigyou_intel.projection import for_step1
+
+    entries = {c["key"]: c for c in for_step1(dataset)["citable"]}
+    key = "schooling.university"
+    if key not in entries:
+        pytest.skip("この環境には就業状態等基本集計が取り込まれていません")
+    note = entries[key]["note"]
+    assert "通ってくる学生ではありません" in note
+    assert "足しても昼間人口にはなりません" in note
+    # 常住地基準の就業者にも、同じ区別が付いていること。
+    assert "別のものを数えています" in entries["schooling.workers_living_here"]["note"]
+
+
 def test_the_resident_profile_is_not_mistaken_for_daytime_population(dataset):
     """就業状態等基本集計は**常住地基準**です。昼間人口ではありません。
 
@@ -3620,7 +3676,7 @@ def test_the_commute_modes_are_shares_not_a_headcount():
         "schooling": {"university": 3802,
                       "note": "そこに通ってくる在学者ではありません。"},
         "definition": "常住地基準であり、昼間人口ではありません。"}))
-    assert "常住地基準。昼間人口ではありません" in text
+    assert "常住地基準" in text
     assert "59.3%" in text and "2.8%" in text
     assert "合計は人数と一致しません" in text
     assert "来院手段そのものではありません" in text

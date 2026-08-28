@@ -187,7 +187,7 @@ steps:
   1:
     name: 商圏特徴抽出
     prompt: step1_features.md
-    prompt_version: step1-v1.7
+    prompt_version: step1-v1.8
     # 既に算出済みの順位とパーセンタイルから FACT を選び、食い違いを見つける
     # 段です。深く考えるより、たくさん見て取りこぼさないほうが効きます。
     # effort: high では思考だけで 10,094 トークン出ていました。

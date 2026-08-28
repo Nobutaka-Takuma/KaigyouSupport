@@ -228,9 +228,27 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
         add("schooling.preschool_total", "未就学者（商圏内に住んでいる）",
             schooling.get("preschool_total"), "人", "residents", label,
             note="0〜14歳より小児歯科の需要に近い数字です。")
+        add("schooling.high_school", "高校の在学者（商圏内に住んでいる）",
+            schooling.get("high_school"), "人", "residents", label,
+            note="常住地基準。そこに通ってくる生徒ではありません。")
         add("schooling.university", "大学・大学院の在学者（商圏内に住んでいる）",
             schooling.get("university"), "人", "residents", label,
-            note="**常住地基準です。そこに通ってくる学生ではありません。**")
+            note="**常住地基準です。そこに通ってくる学生ではありません。**"
+                 "経済センサスの従業者数（従業地基準）に足しても昼間人口には"
+                 "なりません。実測：早稲田駅前の商圏に住んでいる大学・大学院生は"
+                 "3,802人ですが、早稲田大学に通ってくる学生はこの数に"
+                 "含まれていません。")
+        add("schooling.students_living_here", "当地に常住する通学者（15歳以上）",
+            (profile.get("employment") or {}).get("students_living_here"),
+            "人", "residents", label,
+            note="常住地基準。そこから通学に出ていく人の数です。")
+        add("schooling.workers_living_here", "当地に常住する就業者（15歳以上）",
+            (profile.get("employment") or {}).get("workers_living_here"),
+            "人", "residents", label,
+            note="**常住地基準。** 経済センサスの従業者数（従業地基準）とは"
+                 "別のものを数えています。実測：早稲田駅前の商圏で 22,322人 に"
+                 "対し、経済センサスの従業者数は 52,688人。2.4倍の差は誤差では"
+                 "なく、前者が夜そこにいる人、後者が昼そこにいる人だからです。")
 
     # --- 市区町村全体の昼夜間人口 ------------------------------------------
     # **商圏の数字ではありません。** キーとラベルの両方でそう言います。
