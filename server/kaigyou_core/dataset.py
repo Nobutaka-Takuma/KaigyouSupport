@@ -256,6 +256,46 @@ def _municipality(conn: psycopg.Connection, lat: float, lng: float) -> dict[str,
     return dict(row) if row else None
 
 
+def _neighbour_municipalities(conn: psycopg.Connection,
+                              municipality_code: str | None) -> list[str]:
+    """境界を接している市区町村の名前。
+
+    開業地を探している人が実際に比べているのは、市の境界の内側ではなく
+    **通える範囲**です。「裾野市内157商圏中2位」は、市がまるごと小さければ
+    どこでも上位に入る数字で、意思決定には効きません。三島市・長泉町・
+    御殿場市と並べて何位なのかが知りたいことです。
+
+    半径ではなく**隣接**で決めます。半径10kmは既に ``nearby`` にあり、
+    そちらは商圏の集合で、こちらは自治体の集合です。読み手が地図を持たなく
+    ても、自治体の名前は知っています。
+
+    同じ都道府県の中だけを見ます。スコアは都道府県内で正規化されているので、
+    県をまたぐと同じ尺度になりません（要件の但し書きどおり）。
+    """
+    if not municipality_code or not table_exists(conn, "municipalities"):
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT n.name
+            FROM municipalities me
+            JOIN municipalities n
+              ON n.municipality_code <> me.municipality_code
+             AND n.prefecture_code = me.prefecture_code
+             AND n.geom && ST_Expand(me.geom, %s)
+             AND ST_Intersects(n.geom, ST_Expand(me.geom, %s))
+            WHERE me.municipality_code = %s
+            ORDER BY n.name
+            """,
+            (_ADJACENCY_TOLERANCE_DEG, _ADJACENCY_TOLERANCE_DEG, municipality_code))
+        return [r["name"] for r in cur.fetchall()]
+
+
+#: 隣接とみなす隙間。境界データの頂点は完全には一致しないので、厳密な
+#: ST_Touches では隣どうしが落ちます。約100m。
+_ADJACENCY_TOLERANCE_DEG = 0.001
+
+
 def _industry_mix(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
                   mesh_size_m: int) -> dict[str, Any] | None:
     """Workers by industry division, apportioned like every other mesh figure.
@@ -848,6 +888,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         })
 
     municipality = _municipality(conn, lat, lng)
+    neighbours = _neighbour_municipalities(
+        conn, (municipality or {}).get("municipality_code"))
     land = land_prices_near(conn, lat, lng, radius_m, limit=MAX_LAND_POINTS)
 
     # 比較はメッシュ分布に対して行うので、分布が作られた半径で測ります。2km の
@@ -860,6 +902,7 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         prefecture_code=prefecture_code,
         prefecture_label=prefecture_name(conn, prefecture_code),
         municipality=(municipality or {}).get("name"),
+        neighbours=neighbours,
         lat=lat, lng=lng,
         specialty=specialty,
         specialty_label=vocab.label(specialty) if specialty else None,
@@ -905,6 +948,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "prefecture_name": prefecture_name(conn, prefecture_code),
             "municipality_code": (municipality or {}).get("municipality_code"),
             "municipality_name": (municipality or {}).get("name"),
+            # 隣接市区町村。比較の母集団として使うだけでなく、外部調査の
+            # 検索語にもなります（「三島市 歯科 インプラント」）。
+            "neighbour_municipalities": neighbours or None,
         },
         "catchment": {
             "kind": metrics.get("catchment_kind"),

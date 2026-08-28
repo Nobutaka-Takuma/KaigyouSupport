@@ -116,6 +116,11 @@ def step_settings(step_number: int) -> dict[str, Any]:
         "web_search": bool(step.get("web_search")),
         "model": step.get("model") or model.get("id") or "claude-opus-5",
         "effort": step.get("effort") or model.get("effort") or "high",
+        # 2 回目の呼び出し（STEP2 の書き写し）用。指定が無ければ同じ深さ。
+        # 書き写すだけの呼び出しに考えさせても、出るのは調べていないことを
+        # 補った文だけです（そして出典の検算で落ちます）。
+        "effort_structure": (step.get("effort_structure") or step.get("effort")
+                             or model.get("effort") or "high"),
         "max_tokens": int(step.get("max_tokens") or model.get("max_tokens") or 16000),
     }
 
@@ -153,7 +158,8 @@ def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any]) -> di
 
 def build_request(step_number: int, system: str, user: str, *,
                   tools: Sequence[Mapping[str, Any]] | None = None,
-                  web_search: bool | None = None) -> dict[str, Any]:
+                  web_search: bool | None = None,
+                  effort: str | None = None) -> dict[str, Any]:
     """送信する本体を組み立てる。呼び出しとは分けてあります。
 
     分けているのは検算のためです。API キーの無い環境でも、この戻り値が
@@ -172,7 +178,7 @@ def build_request(step_number: int, system: str, user: str, *,
         "thinking": {"type": "adaptive"},
         # effort はここ。スキーマは output_format に渡し、SDK が
         # output_config へマージします（型のまま入れてはいけません）。
-        "output_config": {"effort": settings["effort"]},
+        "output_config": {"effort": effort or settings["effort"]},
         "system": system,
         "messages": [{"role": "user", "content": user}],
         # 直前までの安定した部分をキャッシュ対象にします。STEP2 はサーバ側の
@@ -199,7 +205,8 @@ def build_request(step_number: int, system: str, user: str, *,
 def ask(*, step_number: int, system: str, user: str,
         schema: Type[T] | None = None,
         tools: Sequence[Mapping[str, Any]] | None = None,
-        web_search: bool | None = None) -> Result:
+        web_search: bool | None = None,
+        effort: str | None = None) -> Result:
     """1 ステップぶんの呼び出し。
 
     ``schema`` を渡すと構造化出力で受け取り、Pydantic で検証します。
@@ -209,7 +216,7 @@ def ask(*, step_number: int, system: str, user: str,
     settings = step_settings(step_number)
     client = _client()
     request = build_request(step_number, system, user, tools=tools,
-                            web_search=web_search)
+                            web_search=web_search, effort=effort)
 
     # 常にストリームで受けます。SDK は「10 分を超えうる操作」を非ストリームで
     # 呼ぶと送信前に ValueError を投げ、その境目は max_tokens で決まります。

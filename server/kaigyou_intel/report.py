@@ -31,8 +31,14 @@ _SOURCE_LABEL = {
 
 
 def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
-                sources: Sequence[Mapping[str, Any]] = ()) -> str:
-    """レポート 1 本ぶんの Markdown。"""
+                sources: Sequence[Mapping[str, Any]] = (),
+                judgement: Mapping[str, Any] | None = None) -> str:
+    """レポート 1 本ぶんの Markdown。
+
+    ``judgement`` は STEP3 の出力（``decision`` と ``actions``）です。散文は
+    最終段が書きますが、開業方針は**欄のまま**載せます。散文に溶かすと
+    「誰と競争しないか」が抜けても気づけません。表なら空欄が見えます。
+    """
     location = dataset.get("location") or {}
     query = dataset.get("query") or {}
     place = " ".join(x for x in (location.get("prefecture_name"),
@@ -51,7 +57,7 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
 
     # STEP5（顧客提出用）があればそちらを本文にします。STEP4 の形は根拠を
     # 辿るためのもので、人が読む文書ではありません。
-    lines += (_client_body(output) if _is_client_report(output)
+    lines += (_client_body(output, judgement) if _is_client_report(output)
               else _working_body(output))
 
     lines += _legend_block(output)
@@ -300,7 +306,8 @@ def _refs(item: Mapping[str, Any]) -> str:
     return f"  〔{', '.join(ids)}〕" if ids else ""
 
 
-def _client_body(output: Mapping[str, Any]) -> list[str]:
+def _client_body(output: Mapping[str, Any],
+                 judgement: Mapping[str, Any] | None = None) -> list[str]:
     """顧客に渡す本文。散文で、結論から。"""
     verdict = output.get("verdict") or {}
     lines = ["## この立地について", "", output.get("summary", ""), ""]
@@ -314,6 +321,12 @@ def _client_body(output: Mapping[str, Any]) -> list[str]:
 
     if output.get("why_here"):
         lines += ["## なぜこの立地か", "", output["why_here"], ""]
+
+    # 開業方針。要件 §17 の答えを、欄のまま。以前はこれを作った段の出力ごと
+    # 捨てていて（散文に書き直したあと参照されませんでした）、「誰とは競争
+    # しないか」がレポートのどこにも残りませんでした。
+    if judgement and judgement.get("decision"):
+        lines += _decision_block(judgement["decision"])
 
     for section in output.get("sections") or []:
         lines += [f"## {section.get('heading')}", ""]
@@ -349,6 +362,13 @@ def _client_body(output: Mapping[str, Any]) -> list[str]:
             lines += [f"{item.get('why', '')}", ""]
             if item.get("how"):
                 lines += [f"調べ方: {item['how']}", ""]
+
+    actions = (judgement or {}).get("actions") or []
+    if actions:
+        lines += ["## 次に取るべき行動", ""]
+        for action in actions:
+            lines.append(f"- {action.get('statement')}" + _refs(action))
+        lines.append("")
 
     if output.get("judgement_note"):
         lines += ["## このレポートにおける評価の位置づけ", "",
@@ -567,6 +587,12 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         # 座標より、その名前で呼ばれたほうが読む人には分かります。
         cur.execute("SELECT location_name FROM analysis_jobs WHERE id = %s", (job_id,))
         row = cur.fetchone()
+        # 開業方針は STEP3 が欄のまま出しています。最終段は散文だけを書くので、
+        # 表にする材料はここで取りに行きます。
+        cur.execute("SELECT output_json FROM analysis_steps WHERE job_id = %s "
+                    "AND step_number = 3 AND status = 'completed'", (job_id,))
+        step3 = cur.fetchone()
+        judgement = (step3 or {}).get("output_json") or None
 
     named = dict(dataset)
     if row and row["location_name"]:
@@ -574,7 +600,7 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
                              "name": row["location_name"]}
 
     with conn.cursor() as cur:
-        markdown = to_markdown(output, named, sources)
+        markdown = to_markdown(output, named, sources, judgement)
         cur.execute(
             """
             INSERT INTO analysis_reports (job_id, report_json, report_markdown,

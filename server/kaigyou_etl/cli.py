@@ -357,6 +357,25 @@ def _step_cost(step: dict) -> float | None:
     return step_cost(step)
 
 
+def _step_seconds(step: dict) -> float | None:
+    """その段に何秒かかったか。
+
+    表示するのは、**どこに時間が溶けているかが分からないと縮めようがない**
+    からです。実測でレポート1本32分かかったとき、内訳は記録されていたのに
+    どこにも出ていませんでした。
+    """
+    start, end = step.get("started_at"), step.get("completed_at")
+    if not start or not end:
+        return None
+    return (end - start).total_seconds()
+
+
+def _format_seconds(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}秒"
+    return f"{int(seconds // 60)}分{seconds % 60:.0f}秒"
+
+
 def _print_step_cost_line(step: dict) -> None:
     """使ったトークンと概算。
 
@@ -373,10 +392,12 @@ def _print_step_cost_line(step: dict) -> None:
     if read:
         detail.append(f"キャッシュ読 {read:,}")
     price = _step_cost(step)
+    seconds = _step_seconds(step)
     print(f"    入力 {counted:,} tok"
           + (f"（{' / '.join(detail)}）" if detail else "")
           + f" / 出力 {step.get('output_tokens') or 0:,} tok"
-          + (f"  ≒ ${price:.3f}" if price else ""))
+          + (f"  ≒ ${price:.3f}" if price else "")
+          + (f" / {_format_seconds(seconds)}" if seconds is not None else ""))
 
 
 def _print_step_output(number: int, output: dict) -> None:
@@ -389,9 +410,6 @@ def _print_step_output(number: int, output: dict) -> None:
         return
     if number == 4:
         _print_step4(output)
-        return
-    if number == 5:
-        _print_step5(output)
         return
     if number != 1:
         import json as _j
@@ -493,6 +511,8 @@ def _print_step3(output: dict) -> None:
         for entry in output["not_supported"]:
             print(f"      - {entry}")
 
+    _print_decision(output)
+
 
 _DECISION_FIELDS = (("主要患者", "primary_patients"),
                     ("主要に置かない層", "secondary_patients"),
@@ -502,12 +522,11 @@ _DECISION_FIELDS = (("主要患者", "primary_patients"),
                     ("医院モデル", "clinic_model"))
 
 
-def _print_step4(output: dict) -> None:
-    print("\n    結論")
-    for line in (output.get("executive_summary") or "").splitlines():
-        print(f"      {line}")
-
+def _print_decision(output: dict) -> None:
+    """要件 §17 の答え。STEP3 の出力に入っています。"""
     decision = output.get("decision") or {}
+    if not decision:
+        return
     print(f"\n    開業方針  confidence={decision.get('confidence')}")
     for label, key in _DECISION_FIELDS:
         item = decision.get(key) or {}
@@ -521,20 +540,13 @@ def _print_step4(output: dict) -> None:
             print(f"      - {item.get('statement')}")
             print(f"            根拠: {' + '.join(item.get('evidence') or [])}")
 
-    sections = output.get("sections") or []
-    print(f"\n    レポート本文（{len(sections)}章）"
-          "  ※全文は --report で読めます")
-    for section in sorted(sections, key=lambda s: s.get("number", 0)):
-        tags = " → ".join(b.get("tag", "") for b in section.get("blocks") or [])
-        print(f"      {section.get('number')}. {section.get('title')}  [{tags}]")
-
     if output.get("actions"):
         print("\n    次に取るべき行動")
         for action in output["actions"]:
             print(f"      - {action.get('statement')}")
 
 
-def _print_step5(output: dict) -> None:
+def _print_step4(output: dict) -> None:
     """顧客に渡す文書。端末では骨格だけ見せて、全文は --report に譲ります。"""
     verdict = output.get("verdict") or {}
     print(f"\n    {output.get('title')}")
@@ -554,10 +566,6 @@ def _print_step5(output: dict) -> None:
     for item in support:
         print(f"      [{item.get('category')}] {item.get('item')}")
 
-    if output.get("questions_for_the_client"):
-        print("\n    面談で確認したいこと")
-        for q in output["questions_for_the_client"]:
-            print(f"      - {q}")
     print("\n    全文: python -m kaigyou_etl analyze --report")
 
 
@@ -614,6 +622,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
         name = row["location_name"] or job_id[:8]
         print(f"ジョブ {job_id}（{name}）")
+        # 通しの所要時間。段ごとの合計ではなく、最初の開始から最後の完了まで
+        # です。ホスティングされた worker では段の間に cron の待ちが入るので、
+        # 「合計 4 分」と「通し 12 分」が両方本当のことがあります。
+        spans = [(s["started_at"], s["completed_at"]) for s in steps
+                 if s.get("started_at") and s.get("completed_at")]
+        if spans:
+            wall = (max(e for _s, e in spans) - min(s for s, _e in spans)).total_seconds()
+            worked = sum((e - s).total_seconds() for s, e in spans)
+            print(f"  所要 {_format_seconds(wall)}"
+                  f"（うち実行 {_format_seconds(worked)}、"
+                  f"待ち {_format_seconds(max(0.0, wall - worked))}）")
         for step in steps:
             if step["status"] != "completed":
                 print(f"\n  STEP{step['step_number']} {step['step_name']}: "

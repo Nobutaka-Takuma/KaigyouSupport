@@ -21,7 +21,7 @@ from kaigyou_intel import failures
 from kaigyou_intel import jobs
 from kaigyou_intel import report
 from kaigyou_intel.steps import (
-    step1_features, step2_research, step3_demand, step4_strategy, step5_client)
+    step1_features, step2_research, step3_demand, step4_report)
 
 #: 実装済みのステップ。ここに無い番号に来たら止めます。「未実装なので飛ばす」
 #: をやると、材料が無いまま最終レポートが書かれます。
@@ -33,8 +33,7 @@ RUNNERS: dict[int, Callable[[Any], Any]] = {
     1: step1_features.run,
     2: step2_research.run,
     3: step3_demand.run,
-    4: step4_strategy.run,
-    5: step5_client.run,
+    4: step4_report.run,
 }
 
 
@@ -97,8 +96,6 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     if sources:
         jobs.save_sources(conn, job_id, number, None, sources)
     if number == max(RUNNERS):
-        # 保存するのは最終段の出力です。STEP4 の形は根拠を辿るためのもので、
-        # 顧客に渡す文書ではありません。
         # 最終段。レポートは Markdown にして保存します。免責とデータ時点は
         # ここで付けるので、LLM が書き忘れても落ちません。
         report.save(conn, job_id, output, job["base_data"])
@@ -147,15 +144,7 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
             raise StepNotImplemented(
                 f"{'・'.join(missing)} の出力がありません。"
                 "レポートは前 3 段の結論だけで書きます。")
-        return step4_strategy.build_input(*outputs, job["base_data"])
-    if number == 5:
-        step3_output = jobs.step_output(conn, job["id"], 3)
-        step4_output = jobs.step_output(conn, job["id"], 4)
-        if not step3_output or not step4_output:
-            raise StepNotImplemented(
-                "STEP3・STEP4 の出力がありません。顧客向けレポートは、"
-                "その結論を書き直す段です。")
-        return step5_client.build_input(step3_output, step4_output, job["base_data"])
+        return step4_report.build_input(*outputs, job["base_data"])
     raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
 
 
@@ -165,7 +154,7 @@ def advance(conn: psycopg.Connection, job_id: str,
 
     ``run_job`` は最後まで回します。手元で動かすならそれでよいのですが、
     ホスティングされた関数には実行時間の上限があり（Vercel の Hobby で 300 秒、
-    Pro で 800 秒）、5 段を 1 回の呼び出しには収められません。
+    Pro で 800 秒）、収まらないことがあります。
 
     そこで **1 呼び出し = 1 ステップ**にします。終わったら queued に戻すので、
     次の呼び出しが続きを拾います。running のまま置くより、こちらのほうが
@@ -288,7 +277,7 @@ def tick(conn: psycopg.Connection, *, stale_after_minutes: float | None = None,
     どちらから叩いても同じことをします。
 
     **1 呼び出し 1 ステップだと、ステップの間に cron の間隔がまるごと空きます。**
-    5 段で最大5分、平均2分半。ただ待っているだけの時間です。関数の上限が
+    4 段で最大4分、平均2分。ただ待っているだけの時間です。関数の上限が
     800秒 になったので、残り時間が足りるうちは続けて回します。
 
     判断は「足りるか分からないなら進まない」。次の段に必要な時間は事前には

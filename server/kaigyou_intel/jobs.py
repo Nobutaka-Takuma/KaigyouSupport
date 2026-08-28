@@ -17,12 +17,14 @@ from psycopg.types.json import Json
 STEP_NAMES = {
     1: "商圏特徴抽出",
     2: "外部コンテクスト調査",
-    3: "需要形成・患者分析",
-    4: "経営判断",
-    # STEP4 までは根拠を辿れる形（タグと id）で作ります。それは検算のための
+    # 需要形成の分析と経営判断は同じ段です。分けていた頃は、判断の段がタグ付きの
+    # 10章レポートも書き、最終段がそれを散文に書き直していました。読み手に届く
+    # のは散文だけなので、タグ付きのほうは捨てるために書いていたことになります。
+    3: "需要形成・患者分析と経営判断",
+    # STEP3 までは根拠を辿れる形（タグと id）で作ります。それは検算のための
     # 形であって、人が読むための形ではありません。顧客に渡す文書は、そこから
     # 起こし直します。
-    5: "顧客提出用レポート",
+    4: "顧客提出用レポート",
 }
 
 
@@ -72,27 +74,37 @@ def get_job(conn: psycopg.Connection, job_id: str,
 
 
 def ensure_steps(conn: psycopg.Connection, job_id: str) -> int:
-    """足りないステップの空枠を足す。
+    """ステップの行を、いまの段構成に合わせる。
 
     段を増やしたとき、既にある Job には行がありません。行が無いと next_step は
     「全部終わった」と読み、増やした段が黙って飛ばされます。worker の起動時に
     ここを通すので、作り直さなくても続きから流れます。
+
+    **減らしたときも同じだけ困ります。** 無くなった段の行が pending のまま
+    残ると、next_step はその番号を返し、走らせる実装が無いのでジョブはそこで
+    永久に止まります。画面には「順番待ち」とだけ出ます。だから、いま存在
+    しない段の行は落とします。済んだ段（completed）は触りません（要件 §32）。
     """
     with conn.cursor() as cur:
         cur.execute("SELECT step_number FROM analysis_steps WHERE job_id = %s",
                     (job_id,))
         have = {int(r["step_number"]) for r in cur.fetchall()}
+        obsolete = sorted(n for n in have if n not in STEP_NAMES)
         missing = [n for n in STEP_NAMES if n not in have]
         for number in missing:
             cur.execute(
                 "INSERT INTO analysis_steps (job_id, step_number, step_name, status) "
                 "VALUES (%s, %s, %s, 'pending')", (job_id, number, STEP_NAMES[number]))
-        if missing:
+        if obsolete:
+            cur.execute("DELETE FROM analysis_steps "
+                        "WHERE job_id = %s AND step_number = ANY(%s)",
+                        (job_id, obsolete))
+        if missing or obsolete:
             cur.execute(
                 "UPDATE analysis_jobs SET status = 'queued', completed_at = NULL "
                 "WHERE id = %s AND status = 'completed'", (job_id,))
     conn.commit()
-    return len(missing)
+    return len(missing) + len(obsolete)
 
 
 def get_steps(conn: psycopg.Connection, job_id: str) -> list[dict[str, Any]]:
@@ -126,9 +138,15 @@ def next_step(conn: psycopg.Connection, job_id: str) -> int | None:
     止まっているより悪い。
     """
     for step in get_steps(conn, job_id):
+        number = int(step["step_number"])
+        # いまは存在しない段の行（段構成を変える前に作られた Job）。走らせる
+        # 実装が無いので、返すとそこで止まります。ensure_steps が消しますが、
+        # そちらを通らない経路もあるのでここでも飛ばします。
+        if number not in STEP_NAMES:
+            continue
         if step["status"] == "completed":
             continue
-        return int(step["step_number"])
+        return number
     return None
 
 

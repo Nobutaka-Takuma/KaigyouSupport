@@ -404,7 +404,8 @@ def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
                      municipality: str | None, population: float | None,
                      radius_m: int, lat: float, lng: float,
                      config: Mapping[str, Any],
-                     viable_floor_population: float | None = None) -> list[BenchmarkScope]:
+                     viable_floor_population: float | None = None,
+                     neighbours: Sequence[str] | None = None) -> list[BenchmarkScope]:
     """比較できる母集団を、計算できるものだけ組み立てる。
 
     全国は入りません。全国のメッシュ統計を読み込んでいないからで、都のメッシュを
@@ -455,6 +456,20 @@ def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
             "municipality", f"{municipality}内の同条件の商圏",
             "pm.prefecture_code = %s AND ms.area_label = %s",
             (prefecture_code, municipality)))
+        # 市区町村を1つだけ見た順位は、その市区町村の大きさで意味が変わります。
+        # 小さい市なら市街地はどこでも上位に入り、「市内2位」は開業地を選ぶ
+        # 判断に効きません。**隣接市町を足した母集団**なら、実際に検討して
+        # いる候補地どうしの比較になります。裾野市なら三島市・長泉町・
+        # 御殿場市・沼津市が入り、これは読み手が自分で並べている範囲です。
+        #
+        # 名前を label に並べます。「近隣」とだけ書くと、どこまでを近隣と
+        # 言っているのかが読み手に分かりません。
+        area = [municipality] + [n for n in (neighbours or []) if n != municipality]
+        if len(area) > 1:
+            scopes.append(BenchmarkScope(
+                "neighbourhood", "・".join(area) + " の同条件の商圏",
+                "pm.prefecture_code = %s AND ms.area_label = ANY(%s)",
+                (prefecture_code, area)))
     if population and population > 0:
         low = population * (1 - SIMILAR_POPULATION_BAND)
         high = population * (1 + SIMILAR_POPULATION_BAND)
@@ -522,6 +537,7 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
                    profile: str, radius_m: int, prefecture_code: str,
                    prefecture_label: str, municipality: str | None,
                    lat: float, lng: float,
+                   neighbours: Sequence[str] | None = None,
                    specialty: str | None = None,
                    specialty_label: str | None = None,
                    config: Mapping[str, Any] | None = None,
@@ -579,7 +595,7 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
         prefecture_code=prefecture_code, prefecture_label=prefecture_label,
         municipality=municipality, population=metrics.get("population"),
         radius_m=radius_m, lat=lat, lng=lng, config=config,
-        viable_floor_population=floor)
+        viable_floor_population=floor, neighbours=neighbours)
     for scope in scopes:
         measure_scope_shape(conn, scope, profile=profile, radius_m=radius_m,
                             floor=floor, max_share_below=max_share,

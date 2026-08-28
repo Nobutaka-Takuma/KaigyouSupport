@@ -204,17 +204,26 @@ def _cost_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
              "by_use_division", "note", "rent_estimate")}
 
 
-def for_step2(step1: Mapping[str, Any], location: Mapping[str, Any],
+def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
               limits: Mapping[str, Any]) -> dict[str, Any]:
     """STEP2（外部コンテクスト調査）の入力。
 
-    base_data を渡しません。渡すと、外部情報を調べずに手元の数字を言い換えた
+    base_data は渡しません。渡すと、外部情報を調べずに手元の数字を言い換えた
     ものが「外部事実」として返ってきます。ここで欲しいのは、**手元のデータでは
     説明できないこと**の説明だけです。
+
+    例外が 1 つあります。**近隣の歯科医院の名前**です。届出データには標榜
+    診療科目しかなく、インプラント・審美・訪問診療は自由記載欄にしかありません
+    （東京都でインプラントの記載は1%台）。つまり手元のデータでは
+    「この商圏でインプラントを扱う医院が何院あるか」は原理的に分かりません。
+    固有名詞を渡さないかぎり、外部でも調べようがない。渡すのは名前と距離と
+    標榜科目だけで、数字は渡しません。
     """
     patterns = (step1.get("patterns") or [])[: int(limits.get("max_patterns", 5))]
+    inside = ((dataset.get("competition") or {}).get("clinics_in_radius") or {})
+    clinics = (inside.get("items") or [])[: int(limits.get("clinics_to_research", 6))]
     return {
-        "location": location,
+        "location": dataset.get("location") or {},
         "patterns": [
             {"id": p.get("id"), "title": p.get("title"),
              "evidence_summary": p.get("evidence_summary") or p.get("title"),
@@ -222,84 +231,83 @@ def for_step2(step1: Mapping[str, Any], location: Mapping[str, Any],
              "research_questions": p.get("research_questions") or []}
             for p in patterns
         ],
+        "nearby_clinics": [
+            {"name": c.get("name"), "distance_m": c.get("distance_m"),
+             "specialties": [s.get("label") for s in (c.get("specialties") or [])],
+             # 公式サイトがあるなら、そこが自費診療の一次情報です。まとめ
+             # サイトより先に見てほしいので、URL を添えて渡します。
+             "homepage": c.get("homepage")}
+            for c in clinics if c.get("name")
+        ],
         "searches_per_pattern": int(limits.get("searches_per_pattern", 3)),
     }
 
 
 def for_step3(step1: Mapping[str, Any], step2: Mapping[str, Any],
               dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """STEP3（需要形成・患者分析）の入力。
+    """STEP3（需要形成・患者分析と経営判断）の入力。
 
     ここで初めて、手元のデータと外部事実の両方が揃います。人口構成と競合の
     内訳は必要なので base_data から戻しますが、医院の一覧は戻しません。
+
+    経営判断もこの段で下すので、地価・規制・スコアも渡します。「どの医院
+    モデルにするか」は床面積とコストの話でもあるので、それが無いと決められ
+    ません。以前は判断が別の段にあり、この 3 つはそちらに渡していました。
     """
     measures = dataset.get("measures") or {}
     return {
         "location": dataset.get("location"),
         "measures": [_measure(m) for m in (measures.get("items") or [])],
         "primary_benchmark": measures.get("primary_benchmark"),
+        "benchmark_scopes": measures.get("benchmark_scopes"),
         "demand": dataset.get("demand"),
         "competition": _competition_summary(dataset),
         "access": dataset.get("access"),
+        "cost": _cost_summary(dataset),
+        "regulation": dataset.get("regulation"),
+        "scores": dataset.get("scores"),
         "step1": {"facts": step1.get("facts"), "patterns": step1.get("patterns")},
         "step2": {"external_facts": step2.get("external_facts"),
-                  "hypotheses": step2.get("hypotheses")},
+                  "hypotheses": step2.get("hypotheses"),
+                  "unanswered": step2.get("unanswered")},
         "data_quality": dataset.get("data_quality"),
     }
 
 
 def for_step4(step1: Mapping[str, Any], step2: Mapping[str, Any],
               step3: Mapping[str, Any], dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """STEP4（経営判断・レポート生成）の入力。
+    """STEP4（顧客提出用レポート）の入力。最終段です。
 
-    要件 §16：ここで新しい外部事実を足さない。だから外部検索を与えないだけで
-    なく、**足せるだけの材料も渡しません**。渡すのは前3ステップの結論と、
-    レポートに数字として載せる必要のある集計だけです。
-    """
-    measures = dataset.get("measures") or {}
-    return {
-        "location": dataset.get("location"),
-        "measures": [_measure(m) for m in (measures.get("items") or [])],
-        "primary_benchmark": measures.get("primary_benchmark"),
-        "competition": _competition_summary(dataset),
-        "access": dataset.get("access"),
-        "cost": _cost_summary(dataset),
-        "regulation": dataset.get("regulation"),
-        "step1": step1,
-        "step2": step2,
-        "step3": step3,
-        "scores": dataset.get("scores"),
-        "data_quality": dataset.get("data_quality"),
-        "disclaimer": dataset.get("disclaimer"),
-        "score_disclaimer": dataset.get("score_disclaimer"),
-    }
+    書き直しであって、書き足しではありません。だから渡すのは前 3 段の結論と、
+    文中で引ける数値の出どころだけです。基礎データ全部を戻すと、分析が採ら
+    なかった数字が本文に湧きます。
 
-
-def for_step5(step4: Mapping[str, Any], step3: Mapping[str, Any],
-              dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """STEP5（顧客提出用レポート）の入力。
-
-    書き直しであって、書き足しではありません。だから渡すのは STEP4 の結論と、
-    文中で引ける数値の出どころだけです。基礎データ全部を戻すと、STEP4 が
-    採らなかった数字が本文に湧きます。
-
-    STEP3 の需要形成メカニズムは残します。「なぜここか」を散文で書くとき、
-    筋道がそこにしか無いためです。
+    ``benchmarks``（母集団6つの比較）は渡しません。位置づけは STEP1 が
+    FACT の ``position_label`` として既に選んでいて、ここでもう一度選ばせると
+    「県内では上位だが市内では下位」のどちらを書くかが段ごとにぶれます。
     """
     measures = dataset.get("measures") or {}
     return {
         "location": dataset.get("location"),
         "query": dataset.get("query"),
-        "step4": step4,
-        "demand_mechanisms": step3.get("demand_mechanisms"),
-        "patient_segments": step3.get("patient_segments"),
+        "step1": {"facts": step1.get("facts"), "patterns": step1.get("patterns"),
+                  "not_determinable": step1.get("not_determinable")},
+        "step2": {"external_facts": step2.get("external_facts"),
+                  "hypotheses": step2.get("hypotheses"),
+                  "unanswered": step2.get("unanswered")},
+        "step3": step3,
         # 文中で引ける数値。丸めて書いてよいので、元の値だけ渡します。
         "measures": [_measure(m, keep_benchmarks=False)
                      for m in (measures.get("items") or [])],
+        "primary_benchmark": measures.get("primary_benchmark"),
+        "benchmark_scopes": measures.get("benchmark_scopes"),
+        "demand": dataset.get("demand"),
         "competition": _competition_summary(dataset),
         "access": _access_summary(dataset),
         "cost": _cost_summary(dataset),
         "data_quality": dataset.get("data_quality"),
+        "disclaimer": dataset.get("disclaimer"),
+        "score_disclaimer": dataset.get("score_disclaimer"),
     }
 
 

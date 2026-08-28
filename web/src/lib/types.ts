@@ -465,7 +465,7 @@ export interface ReportJson {
   actions: Evidenced[];
 }
 
-/** STEP5：顧客に渡す文書。散文で、タグは無い。 */
+/** 最終段（STEP4）：顧客に渡す文書。散文で、タグは無い。 */
 export interface ClientReportJson {
   title: string;
   summary: string;
@@ -494,7 +494,7 @@ export interface AnalysisSource {
 }
 
 export interface AnalysisReport {
-  /** 最終段の出力。STEP5 まで走ったジョブは ClientReportJson。 */
+  /** 最終段の出力。顧客提出用まで走ったジョブは ClientReportJson。 */
   report_json: ClientReportJson | ReportJson;
   report_markdown: string | null;
   trace_ok: boolean | null;

@@ -35,15 +35,19 @@ class StepFailed(RuntimeError):
 
 def build_input(step1_output: Mapping[str, Any],
                 dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """PATTERN と地点だけ。基礎データは渡しません（要件の Input からの意図的な差）。
+    """PATTERN と地点と、近隣医院の名前だけ（要件の Input からの意図的な差）。
 
     要件 §8 の Input は ``base_data + step1_output`` ですが、base_data を渡すと
     外部情報を調べずに手元の数字を言い換えたものが「外部事実」として返ってきます。
     STEP1 が既に読んだ数字をもう一度読ませる利得より、その害のほうが大きい。
     必要な文脈は PATTERN の ``evidence_summary`` に入っています。
+
+    医院の名前だけは渡します。インプラント・審美・訪問診療は標榜診療科目に
+    無く、届出の自由記載欄にしかありません。つまり**手元のデータでは原理的に
+    分からない**論点で、固有名詞が無ければ外部でも調べようがありません。
     """
     limits = cfg.analysis_config().get("limits") or {}
-    return for_step2(step1_output, dataset.get("location") or {}, limits)
+    return for_step2(step1_output, dataset, limits)
 
 
 def _prompts(limits: Mapping[str, Any]) -> tuple[str, str]:
@@ -88,6 +92,9 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
         f"- {s['url']}  {s.get('title') or ''}" for s in retrieved) or "（なし）"
     structured = llm.ask(
         step_number=STEP_NUMBER, system=structure_prompt,
+        # 書き写すだけの呼び出しです。考えさせると、調べていないことを補い
+        # 始めます（そして下の出典の検算で落ちます）。
+        effort=llm.step_settings(STEP_NUMBER)["effort_structure"],
         user=("## 調査結果\n\n" + research.text
               + "\n\n## 今回の検索で取得した URL（source_url はこの中から選ぶこと）\n\n"
               + catalogue

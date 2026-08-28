@@ -54,7 +54,8 @@ export function AnalysisReportView({ report }: { report: AnalysisReport }) {
   return <WorkingReportView report={report} json={report.report_json} />;
 }
 
-/** STEP5 まで走ったジョブか。走っていない古いジョブは働き用の形のまま。 */
+/** 顧客提出用の形で保存されたレポートか。段の構成を変える前の古い
+ *  ジョブは、タグ付きの働き用の形のまま残っています。 */
 function isClientReport(json: ClientReportJson | ReportJson): json is ClientReportJson {
   return "verdict" in json && "support_needed" in json;
 }

@@ -245,8 +245,9 @@ export function AnalysisPanel({
         )}
       </div>
       <p className="analysis__lead">
-        統計から特徴を抽出し（STEP1）、その背景をWeb検索で調べ（STEP2）、
-        需要が生まれる筋道を組み立て（STEP3）、開業方針に変換します（STEP4）。
+        統計から特徴を抽出し（STEP1）、その背景と近隣医院の自費診療をWeb検索で
+        調べ（STEP2）、需要が生まれる筋道と開業方針を組み立て（STEP3）、
+        歯科医師に渡せるレポートに書き直します（STEP4）。
         数分かかり、1件あたり1ドル前後のAPI費用が発生します。
       </p>
 

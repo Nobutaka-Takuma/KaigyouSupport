@@ -219,6 +219,53 @@ def verify_step2(output: Step2Output, allowed_pattern_ids: set[str],
     return problems
 
 
+# ------------------------------------------------------- STEP3 と最終段の共通部
+#
+# 経営判断（BusinessDecision）は STEP3 の出力に入ります。以前は独立した段で
+# したが、その段はタグ付きの10章レポートも書いていて、次の段がそれを散文に
+# 書き直していました。**同じ内容を2回書いていた**わけで、レポート1本ぶんの
+# 時間の1/3がそこに消えていました。判断は分析と同じ段で下し、書くのは1回です。
+
+#: 出してはいけない予測。開業成功確率・売上・患者数・家賃の予測は、この
+#: システムの目的外です。プロンプトで禁じたうえで、出力でも落とします。
+#: 「想定家賃」はここに入っていません。地価からの換算を出すことにしたためです
+#: （cost.rent_estimate）。ただしそれは予測ではなく、想定利回りという 1 つの
+#: 仮定による次元の置き換えで、式も仮定もレポートに載ります。
+#: 売上・患者数・成功確率は引き続き出しません。
+FORBIDDEN_PREDICTIONS = (
+    "成功確率", "年商", "月商", "想定売上", "売上予測", "売上高", "患者数予測",
+    "来院数予測", "収支予測", "損益予測", "投資回収",
+)
+
+
+class Evidenced(BaseModel):
+    """根拠つきの 1 文。§25 の追跡はこの id を辿ります。"""
+
+    statement: str
+    evidence: list[str] = Field(
+        description="根拠にした F### / P### / C### / H### / S### / M### / I### の id",
+        min_length=1)
+
+
+class BusinessDecision(BaseModel):
+    """要件 §17 の最重要アウトプット。
+
+    「誰を主要患者とし、誰とは競争せず、どの診療圏から何を理由に患者を引っ張り、
+    どの医院モデルにするべきか」に答えます。「良い商圏」で終わらせないために、
+    答えるべき項目を欄として置いてあります。埋められない欄は書けません。
+    """
+
+    primary_patients: Evidenced = Field(description="主要患者として設定する層")
+    secondary_patients: Evidenced = Field(description="主要には置かない層と、その理由")
+    avoid_competing_on: Evidenced = Field(description="競争しない領域")
+    acquisition_area: Evidenced = Field(description="患者獲得エリア")
+    reason_to_visit: Evidenced = Field(description="患者がこの医院を選ぶ理由")
+    clinic_model: Evidenced = Field(description="医院モデル")
+    advantages: list[Evidenced] = Field(description="経営上のメリット", min_length=1)
+    risks: list[Evidenced] = Field(description="リスク", min_length=1)
+    confidence: Confidence
+
+
 # ------------------------------------------------------------------ STEP3
 class PatientSegment(BaseModel):
     """この場所に存在すると推定される患者層 1 つ（要件 §13）。
@@ -269,11 +316,23 @@ class DemandInsight(BaseModel):
 
 
 class Step3Output(BaseModel):
-    """STEP3（需要形成・患者分析）の出力（要件 §15）。"""
+    """STEP3（需要形成・患者分析と経営判断）の出力（要件 §15〜§17）。
+
+    分析と判断を同じ段で行います。分けていた頃は、判断の段が 10 章のレポートを
+    タグ付きで書き、次の段がそれを散文に書き直していました。読み手に届くのは
+    後者だけなので、前者は**捨てるために書いていた**ことになります。
+
+    判断を欄のまま持つのは変えていません。散文に溶かすと「誰と競争しないか」が
+    抜けても気づけないからです。欄なら空欄が見えます。
+    """
 
     patient_segments: list[PatientSegment] = Field(default_factory=list)
     demand_mechanisms: list[DemandMechanism] = Field(default_factory=list)
     insights: list[DemandInsight] = Field(default_factory=list)
+    #: 要件 §17 の答え。ここが埋まらないなら、判断が出せていないということです。
+    decision: BusinessDecision
+    actions: list[Evidenced] = Field(
+        description="次に取るべき具体的な行動", min_length=1)
     #: 根拠が足りず出さなかった患者層。要件 §13 を「出さなかった」側から残します。
     not_supported: list[str] = Field(
         default_factory=list,
@@ -327,179 +386,37 @@ def verify_step3(output: Step3Output, fact_ids: set[str],
     for insight in output.insights:
         check(f"insights[{insight.id}].evidence", insight.evidence,
               segment_ids | mechanism_ids)
+
+    # 判断は、この段で作った患者層・筋道・横断所見も根拠にできます。同じ段で
+    # 作ったものを引けないと、判断のためにもう一度同じことを書く羽目になります。
+    own = segment_ids | mechanism_ids | {i.id for i in output.insights}
+    decision = output.decision
+    for name in ("primary_patients", "secondary_patients", "avoid_competing_on",
+                 "acquisition_area", "reason_to_visit", "clinic_model"):
+        check(f"decision.{name}", getattr(decision, name).evidence, own)
+    for name in ("advantages", "risks"):
+        for index, item in enumerate(getattr(decision, name)):
+            check(f"decision.{name}[{index}]", item.evidence, own)
+    for index, action in enumerate(output.actions):
+        check(f"actions[{index}]", action.evidence, own)
+
+    # 売上・患者数・成功確率の予測は、どの段で書かれても落とします。判断を
+    # この段に移したので、検査もここに移ります。
+    problems.extend(_forbidden_predictions_in(output.model_dump_json()))
     return problems
 
 
 # ------------------------------------------------------------------ STEP4
-#: 要件 §18 のレポート構成。章立てはモデルに決めさせません。毎回違う章立てで
-#: 出てくると、2 地点を並べて読めなくなります。
-REPORT_SECTIONS = (
-    "エグゼクティブサマリー", "商圏人口", "昼間人口", "交通アクセス",
-    "競合歯科医院", "地価", "商圏の特徴", "開業上のメリット", "リスク", "総合評価",
-)
-
-#: 要件 §19 の分析順序。章の中でこの順を保ちます（全部入れる必要はありません）。
-BLOCK_TAGS = ("FACT", "BENCHMARK", "PATTERN", "WHY", "INSIGHT", "IMPLICATION", "ACTION")
-
-BlockTag = Literal["FACT", "BENCHMARK", "PATTERN", "WHY", "INSIGHT",
-                   "IMPLICATION", "ACTION"]
-
-#: 出してはいけない予測。開業成功確率・売上・患者数・家賃の予測は、この
-#: システムの目的外です。プロンプトで禁じたうえで、出力でも落とします。
-#: 「想定家賃」はここに入っていません。地価からの換算を出すことにしたためです
-#: （cost.rent_estimate）。ただしそれは予測ではなく、想定利回りという 1 つの
-#: 仮定による次元の置き換えで、式も仮定もレポートに載ります。
-#: 売上・患者数・成功確率は引き続き出しません。
-FORBIDDEN_PREDICTIONS = (
-    "成功確率", "年商", "月商", "想定売上", "売上予測", "売上高", "患者数予測",
-    "来院数予測", "収支予測", "損益予測", "投資回収",
-)
-
-
-class Evidenced(BaseModel):
-    """根拠つきの 1 文。§25 の追跡はこの id を辿ります。"""
-
-    statement: str
-    evidence: list[str] = Field(
-        description="根拠にした F### / P### / C### / H### / S### / M### / I### の id",
-        min_length=1)
-
-
-class BusinessDecision(BaseModel):
-    """要件 §17 の最重要アウトプット。
-
-    「誰を主要患者とし、誰とは競争せず、どの診療圏から何を理由に患者を引っ張り、
-    どの医院モデルにするべきか」に答えます。「良い商圏」で終わらせないために、
-    答えるべき項目を欄として置いてあります。埋められない欄は書けません。
-    """
-
-    primary_patients: Evidenced = Field(description="主要患者として設定する層")
-    secondary_patients: Evidenced = Field(description="主要には置かない層と、その理由")
-    avoid_competing_on: Evidenced = Field(description="競争しない領域")
-    acquisition_area: Evidenced = Field(description="患者獲得エリア")
-    reason_to_visit: Evidenced = Field(description="患者がこの医院を選ぶ理由")
-    clinic_model: Evidenced = Field(description="医院モデル")
-    advantages: list[Evidenced] = Field(description="経営上のメリット", min_length=1)
-    risks: list[Evidenced] = Field(description="リスク", min_length=1)
-    confidence: Confidence
-
-
-class ReportBlock(BaseModel):
-    tag: BlockTag
-    text: str
-    #: FACT / BENCHMARK / PATTERN には根拠を付けます。WHY 以降は前段の
-    #: 結論を受けるので、空でも構いません。
-    evidence: list[str] = Field(default_factory=list)
-
-
-class ReportSection(BaseModel):
-    number: int = Field(description="1〜10。要件 §18 の並び")
-    title: str = Field(description="要件 §18 の章名をそのまま")
-    blocks: list[ReportBlock] = Field(min_length=1)
-
-
-class Step4Output(BaseModel):
-    """STEP4（経営判断・レポート生成）の出力（要件 §16〜§21）。"""
-
-    executive_summary: str = Field(description="3〜5 文。判断の結論から書く")
-    decision: BusinessDecision
-    sections: list[ReportSection] = Field(min_length=1)
-    actions: list[Evidenced] = Field(
-        description="次に取るべき具体的な行動", min_length=1)
-
-
-def verify_step4(output: Step4Output, known_ids: set[str]) -> list[TraceProblem]:
-    """章立て・分析順序・根拠・禁止事項（要件 §18 / §19 / §25）。"""
-    problems: list[TraceProblem] = []
-
-    def check(where: str, refs: list[str]) -> None:
-        for ref in refs:
-            if ref not in known_ids:
-                problems.append(TraceProblem(
-                    where=where, problem=f"存在しない根拠を参照しています: {ref!r}"))
-
-    titles = [s.title for s in sorted(output.sections, key=lambda s: s.number)]
-    if titles != list(REPORT_SECTIONS):
-        problems.append(TraceProblem(
-            where="sections",
-            problem=("章立てが要件 §18 と違います。"
-                     f"期待: {list(REPORT_SECTIONS)} / 実際: {titles}")))
-
-    for section in output.sections:
-        backwards = _conclusion_before_evidence(section)
-        if backwards:
-            problems.append(TraceProblem(
-                where=f"sections[{section.number}]",
-                problem=(f"{backwards} が根拠より先に来ています（要件 §19）: "
-                         + " → ".join(b.tag for b in section.blocks))))
-        for index, block in enumerate(section.blocks):
-            check(f"sections[{section.number}].blocks[{index}]", block.evidence)
-
-    decision = output.decision
-    for name in ("primary_patients", "secondary_patients", "avoid_competing_on",
-                 "acquisition_area", "reason_to_visit", "clinic_model"):
-        check(f"decision.{name}", getattr(decision, name).evidence)
-    for name in ("advantages", "risks"):
-        for index, item in enumerate(getattr(decision, name)):
-            check(f"decision.{name}[{index}]", item.evidence)
-    for index, action in enumerate(output.actions):
-        check(f"actions[{index}]", action.evidence)
-
-    problems.extend(_forbidden_predictions(output))
-    return problems
-
-
-#: 根拠の側。FACT と BENCHMARK は「値と比較」で 1 組なので、行き来してかまい
-#: ません（要件 §22 の「値 + 比較 + 意味」はむしろ交互に書くことを求めます）。
-#: PATTERN も、章の中で複数の筋を立てるなら繰り返せます。
-_EVIDENCE_TAGS = ("FACT", "BENCHMARK", "PATTERN")
-#: 結論の側。
-_CONCLUSION_TAGS = ("IMPLICATION", "ACTION")
-
-
-def _conclusion_before_evidence(section: ReportSection) -> str | None:
-    """結論を書いてから根拠を足していないか（要件 §19）。
-
-    最初の実装は、章の中のタグが §19 の並びどおり**単調に**進むことを
-    求めていました。厳しすぎました。
-
-      FACT → FACT → BENCHMARK → FACT → BENCHMARK → PATTERN → WHY → …
-
-    これは良い章です。事実ひとつに比較ひとつを添えて書けば当然こうなりますし、
-    §22 の「値 + 比較 + 意味」はむしろそう書くことを求めています。これを
-    落としていたので、レポート 1 本ぶんの費用が書式の理由で捨てられていました。
-
-    §19 は「可能な限り順番を維持する」と書いてあって、「すべての章にすべての
-    タグを無理に入れる必要はない」とも書いてあります。守らせる価値があるのは
-    **結論を先に書かないこと**だけです。
-    """
-    seen_conclusion: str | None = None
-    for block in section.blocks:
-        if block.tag in _CONCLUSION_TAGS:
-            seen_conclusion = seen_conclusion or block.tag
-        elif seen_conclusion and block.tag in _EVIDENCE_TAGS:
-            return seen_conclusion
-    return None
-
-
-def _forbidden_predictions(output: Step4Output) -> list[TraceProblem]:
-    """売上・患者数・成功確率の予測が混じっていないか。
-
-    このシステムは需要の**構造**を説明するもので、予測をするものではありません
-    （プロジェクトの前提）。プロンプトで禁じたうえで、出力でも落とします。
-    お願いだけで守られることに賭けない。
-    """
-    return _forbidden_predictions_in(output.model_dump_json())
-
-
-# ------------------------------------------------------------------ STEP5
 #
-# STEP4 までは根拠を辿れる形（タグと id）で作ります。それは検算のための形で
-# あって、人が読むための形ではありません。[FACT] が20個並んだ文書は、読み手に
-# 「自分で要約してください」と言っているのと同じです。
+# STEP3 までは根拠を辿れる形（タグと id）で材料を作ります。それは検算のための
+# 形であって、人が読むための形ではありません。[FACT] が20個並んだ文書は、
+# 読み手に「自分で要約してください」と言っているのと同じです。
 #
 # ここで顧客に渡す文書に起こし直します。書き手は開業支援の担当者、読み手は
 # 開業を考えている歯科医師。知りたいのは「なぜここか」と「何が要るか」です。
+#
+# **この段だけが文章を書きます。** タグ付きのレポートを一度書いてから散文に
+# 起こし直していた頃は、同じ内容を 2 回生成していました。
 
 #: 評価の強さ。**予測ではありません。** 「有望」は「儲かる」ではなく、
 #: 「データ上、条件が揃っている」という意味です。
@@ -555,8 +472,8 @@ class ResearchDirection(BaseModel):
         description="調べ方の当て。現地確認 / 自治体資料 / 事業者への照会 など")
 
 
-class Step5Output(BaseModel):
-    """STEP5（顧客提出用レポート）の出力。"""
+class Step4Output(BaseModel):
+    """STEP4（顧客提出用レポート）の出力。最終段です。"""
 
     title: str
     #: 開業を考えている歯科医師が最初に読む数文。結論から書きます。
@@ -573,7 +490,7 @@ class Step5Output(BaseModel):
         description="どこまでがデータで、どこからが評価かを 1〜2 文で")
 
 
-def verify_step5(output: Step5Output, known_ids: set[str],
+def verify_step4(output: Step4Output, known_ids: set[str],
                  known_numbers: set[str]) -> list[TraceProblem]:
     """書き直しであって、書き足しではないこと。
 
@@ -587,13 +504,13 @@ def verify_step5(output: Step5Output, known_ids: set[str],
     """
     problems: list[TraceProblem] = []
 
-    for where, refs in _step5_references(output):
+    for where, refs in _report_references(output):
         for ref in refs:
             if ref not in known_ids:
                 problems.append(TraceProblem(
                     where=where, problem=f"存在しない根拠を参照しています: {ref!r}"))
 
-    for where, text in _step5_prose(output):
+    for where, text in _report_prose(output):
         for number in invented_numbers(text, known_numbers):
             problems.append(TraceProblem(
                 where=where,
@@ -606,7 +523,7 @@ def verify_step5(output: Step5Output, known_ids: set[str],
     return problems
 
 
-def _step5_references(output: Step5Output) -> list[tuple[str, list[str]]]:
+def _report_references(output: Step4Output) -> list[tuple[str, list[str]]]:
     out = [("verdict", output.verdict.basis)]
     out += [(f"sections[{i}]", s.evidence) for i, s in enumerate(output.sections)]
     out += [(f"support_needed[{i}]", s.evidence)
@@ -614,7 +531,7 @@ def _step5_references(output: Step5Output) -> list[tuple[str, list[str]]]:
     return out
 
 
-def _step5_prose(output: Step5Output) -> list[tuple[str, str]]:
+def _report_prose(output: Step4Output) -> list[tuple[str, str]]:
     out = [("summary", output.summary), ("why_here", output.why_here),
            ("verdict", output.verdict.statement + " " + output.verdict.counterpoint)]
     for i, section in enumerate(output.sections):

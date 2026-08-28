@@ -72,7 +72,7 @@ def test_only_step2_may_search_the_web():
     """
     steps = cfg.analysis_config()["steps"]
     assert steps[2]["web_search"] is True
-    for number in (1, 3, 4, 5):
+    for number in (1, 3, 4):
         assert steps[number].get("web_search") is False, (
             f"STEP{number} で Web 検索が有効になっています")
 
@@ -257,18 +257,43 @@ def test_step2_is_not_given_the_base_data(dataset):
     """
     step1 = {"patterns": [{"id": "P001", "title": "t", "evidence_summary": "s",
                            "importance": "high", "research_questions": ["q"]}]}
-    payload = for_step2(step1, dataset["location"], {"max_patterns": 5})
+    payload = for_step2(step1, dataset, {"max_patterns": 5})
     assert "measures" not in payload
     assert "competition" not in payload
     assert payload["patterns"][0]["id"] == "P001"
 
 
+def test_step2_is_given_the_clinic_names_it_cannot_research_without():
+    """インプラント・審美・訪問診療は標榜診療科目ではありません。
+
+    届出の自由記載欄にしかなく、記載率が低い（東京都で1%台）。つまり
+    「この商圏でインプラントを扱う医院が何院あるか」は手元のデータからは
+    **原理的に分かりません**。固有名詞を渡さないかぎり、外部でも調べようが
+    ない。だから医院の名前だけは例外として渡します。
+    """
+    step1 = {"patterns": []}
+    data = {"location": {"municipality_name": "裾野市"},
+            "competition": {"clinics_in_radius": {"items": [
+                {"name": f"歯科医院{i}", "distance_m": i * 50,
+                 "homepage": f"https://example.invalid/{i}",
+                 "specialties": [{"key": "general", "label": "一般歯科"}],
+                 "address": "渡さない", "lat": 1.0, "lng": 2.0}
+                for i in range(1, 11)]}}}
+    payload = for_step2(step1, data, {"clinics_to_research": 3})
+    names = payload["nearby_clinics"]
+    assert [c["name"] for c in names] == ["歯科医院1", "歯科医院2", "歯科医院3"]
+    assert names[0]["specialties"] == ["一般歯科"]
+    assert names[0]["homepage"] == "https://example.invalid/1"
+    # 住所と座標は渡しません。調べるのに要らないうえ、量が増えます。
+    assert "address" not in names[0] and "lat" not in names[0]
+
+
 def test_step2_respects_the_pattern_limit(dataset):
-    """要件 §34：PATTERN 最大5個。"""
+    """要件 §34：PATTERN の上限。"""
     step1 = {"patterns": [{"id": f"P{i:03d}", "title": "t", "evidence_summary": "s",
                            "importance": "high", "research_questions": ["q"]}
                           for i in range(1, 12)]}
-    payload = for_step2(step1, dataset["location"], {"max_patterns": 5})
+    payload = for_step2(step1, dataset, {"max_patterns": 5})
     assert len(payload["patterns"]) == 5
 
 
@@ -279,7 +304,10 @@ def test_step4_gets_conclusions_not_raw_material(dataset):
     """
     payload = for_step4({"facts": []}, {"external_facts": []}, {"insights": []}, dataset)
     assert "items" not in payload["competition"]
-    assert payload["step2"] == {"external_facts": []}
+    assert payload["step2"]["external_facts"] == []
+    # 母集団6つの比較は渡しません。位置づけは STEP1 が FACT として既に選んで
+    # いて、ここでもう一度選ばせると段ごとに答えがぶれます。
+    assert all("benchmarks" not in m for m in payload["measures"])
 
 
 def test_the_hash_ignores_the_timestamp(dataset):
@@ -485,7 +513,8 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def fake_ask(*, step_number, system, user, schema=None, tools=None):
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None, effort=None):
         captured.update(step_number=step_number, system=system, user=user,
                         schema=schema, tools=tools)
         return llm.Result(parsed=_output(), text="",
@@ -499,7 +528,8 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     assert captured["tools"] is None, "STEP1 に道具を渡してはいけない（Web検索禁止）"
     assert captured["schema"] is Step1Output
     # プロンプトに上限が埋め込まれていること。
-    assert "最大 5 個" in captured["system"]
+    limit = cfg.analysis_config()["limits"]["max_patterns"]
+    assert f"最大 {limit} 個" in captured["system"]
     assert "{max_patterns}" not in captured["system"]
     assert usage.input_tokens == 1000
     assert output["facts"][0]["measure_key"] == "child_population"
@@ -865,7 +895,7 @@ def test_step2_searches_once_and_then_writes_it_down(monkeypatch):
     calls: list[dict] = []
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None):
+                 web_search=None, effort=None):
         calls.append({"system": system, "user": user, "schema": schema,
                       "web_search": web_search})
         if schema is None:
@@ -912,7 +942,7 @@ def test_step2_fails_only_when_nothing_survives_verification(monkeypatch):
     from kaigyou_intel.steps import step2_research
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None):
+                 web_search=None, effort=None):
         if schema is None:
             return llm.Result(parsed=None, text="調べました。", usage=llm.Usage(),
                               model="m", sources=[{"url": "https://example.com/a"}])
@@ -1159,6 +1189,30 @@ def test_cache_tokens_are_recorded_and_priced(conn, dataset):
 
 
 # ------------------------------------------------------------------ STEP3
+def _evidenced(text="s", refs=("F001",)):
+    from kaigyou_intel.schemas import Evidenced
+
+    return Evidenced(statement=text, evidence=list(refs))
+
+
+def _decision(**overrides):
+    from kaigyou_intel.schemas import BusinessDecision
+
+    data = {
+        "primary_patients": _evidenced("周辺勤務者", ["S001"]),
+        "secondary_patients": _evidenced("居住小児は主要に置かない", ["F001"]),
+        "avoid_competing_on": _evidenced("小児歯科の標榜数では競わない", ["F001"]),
+        "acquisition_area": _evidenced("駅から徒歩圏の通勤動線", ["M001"]),
+        "reason_to_visit": _evidenced("勤務時間の前後に通える診療時間", ["F001"]),
+        "clinic_model": _evidenced("平日夜間まで開ける成人中心の医院", ["M001"]),
+        "advantages": [_evidenced("昼間人口が常住人口を大きく上回る", ["F001"])],
+        "risks": [_evidenced("地価が高い", ["F001"])],
+        "confidence": "medium",
+    }
+    data.update(overrides)
+    return BusinessDecision(**data)
+
+
 def _step3_output(**overrides) -> "Step3Output":
     from kaigyou_intel.schemas import (
         DemandInsight, DemandMechanism, PatientSegment, Step3Output)
@@ -1178,6 +1232,8 @@ def _step3_output(**overrides) -> "Step3Output":
             id="I001", statement="常住人口の規模で需要を測ると過小評価になる",
             evidence=["M001", "S001"])],
         "not_supported": ["広域流入患者：来院範囲を示すデータが無い"],
+        "decision": _decision(),
+        "actions": [_evidenced("平日夜間の診療体制を決める", ["M001"])],
     }
     data.update(overrides)
     return Step3Output(**data)
@@ -1234,7 +1290,7 @@ def test_step3_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     captured: dict[str, object] = {}
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None):
+                 web_search=None, effort=None):
         captured.update(step_number=step_number, schema=schema, tools=tools,
                         system=system)
         return llm.Result(parsed=_step3_output(),
@@ -1286,139 +1342,54 @@ def test_step3_is_not_asked_to_predict():
     assert "UNSUPPORTED" in text, "反証された仮説を根拠に使わせない指示が要ります"
 
 
-# ------------------------------------------------------------------ STEP4
-def _evidenced(text="s", refs=("F001",)):
-    from kaigyou_intel.schemas import Evidenced
+# --------------------------------------------- STEP3 の経営判断（要件 §16〜§17）
+#
+# 判断は以前 STEP4 という独立した段にあり、その段はタグ付きの10章レポートも
+# 書いていました。最終段がそれを散文に書き直していたので、**同じ内容を2回**
+# 生成していたことになります。読み手に届くのは散文だけです。タグ付きの章立てを
+# 守らせる検査（§18・§19）は、その形ごと無くなりました。
 
-    return Evidenced(statement=text, evidence=list(refs))
+def test_the_judgement_travels_with_the_analysis_that_produced_it():
+    """判断は、同じ段で作った患者層・筋道を根拠にできること。
 
-
-def _step4_output(**overrides) -> "Step4Output":
-    from kaigyou_intel.schemas import (
-        REPORT_SECTIONS, BusinessDecision, ReportBlock, ReportSection, Step4Output)
-
-    data = {
-        "executive_summary": "常住人口では説明できない供給を、勤務者需要が支えている。",
-        "decision": BusinessDecision(
-            primary_patients=_evidenced("周辺勤務者", ["S001"]),
-            secondary_patients=_evidenced("居住小児は主要に置かない", ["F005"]),
-            avoid_competing_on=_evidenced("小児歯科の標榜数では競わない", ["F014"]),
-            acquisition_area=_evidenced("銀座駅から徒歩圏の通勤動線", ["M001"]),
-            reason_to_visit=_evidenced("勤務時間の前後に通える診療時間", ["F015"]),
-            clinic_model=_evidenced("平日夜間まで開ける成人中心の医院", ["M001"]),
-            advantages=[_evidenced("昼間人口が常住人口を大きく上回る", ["F010"])],
-            risks=[_evidenced("地価が都内上位0.2%", ["F017"])],
-            confidence="medium"),
-        "sections": [
-            ReportSection(number=i + 1, title=title,
-                          blocks=[ReportBlock(tag="FACT", text="t",
-                                              evidence=["F001"])])
-            for i, title in enumerate(REPORT_SECTIONS)],
-        "actions": [_evidenced("平日夜間の診療体制を決める", ["M001"])],
-    }
-    data.update(overrides)
-    return Step4Output(**data)
-
-
-_STEP4_IDS = {"F001", "F005", "F010", "F014", "F015", "F017", "S001", "M001"}
-
-
-def test_a_clean_report_passes():
-    from kaigyou_intel.schemas import verify_step4
-
-    assert verify_step4(_step4_output(), _STEP4_IDS) == []
-
-
-def test_the_report_keeps_the_required_chapters():
-    """要件 §18：章立てはモデルに決めさせません。
-
-    毎回違う章立てで出てくると、2地点を並べて読めなくなります。
+    段を分けていた頃は、判断のために同じことをもう一度書かせていました。
     """
-    from kaigyou_intel.schemas import verify_step4
+    from kaigyou_intel.schemas import verify_step3
 
-    output = _step4_output()
-    output.sections = output.sections[:5]
-    assert any("§18" in p.problem for p in verify_step4(output, _STEP4_IDS))
+    assert verify_step3(_step3_output(), {"F001"}, {"C002"}) == []
 
 
-def test_a_chapter_that_puts_the_conclusion_before_the_evidence_is_caught():
-    """守らせる価値があるのは、結論を先に書かないことだけ（要件 §19）。"""
-    from kaigyou_intel.schemas import ReportBlock, verify_step4
+def test_the_judgement_cannot_cite_an_id_no_step_produced():
+    """§25：判断から根拠まで辿れること。"""
+    from kaigyou_intel.schemas import verify_step3
 
-    output = _step4_output()
-    output.sections[6].blocks = [
-        ReportBlock(tag="ACTION", text="夜間診療を検討する"),
-        ReportBlock(tag="FACT", text="昼間人口が多い", evidence=["F010"]),
-    ]
-    assert any("§19" in p.problem for p in verify_step4(output, _STEP4_IDS))
+    output = _step3_output(decision=_decision(
+        avoid_competing_on=_evidenced("何かと競わない", ["Z999"])))
+    assert any("Z999" in p.problem
+               for p in verify_step3(output, {"F001"}, {"C002"}))
 
 
-def test_facts_and_benchmarks_may_interleave():
-    """実測：この章立てでレポート1本を落としていました。
+def test_an_action_cannot_cite_an_id_no_step_produced():
+    from kaigyou_intel.schemas import verify_step3
 
-      FACT → FACT → BENCHMARK → FACT → BENCHMARK → PATTERN → WHY → INSIGHT
-        → IMPLICATION
-
-    事実ひとつに比較ひとつを添えて書けば当然こうなります。§22 の
-    「値 + 比較 + 意味」はむしろそう書くことを求めています。書式の理由で
-    レポート1本ぶんの費用を捨てていました。
-    """
-    from kaigyou_intel.schemas import ReportBlock, verify_step4
-
-    output = _step4_output()
-    output.sections[1].blocks = [
-        ReportBlock(tag=tag, text="t", evidence=["F001"] if tag == "FACT" else [])
-        for tag in ("FACT", "FACT", "BENCHMARK", "FACT", "BENCHMARK",
-                    "PATTERN", "WHY", "INSIGHT", "IMPLICATION")
-    ]
-    assert verify_step4(output, _STEP4_IDS) == []
-
-
-def test_a_chapter_may_make_more_than_one_argument():
-    """章の中で筋を2本立てるなら、PATTERN と WHY は繰り返せます。"""
-    from kaigyou_intel.schemas import ReportBlock, verify_step4
-
-    output = _step4_output()
-    output.sections[6].blocks = [
-        ReportBlock(tag=tag, text="t")
-        for tag in ("PATTERN", "WHY", "PATTERN", "WHY", "INSIGHT", "ACTION")
-    ]
-    assert verify_step4(output, _STEP4_IDS) == []
-
-
-def test_a_chapter_may_skip_tags():
-    """単なる事実の章は FACT だけでよい（要件 §19）。"""
-    from kaigyou_intel.schemas import ReportBlock, verify_step4
-
-    output = _step4_output()
-    output.sections[5].blocks = [
-        ReportBlock(tag="FACT", text="地価は14,300,000円/m2", evidence=["F017"]),
-        ReportBlock(tag="IMPLICATION", text="賃料負担は初期条件を強く縛る"),
-    ]
-    assert verify_step4(output, _STEP4_IDS) == []
-
-
-def test_the_report_cannot_cite_an_id_no_step_produced():
-    """§25：INSIGHT から FACT、そして出典まで辿れること。"""
-    from kaigyou_intel.schemas import verify_step4
-
-    output = _step4_output()
-    output.actions = [_evidenced("何かする", ["Z999"])]
-    assert any("Z999" in p.problem for p in verify_step4(output, _STEP4_IDS))
+    output = _step3_output(actions=[_evidenced("何かする", ["Z999"])])
+    assert any("Z999" in p.problem
+               for p in verify_step3(output, {"F001"}, {"C002"}))
 
 
 @pytest.mark.parametrize("phrase", ["年商", "成功確率", "投資回収", "売上予測"])
-def test_a_report_that_predicts_revenue_is_refused(phrase):
+def test_a_judgement_that_predicts_revenue_is_refused(phrase):
     """開業成功確率・売上・患者数の予測は、このシステムの目的外です。
 
     プロンプトで禁じたうえで、出力でも落とします。お願いだけで守られることに
-    賭けない。
+    賭けない。判断の段が変わっても、この検査は付いていきます。
     """
-    from kaigyou_intel.schemas import verify_step4
+    from kaigyou_intel.schemas import verify_step3
 
-    output = _step4_output()
-    output.executive_summary = f"この立地の{phrase}は良好と見込まれる。"
-    assert any(phrase in p.problem for p in verify_step4(output, _STEP4_IDS))
+    output = _step3_output(decision=_decision(
+        clinic_model=_evidenced(f"この立地の{phrase}は良好と見込まれる", ["M001"])))
+    assert any(phrase in p.problem
+               for p in verify_step3(output, {"F001"}, {"C002"}))
 
 
 def test_the_decision_has_a_place_for_who_not_to_compete_with():
@@ -1438,24 +1409,37 @@ def test_the_decision_has_a_place_for_who_not_to_compete_with():
             risks=[_evidenced()], confidence="low")  # avoid_competing_on 欠落
 
 
+def test_the_judgement_reaches_the_report_as_a_table(dataset):
+    """§17 の答えは、散文ではなく欄のまま載ること。
+
+    以前は判断を作った段の出力ごと捨てていて（散文に書き直したあと参照されま
+    せんでした）、「誰とは競争しないか」がレポートのどこにも残りませんでした。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           (), _step3_output().model_dump())
+    assert "競争しない領域" in markdown and "主要に置かない層" in markdown
+    assert "## 次に取るべき行動" in markdown
+
+
+# ------------------------------------------------------------------ STEP4
 def test_the_report_markdown_always_carries_the_disclaimer_and_provenance(dataset):
     """免責・出典・データ時点は LLM に書かせません。書き忘れの起きる場所に
     置かないためです。"""
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert "## 免責" in markdown
     assert "## データの出典と時点" in markdown
     assert dataset["disclaimer"][:20] in markdown
-    # §17 の答えが表として載ること。
-    assert "競争しない領域" in markdown and "主要に置かない層" in markdown
 
 
 def test_the_report_lists_its_external_sources_in_priority_order(dataset):
     """要件 §9 の優先順位で並べる。読む人が上から見て一次資料に当たれるように。"""
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset), [
         {"url": "https://example.com/a", "title": "企業サイト",
          "source_type": "company", "pattern_id": "P001"},
         {"url": "https://www.mhlw.go.jp/b", "title": "厚労省",
@@ -1473,7 +1457,7 @@ def test_the_source_list_is_what_the_report_cited_not_what_it_opened(dataset):
     """
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset), [
         {"url": "https://www.city.chuo.lg.jp/x", "title": "中央区 人口統計",
          "source_type": "municipality", "pattern_id": "P001"},
         {"url": "https://www.city.chuo.lg.jp/x/", "title": "中央区 人口統計",
@@ -1493,7 +1477,7 @@ def test_a_very_long_source_title_is_trimmed(dataset):
 
     long_title = ("国勢調査 平成27年国勢調査 従業地・通学地による集計" + "あ" * 200
                   + " | 統計表・グラフ表示 | 政府統計の総合窓口")
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset), [
         {"url": "https://www.e-stat.go.jp/x", "title": long_title,
          "source_type": "statistics", "pattern_id": "P001"}])
     line = [ln for ln in markdown.splitlines() if ln.startswith("- [政府統計]")][0]
@@ -1505,7 +1489,7 @@ def test_a_report_with_no_cited_source_says_so(dataset):
     """外部情報を使えなかったことを黙らない。"""
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset), [
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset), [
         {"url": "https://example.com/a", "title": "t", "source_type": "other",
          "pattern_id": None}])
     assert "本文が引用した外部資料はありません（1 件を参照）" in markdown
@@ -1531,11 +1515,11 @@ def test_the_report_is_saved_and_readable(conn, dataset):
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
     try:
-        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        report.save(conn, job_id, _report_output().model_dump(), to_jsonable(dataset))
         markdown = report.markdown_for(conn, job_id)
-        assert markdown and "# 商圏分析レポート" in markdown
+        assert markdown and "商圏分析レポート" in markdown
         # 二度目は上書き（やり直しても行が増えない）。
-        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        report.save(conn, job_id, _report_output().model_dump(), to_jsonable(dataset))
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM analysis_reports WHERE job_id = %s",
                         (job_id,))
@@ -1559,7 +1543,7 @@ def test_the_report_carries_the_caveats_that_change_how_it_reads(dataset):
     """
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert "## 読むときの注意" in markdown
     assert "標榜" in markdown
     # 出典と年次が指標から拾えていること（空欄のまま出さない）。
@@ -1700,11 +1684,11 @@ def test_the_report_is_written_to_a_file_without_another_command(conn, dataset, 
                              dataset=to_jsonable(dataset), base_hash="x",
                              location_name="銀座4丁目")
     try:
-        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        report.save(conn, job_id, _report_output().model_dump(), to_jsonable(dataset))
         path = report.write_file(conn, job_id, directory=str(tmp_path))
         assert path is not None and path.exists()
         assert "銀座4丁目" in path.name, "人が見て分かる名前にする"
-        assert path.read_text(encoding="utf-8").startswith("# 商圏分析レポート")
+        assert path.read_text(encoding="utf-8").startswith("# 銀座4丁目 商圏分析レポート")
 
         # やり直しても同じ名前に上書きする。日付ごとに増やすと最新が分からない。
         again = report.write_file(conn, job_id, directory=str(tmp_path))
@@ -1722,7 +1706,7 @@ def test_a_file_name_survives_windows(conn, dataset, tmp_path):
                              dataset=to_jsonable(dataset), base_hash="x",
                              location_name='A/B:C*D?"E<F>G|H')
     try:
-        report.save(conn, job_id, _step4_output().model_dump(), to_jsonable(dataset))
+        report.save(conn, job_id, _report_output().model_dump(), to_jsonable(dataset))
         path = report.write_file(conn, job_id, directory=str(tmp_path))
         assert path is not None and path.exists()
         assert not set(path.name) & set('\\/:*?"<>|')
@@ -1739,7 +1723,7 @@ def test_the_report_carries_the_numbers_it_did_not_quote(dataset):
     """
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert "## 付録：商圏の基礎数値" in markdown
     for heading in ("### 常住人口", "### 昼間（従業者・事業所）",
                     "### 競合（歯科医院）", "### 交通アクセス", "### 地価（公示地価）"):
@@ -1800,7 +1784,7 @@ def test_the_truncation_message_says_what_to_change(monkeypatch):
 
 
 def test_the_output_ceiling_leaves_room_for_the_whole_report():
-    """10章＋開業方針の JSON に、思考のぶんを足しても収まる上限にしておく。
+    """レポート1本の JSON に、思考のぶんを足しても収まる上限にしておく。
 
     24,000 では書き終わる前に切れました。全部ストリームで受けているので
     HTTP タイムアウトの心配はなく、上限は余裕を持たせられます。払うのは
@@ -1809,10 +1793,10 @@ def test_the_output_ceiling_leaves_room_for_the_whole_report():
     assert cfg.analysis_config()["model"]["max_tokens"] >= 48000
 
 
-# ------------------------------------------------------------------ STEP5
-def _step5_output(**overrides) -> "Step5Output":
+# ------------------------------------------------------------ STEP4（最終段）
+def _report_output(**overrides) -> "Step4Output":
     from kaigyou_intel.schemas import (
-        Judgement, NarrativeSection, ResearchDirection, Step5Output, SupportItem)
+        Judgement, NarrativeSection, ResearchDirection, Step4Output, SupportItem)
 
     data = {
         "title": "銀座4丁目 商圏分析レポート",
@@ -1845,17 +1829,17 @@ def _step5_output(**overrides) -> "Step5Output":
                           "本レポートの判断であり、開業の成否を示すものではありません。",
     }
     data.update(overrides)
-    return Step5Output(**data)
+    return Step4Output(**data)
 
 
-_STEP5_IDS = {"F001", "F010", "M001"}
-_STEP5_NUMBERS = {"13268", "186", "494517", "101"}
+_REPORT_IDS = {"F001", "F010", "M001"}
+_REPORT_NUMBERS = {"13268", "186", "494517", "101"}
 
 
 def test_a_readable_report_passes():
-    from kaigyou_intel.schemas import verify_step5
+    from kaigyou_intel.schemas import verify_step4
 
-    assert verify_step5(_step5_output(), _STEP5_IDS, _STEP5_NUMBERS) == []
+    assert verify_step4(_report_output(), _REPORT_IDS, _REPORT_NUMBERS) == []
 
 
 def test_rounding_for_readability_is_allowed():
@@ -1884,24 +1868,24 @@ def test_a_number_that_was_never_in_the_data_is_caught():
     assert invented_numbers("年間3,200人の来院が見込めます。", known) == ["3,200"]
 
 
-def test_step5_refuses_a_number_it_was_not_given():
-    from kaigyou_intel.schemas import verify_step5
+def test_the_report_refuses_a_number_it_was_not_given():
+    from kaigyou_intel.schemas import verify_step4
 
-    output = _step5_output(why_here="約5万人がこの地区で働いています。")
-    problems = verify_step5(output, _STEP5_IDS, _STEP5_NUMBERS)
+    output = _report_output(why_here="約5万人がこの地区で働いています。")
+    problems = verify_step4(output, _REPORT_IDS, _REPORT_NUMBERS)
     assert any("5万" in p.problem for p in problems)
 
 
-def test_step5_still_may_not_predict():
+def test_the_report_still_may_not_predict():
     """評価（「条件が揃っている」）と予測（「儲かる」）は別のものです。
 
     価値判断は書けますが、売上・患者数・成功確率は書けません。
     """
-    from kaigyou_intel.schemas import verify_step5
+    from kaigyou_intel.schemas import verify_step4
 
-    output = _step5_output(summary="この立地の年商は良好と見込まれます。")
+    output = _report_output(summary="この立地の年商は良好と見込まれます。")
     assert any("年商" in p.problem
-               for p in verify_step5(output, _STEP5_IDS, _STEP5_NUMBERS))
+               for p in verify_step4(output, _REPORT_IDS, _REPORT_NUMBERS))
 
 
 def test_the_judgement_is_marked_as_a_judgement():
@@ -1915,7 +1899,7 @@ def test_the_judgement_is_marked_as_a_judgement():
         Judgement(label="有望", statement="良い立地です", basis=["F001"])
     # judgement_note も必須。
     with pytest.raises(ValidationError):
-        _step5_output(judgement_note=None)
+        _report_output(judgement_note=None)
 
 
 def test_the_client_report_reads_as_prose_not_as_tagged_facts(dataset):
@@ -1923,7 +1907,7 @@ def test_the_client_report_reads_as_prose_not_as_tagged_facts(dataset):
     言っているのと同じです。"""
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert "**[FACT]**" not in markdown
     assert "## なぜこの立地か" in markdown
     assert "## この立地で開業するために必要なこと" in markdown
@@ -1936,26 +1920,41 @@ def test_the_client_report_reads_as_prose_not_as_tagged_facts(dataset):
     assert "## 付録：商圏の基礎数値" in markdown and "## 免責" in markdown
 
 
-def test_the_working_format_is_still_rendered_when_there_is_no_client_report(dataset):
-    """STEP5 が無いジョブ（古いもの）も読めること。"""
+def test_the_working_format_is_still_rendered_for_reports_saved_before_the_merge(dataset):
+    """タグ付きの形で保存された古いレポートも読めること。
+
+    レポートは DB に何か月も残り、その間に段の構成は変わります。読めなく
+    なったら、それは記録を失ったのと同じです。
+    """
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    legacy = {
+        "executive_summary": "常住人口では説明できない供給を、勤務者需要が支えている。",
+        "decision": _decision().model_dump(),
+        "sections": [{"number": 1, "title": "エグゼクティブサマリー",
+                      "blocks": [{"tag": "FACT", "text": "昼間人口が多い",
+                                  "evidence": ["F001"]}]}],
+        "actions": [{"statement": "平日夜間の診療体制を決める", "evidence": ["M001"]}],
+    }
+    markdown = to_markdown(legacy, to_jsonable(dataset))
     assert "**[FACT]**" in markdown
+    assert "### 開業方針" in markdown
 
 
-def test_step5_needs_the_two_steps_before_it(conn, dataset):
+def test_the_report_needs_the_steps_before_it(conn, dataset):
+    """材料が揃っていないまま書かせない。空の入力で「分析しました」と
+    言われるほうが、止まっているより悪い。"""
     from kaigyou_intel import jobs, worker
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
     job = jobs.get_job(conn, job_id, include_base_data=True)
-    with pytest.raises(worker.StepNotImplemented, match="STEP3・STEP4"):
-        worker.build_input(conn, job, 5)
+    with pytest.raises(worker.StepNotImplemented, match="STEP1・STEP2・STEP3"):
+        worker.build_input(conn, job, 4)
     conn.rollback()
 
 
-def test_an_existing_job_gains_the_new_step(conn, dataset):
+def test_an_existing_job_gains_a_step_that_was_added(conn, dataset):
     """段を増やしたとき、既にある Job には行がありません。
 
     行が無いと next_step は「全部終わった」と読み、増やした段が黙って
@@ -1966,18 +1965,44 @@ def test_an_existing_job_gains_the_new_step(conn, dataset):
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM analysis_steps WHERE job_id = %s AND step_number = 5",
+        cur.execute("DELETE FROM analysis_steps WHERE job_id = %s AND step_number = 4",
                     (job_id,))
-    for number in (1, 2, 3, 4):
+    for number in (1, 2, 3):
         jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
         jobs.finish_step(conn, job_id, number, {"n": number}, {})
-    # 4 段だったころに完走した Job の状態。
+    # 3 段だったころに完走した Job の状態。
     jobs.release_job(conn, job_id, "completed")
     try:
         assert jobs.next_step(conn, job_id) is None, "行が無いので終わったように見える"
         assert jobs.ensure_steps(conn, job_id) == 1
-        assert jobs.next_step(conn, job_id) == 5
+        assert jobs.next_step(conn, job_id) == 4
         assert jobs.get_job(conn, job_id)["status"] == "queued"
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_job_from_before_a_step_was_removed_does_not_stall(conn, dataset):
+    """段を**減らした**ときも、同じだけ困ります。
+
+    無くなった段の行が pending のまま残ると、next_step はその番号を返し、
+    走らせる実装が無いのでジョブはそこで永久に止まります。画面には
+    「順番待ち」とだけ出ます。実際にそうなりました。
+    """
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO analysis_steps (job_id, step_number, step_name, status) "
+            "VALUES (%s, 5, '無くなった段', 'pending')", (job_id,))
+    for number in (1, 2, 3, 4):
+        jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
+        jobs.finish_step(conn, job_id, number, {"n": number}, {})
+    try:
+        assert jobs.next_step(conn, job_id) is None, "存在しない段は飛ばす"
+        assert jobs.ensure_steps(conn, job_id) == 1, "その行は落とす"
+        assert [s["step_number"] for s in jobs.get_steps(conn, job_id)] == [1, 2, 3, 4]
     finally:
         _drop_job(job_id)
 
@@ -1987,10 +2012,10 @@ def test_the_client_report_keeps_its_own_title(dataset):
     書かれた見出しのほうが読み手に向いています。"""
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert markdown.startswith("# 銀座4丁目 商圏分析レポート")
-    # 表題が無い（STEP4 止まり）ときは定型に戻ること。
-    plain = to_markdown(_step4_output().model_dump(), to_jsonable(dataset))
+    # 表題が無いときは定型に戻ること。
+    plain = to_markdown(_report_output(title="").model_dump(), to_jsonable(dataset))
     assert plain.startswith("# 商圏分析レポート：")
 
 
@@ -2000,11 +2025,12 @@ def test_a_number_the_earlier_step_wrote_in_prose_can_be_quoted(dataset):
     数値欄しか見ていなかったためです。前の段が文章で書いた数字は、次の段が
     引用してよいものです。
     """
-    from kaigyou_intel.projection import allowed_numbers, for_step5
+    from kaigyou_intel.projection import allowed_numbers, for_step4
     from kaigyou_intel.schemas import invented_numbers
 
-    payload = for_step5({"sections": [{"blocks": [{"text": "409件中1位で、下位30.1%"}]}]},
-                        {"demand_mechanisms": []}, to_jsonable(dataset))
+    payload = for_step4({"facts": [{"statement": "409件中1位で、下位30.1%"}]},
+                        {"external_facts": []}, {"demand_mechanisms": []},
+                        to_jsonable(dataset))
     known = allowed_numbers(payload)
     assert invented_numbers("409件中1位、都内では下位30.1%です。", known) == []
 
@@ -2022,17 +2048,17 @@ def test_the_report_may_say_it_is_not_a_prediction():
 
     語の有無だけを見ると、書いてほしい一文で落ちます。
     """
-    from kaigyou_intel.schemas import verify_step5
+    from kaigyou_intel.schemas import verify_step4
 
-    ok = _step5_output(
+    ok = _report_output(
         judgement_note="この評価は本レポートの判断であり、開業の成功確率を"
                        "示すものではありません。")
-    assert verify_step5(ok, _STEP5_IDS, _STEP5_NUMBERS) == []
+    assert verify_step4(ok, _REPORT_IDS, _REPORT_NUMBERS) == []
 
-    inline = _step5_output(
-        sections=_step5_output().sections,
+    inline = _report_output(
+        sections=_report_output().sections,
         why_here="売上予測を示すものではありませんが、条件は揃っています。")
-    assert verify_step5(inline, _STEP5_IDS, _STEP5_NUMBERS) == []
+    assert verify_step4(inline, _REPORT_IDS, _REPORT_NUMBERS) == []
 
 
 def test_the_prompt_says_which_ids_are_real():
@@ -2040,7 +2066,7 @@ def test_the_prompt_says_which_ids_are_real():
 
     どれが id なのかを書いていなかったので、入力の場所を書かれました。
     """
-    text = cfg.prompt_text("step5_client_report.md")
+    text = cfg.prompt_text("step4_client_report.md")
     assert "データの項目名は id ではありません" in text
     assert "competition.proximity" in text
 
@@ -2074,7 +2100,7 @@ def test_the_research_section_is_addressed_to_the_consultant_not_the_dentist():
     「〜をご存知ですか」と本人に尋ねる欄ではなく、担当者が自分で手配できる
     次の調査を示す欄です。
     """
-    text = cfg.prompt_text("step5_client_report.md")
+    text = cfg.prompt_text("step4_client_report.md")
     assert "本人に尋ねる欄ではありません" in text
     assert "how" in text and "現地確認" in text
 
@@ -2094,6 +2120,162 @@ def test_the_urban_scope_compares_town_with_town(dataset):
     preference = cfg.insights_config()["benchmarks"]["preference"]
     assert preference.index("urban") < preference.index("with_clinics"), (
         "with_clinics より前で試すこと。農村の1院商圏が母集団に残ります")
+
+
+def test_every_step_declares_how_hard_it_should_think():
+    """考える深さは段ごとに違います。**一律に深くすると、ただ遅くなります。**
+
+    実測：レポート1本に32分かかったとき、すべての段が effort: high でした。
+    STEP1 は算出済みの順位から FACT を選ぶ段で、思考だけで10,094トークン
+    出ていました。判断の段（STEP3）と書く段（STEP4）は下げません。
+    """
+    from kaigyou_intel.client import step_settings
+
+    for number in sorted(cfg.analysis_config()["steps"]):
+        assert step_settings(number)["effort"], f"STEP{number} の effort が空です"
+    assert step_settings(3)["effort"] == "high", "判断の段は削らない"
+    assert step_settings(4)["effort"] == "high", "書く段は削らない"
+
+
+def test_the_transcription_call_thinks_less_than_the_search_call():
+    """STEP2 の 2 回目は、調べた本文を JSON に写すだけの呼び出しです。
+
+    ここで考えさせると、調べていないことを補い始めます（そして出典の
+    検算で落ちます）。深さは段ではなく**呼び出しごと**に決まります。
+    """
+    from kaigyou_intel.client import build_request, step_settings
+
+    settings = step_settings(2)
+    depths = ["low", "medium", "high", "xhigh", "max"]
+    assert depths.index(settings["effort_structure"]) <= depths.index(settings["effort"])
+
+    request = build_request(2, "s", "u", web_search=False,
+                            effort=settings["effort_structure"])
+    assert request["output_config"]["effort"] == settings["effort_structure"]
+
+
+def test_the_search_budget_is_small_enough_to_finish():
+    """検索回数はそのまま実行時間です。
+
+    実測（裾野・半径1km）：36件の資料を取得して、本文が根拠に引いたのは
+    7件でした。29件は読むためだけに時間と金を使っています。
+    """
+    limits = cfg.analysis_config()["limits"]
+    assert limits["max_searches_total"] <= 10
+    assert limits["searches_per_pattern"] * limits["max_patterns"] >= \
+        limits["max_searches_total"], (
+        "PATTERN あたりの上限が全体の上限より厳しいと、全体の上限が効きません")
+
+
+def test_the_reserve_leaves_room_for_more_than_one_step_per_call():
+    """1 呼び出しで 1 段しか進めないと、段の間に cron の間隔がまるごと空きます。
+
+    実測：予算800秒に対して見込み420秒だったので、380秒使った時点で次に
+    進めなくなり、段の数だけ最大60秒の待ちが入っていました。
+    """
+    worker_config = cfg.analysis_config()["worker"]
+    budget = worker_config["invocation_seconds"]
+    reserve = worker_config["reserve_seconds"]
+    assert reserve * 2 < budget, "1 呼び出しで少なくとも 2 段は進めること"
+
+
+def test_the_status_shows_where_the_time_went():
+    """どこに時間が溶けているかが分からないと、縮めようがありません。
+
+    実測でレポート1本32分かかったとき、段ごとの開始と完了は記録されて
+    いたのに、どこにも表示されていませんでした。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from kaigyou_etl.cli import _format_seconds, _step_seconds
+
+    start = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+    assert _step_seconds({"started_at": start,
+                          "completed_at": start + timedelta(seconds=95)}) == 95
+    # 走っている途中の段は、まだ言えることがありません。
+    assert _step_seconds({"started_at": start, "completed_at": None}) is None
+    assert _format_seconds(95) == "1分35秒"
+    assert _format_seconds(42) == "42秒"
+
+
+def test_the_neighbourhood_scope_names_the_towns_it_includes():
+    """市区町村の中だけの順位は、その市の大きさで意味が変わります。
+
+    実測：裾野市の商圏について「裾野市内157商圏中2位」というレポートが
+    出ました。小さい市なら市街地はどこでも上位に入るので、これは
+    「そこが市街地である」と言っているのとほぼ同じです。開業地を探して
+    いる人が実際に並べているのは、市の境界の内側ではなく通える範囲
+    ——三島市・長泉町・御殿場市です。
+
+    「近隣」とだけ書かずに自治体名を並べるのは、どこまでを近隣と言って
+    いるのかが読み手に分からないと、順位を読みようがないからです。
+    """
+    from kaigyou_core.measures import benchmark_scopes
+
+    scopes = {s.type: s for s in benchmark_scopes(
+        prefecture_code="22", prefecture_label="静岡県", municipality="裾野市",
+        population=13378, radius_m=1000, lat=35.17, lng=138.90, config={},
+        neighbours=["三島市", "長泉町", "御殿場市", "沼津市"])}
+
+    assert "neighbourhood" in scopes
+    label = scopes["neighbourhood"].label
+    for name in ("裾野市", "三島市", "長泉町", "御殿場市"):
+        assert name in label, "どこと比べたのかが読み手に見えること"
+
+    preference = cfg.insights_config()["benchmarks"]["preference"]
+    assert preference.index("neighbourhood") < preference.index("municipality"), (
+        "市の内側だけの母集団より先に試すこと")
+
+
+def test_a_town_with_no_neighbours_gets_no_neighbourhood_scope():
+    """島や、境界データが無い場合。**同じ母集団を2つ作らない。**
+
+    隣が1つも無ければ、neighbourhood は municipality と同じ集合です。同じ
+    ものを2回並べると、読み手には別々の比較に見えます。
+    """
+    from kaigyou_core.measures import benchmark_scopes
+
+    scopes = {s.type for s in benchmark_scopes(
+        prefecture_code="22", prefecture_label="静岡県", municipality="裾野市",
+        population=13378, radius_m=1000, lat=35.17, lng=138.90, config={},
+        neighbours=[])}
+    assert "municipality" in scopes and "neighbourhood" not in scopes
+
+
+def test_the_neighbours_come_from_the_boundaries_not_from_a_radius(conn):
+    """半径ではなく隣接で決めます。読み手が地図を持たなくても、自治体の
+    名前は知っています。
+
+    境界データの頂点は完全には一致しないので、厳密な ST_Touches では
+    隣どうしが落ちます。少しの隙間は隣とみなします。
+    """
+    from kaigyou_core.dataset import _municipality, _neighbour_municipalities
+
+    here = _municipality(conn, 35.6717, 139.7650)
+    if here is None:
+        pytest.skip("境界データが読み込まれていません")
+    names = _neighbour_municipalities(conn, here["municipality_code"])
+    assert names, "隣接する市区町村が1つも出ないのは、判定が効いていない"
+    assert here["name"] not in names, "自分自身は隣ではありません"
+
+
+def test_the_research_step_must_look_up_the_things_the_data_cannot_hold():
+    """インプラント・審美・訪問診療は標榜診療科目ではありません。
+
+    届出の自由記載欄にしかなく、記載率が低い（東京都で1%台）。ここを
+    調べないと、レポートは「一般歯科9院・矯正6院なので差別化は難しい」
+    という、看板の数え上げで止まります。実測でそうなりました。
+
+    区画整理も同じで、名前を見つけて終わりにすると「計画的な街です」
+    しか書けません。30年前に完了した事業と、いま保留地が売れ残っている
+    事業では、これから人口が動くかどうかが逆になります。
+    """
+    text = cfg.prompt_text("step2_research.md")
+    assert "インプラント" in text and "自由記載欄" in text
+    assert "nearby_clinics" in text
+    assert "扱っていないことは断定しないでください" in text, (
+        "サイトに書いていないことと、やっていないことは違います")
+    assert "施行面積" in text and "保留地" in text
 
 
 def test_the_rent_estimate_is_a_range_with_its_assumption_visible():
@@ -2120,7 +2302,7 @@ def test_the_rent_estimate_is_a_range_with_its_assumption_visible():
 def test_the_rent_estimate_reaches_the_report(dataset):
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     if (dataset.get("cost") or {}).get("rent_estimate"):
         assert "#### 賃料の目安（地価からの換算）" in markdown
         assert "月額（円/坪）" in markdown
@@ -2262,7 +2444,7 @@ def test_the_report_explains_its_own_notation(dataset):
     """
     from kaigyou_intel.report import to_markdown
 
-    markdown = to_markdown(_step5_output().model_dump(), to_jsonable(dataset))
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert "## 本文中の〔F001〕などについて" in markdown
     # 本文で使った記号だけを説明する（使っていない S001 の説明は要らない）。
     assert "**F001**" in markdown and "**M001**" in markdown
@@ -2278,7 +2460,7 @@ def test_a_report_saved_before_a_rename_still_renders(dataset):
     """
     from kaigyou_intel.report import to_markdown
 
-    old = _step5_output().model_dump()
+    old = _report_output().model_dump()
     old["questions_for_the_client"] = ["古い形の設問"]
     del old["further_research"]
     markdown = to_markdown(old, to_jsonable(dataset))
