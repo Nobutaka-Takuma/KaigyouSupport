@@ -14,7 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-etl = ["httpx>=0.27", "pyshp>=2.3"]
+# openpyxl は e-Stat が xlsx で配る表（従業地・通学地集計など）用。
+etl = ["httpx>=0.27", "pyshp>=2.3", "openpyxl>=3.1"]
 serve = ["uvicorn[standard]>=0.32"]
 dev = ["kaigyou-support[etl,serve]", "pytest>=8.0"]
 

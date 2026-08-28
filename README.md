@@ -248,14 +248,44 @@ kaigyou-etl run mlit_municipalities   --input <N03 zip>
 
 # 任意。取り込まなくても分析は成立しますが、そのぶん分からないことが増えます。
 # 取り込んでいない項目は、レポートに「取得できていません」と出ます。
-kaigyou-etl run mlit_future_population --input <500mメッシュ将来推計 SHP zip> --prefecture 13
-kaigyou-etl run estat_daytime_mesh     --input <従業地・通学地メッシュ>
+kaigyou-etl run mlit_future_population   --input <500mメッシュ将来推計 SHP zip> --prefecture 13
+kaigyou-etl run estat_resident_profile  --input tblT001108<都道府県>.zip --prefecture 13
+kaigyou-etl run estat_daytime_municipality --input e01_01.xlsx
+kaigyou-etl run estat_daytime_mesh      --input <従業地・通学地メッシュ>
 
 kaigyou-etl drop-sample      # 合成データを削除（残すと二重計上になります）
 kaigyou-etl refresh-stats    # スコア基準を実データの分布で再計算
 kaigyou-etl compute-scores   # ランキング・ヒートマップ用スコアを再計算
 kaigyou-etl status           # 4/4 になっていることを確認
 ```
+
+### 「昼間の人」をどの表で数えるか
+
+**国勢調査には性格の違う集計が2つあり、取り違えると答えが変わります。**
+
+| 集計 | 基準 | 何が分かるか | 取り込み |
+|---|---|---|---|
+| 就業状態等基本集計（メッシュ・T001108） | **常住地** | そこに**住んでいる**人の通勤手段・居住期間・在学 | `estat_resident_profile` |
+| 従業地・通学地集計（メッシュ） | **従業地・通学地** | そこに**来る**人（＝昼間人口） | `estat_daytime_mesh` |
+| 従業地・通学地集計（市区町村・年齢別） | 従業地・通学地 | 市区町村全体の昼夜間人口。**商圏には按分できない** | `estat_daytime_municipality` |
+
+見分け方があります。就業状態等基本集計（常住地基準）では、大学・大学院の
+在学者がいちばん多いメッシュでも**千人の桁**です（実測：東京都で最大 835 人、
+早稲田駅のメッシュで 393 人）。通学地基準ならキャンパスのメッシュに数万人が
+出ます。`estat_resident_profile` はこれを検算していて、1メッシュに1万人を
+超えたら「通学地基準の表を指している可能性がある」として落とします。
+
+#### 就業状態等基本集計（T001108）で分かること
+
+昼間人口は入っていませんが、**歯科の判断を変えるものが3つ**入っています。
+
+- **利用交通手段** … 駐車場が要るかどうかの代理。実測：早稲田駅前の商圏は
+  自家用車 2.8%・鉄道 59.3%。地方ならこの比率が逆転します。**来院手段
+  そのものではありません**が、その地域で車が使われるかどうかは分かります
+- **居住期間** … 20年以上が厚い街と1年未満が厚い街では、かかりつけと
+  リコール（定期管理）の回り方が違います。年齢構成からは分かりません
+- **未就学者の内訳**（幼稚園・保育園・認定こども園）… 0〜14歳という括りより
+  小児歯科の需要に近い数字です
 
 ### 昼間人口（通学者を数える）
 

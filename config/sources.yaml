@@ -294,6 +294,94 @@ sources:
       students_here:      ["通学者数", "通学地による通学者数"]
       night_population:   ["夜間人口", "常住人口"]
 
+  estat_daytime_municipality:
+    adapter: estat_daytime_municipality
+    name: "国勢調査 従業地・通学地による人口（市区町村・年齢5歳階級）"
+    publisher: "総務省統計局"
+    dataset_kind: official
+    homepage_url: "https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&lid=000001296018"
+    license: "政府統計の総合窓口（e-Stat）利用規約 / CC BY 4.0 相当"
+    # 令和2年国勢調査 従業地・通学地による人口・就業状態等集計 第1-1表
+    # （e01_01.xlsx）。
+    #
+    #   kaigyou-etl run estat_daytime_municipality --input e01_01.xlsx
+    #
+    # **商圏の数字ではありません。** 新宿区の昼間人口 793,528 人のうち何人が
+    # 早稲田駅前の半径1km にいるかは、この表からは分かりません。面積で按分
+    # するのは完全に間違いです。商圏の昼間人口が欲しければ estat_daytime_mesh
+    # （500mメッシュ）が要ります。
+    #
+    # 役に立つのは**文脈と年齢の切り口**です。新宿区の 20〜24歳は夜間 21,906 人
+    # に対して昼間 80,136 人（3.7倍）。年齢別はメッシュ統計には無い切り口で、
+    # 「昼間に若い通学者が大量に流入している」は商圏の数字が無くても効きます。
+    url: null
+    sheet: e01_01
+    source_date: 2020-10-01
+    # 見出しが多段なので、列名ではなく位置で読みます（Excel の列番号、1始まり）。
+    # **ダウンロードしたファイルの見た目と突き合わせてください。** 版が変われば
+    # 動きます。ずれていれば validate が、合計の桁で落とします。
+    first_data_row: 11
+    column_positions:
+      area_level:         1   # A 地域識別コード（0=市区町村・政令市の区）
+      prefecture:         2   # B 都道府県
+      area:               3   # C 地域名（"13104_新宿区"）
+      sex:                4   # D 男女
+      age:                5   # E 年齢（5歳階級）
+      night_population:   6   # F 常住地による人口（夜間人口）
+      daytime_population: 18  # R 従業地・通学地による人口（昼間人口）
+
+  estat_resident_profile:
+    adapter: estat_resident_profile
+    name: "国勢調査 500mメッシュ 就業状態等基本集計（交通手段・居住期間・在学）"
+    publisher: "総務省統計局 / e-Stat 統計GIS"
+    dataset_kind: official
+    homepage_url: "https://www.e-stat.go.jp/gis/statmap-search?type=1&toukeiCode=00200521"
+    license: "政府統計の総合窓口（e-Stat）利用規約 / CC BY 4.0 相当"
+    # 令和2年国勢調査 就業状態等基本集計のメッシュ表（tblT001108<都道府県>.zip）。
+    #
+    #   kaigyou-etl run estat_resident_profile --input tblT001108H13.zip
+    #
+    # **昼間人口ではありません。常住地基準です。** 実測：大学・大学院在学者が
+    # いちばん多いメッシュでも 835 人、早稲田駅のメッシュで 393 人。通学地
+    # 基準ならキャンパスのメッシュに数万人が出るはずで、出ていません。
+    #
+    # 取り込む理由は、歯科の判断を変える3つが入っているからです。
+    #   利用交通手段  … 駐車場が要るかどうかの代理
+    #   居住期間      … かかりつけとリコールが回る街か
+    #   未就学者内訳  … 0〜14歳より小児歯科の需要に近い
+    url: null
+    encoding: cp932
+    source_date: 2020-10-01
+    # 列 ID は令和2年 T001108 の実ファイルで確認済みです。版が変われば動く
+    # ので、合わなければ validate がファイルにある列を並べて落とします。
+    # mesh_code 以外はすべて任意。取れなければ NULL のまま（0 で埋めません）。
+    columns:
+      mesh_code:            ["KEY_CODE", "MESH_ID", "メッシュコード"]
+      # 利用交通手段（15歳以上・自宅外就業者・通学者）。1人が複数を使うので
+      # 合計は人数と一致しません。**比率で読むもの**です。
+      commute_walk:         ["T001108089"]   # 徒歩のみ
+      commute_rail:         ["T001108090"]   # 鉄道・電車
+      commute_bus:          ["T001108091"]   # 乗合バス
+      commute_car:          ["T001108092"]   # 自家用車
+      commute_motorcycle:   ["T001108093"]   # オートバイ
+      commute_bicycle:      ["T001108094"]   # 自転車
+      # 居住期間（総数）
+      resident_under_1y:    ["T001108067"]
+      resident_1_to_5y:     ["T001108070"]
+      resident_20y_plus:    ["T001108079"]
+      # 未就学者・在学者（常住）
+      preschool_total:      ["T001108019"]
+      preschool_nursery:    ["T001108025"]   # うち 保育園・保育所
+      students_high_school: ["T001108040"]
+      students_university:  ["T001108046"]   # うち 大学・大学院
+      # 当地に常住する15歳以上の就業者・通学者
+      workers_living_here:  ["T001108087"]
+      students_living_here: ["T001108088"]
+      # 雇用形態（15歳以上）
+      employees_regular:    ["T001108004"]
+      employees_part_time:  ["T001108010"]
+      self_employed:        ["T001108013"]
+
   mlit_stations:
     adapter: mlit_stations
     name: "国土数値情報 駅別乗降客数（S12）"

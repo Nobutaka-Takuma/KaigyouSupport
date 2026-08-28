@@ -1250,7 +1250,7 @@ def test_the_checklist_says_what_the_data_cannot_settle():
     """
     frame = cfg.hypotheses_config()
     parking = next(r for r in frame["requirements"] if r["id"] == "parking")
-    assert "手元にありません" in parking["note"]
+    assert "データはありません" in parking["note"]
     chairs = next(r for r in frame["requirements"] if r["id"] == "chairs")
     assert "断定しないこと" in chairs["note"]
 
@@ -3582,6 +3582,139 @@ def test_the_outlook_table_stays_readable():
     assert shown == ["2020（推計基準年）", "2030", "2040", "2050"], f"出た年: {shown}"
     assert "2070" not in table, "引退のはるか先まで並べない"
     assert "10年刻みで抜粋" in md, "絞ったことを黙らない"
+
+
+def test_the_resident_profile_is_not_mistaken_for_daytime_population(dataset):
+    """就業状態等基本集計は**常住地基準**です。昼間人口ではありません。
+
+    実測：大学・大学院在学者がいちばん多いメッシュでも 835 人、早稲田駅の
+    メッシュで 393 人。通学地基準ならキャンパスのメッシュに数万人が出る
+    はずで、出ていません。「そこに住んでいる学生」であって「そこに通って
+    くる学生」ではない、と data 自身に書かせます。
+    """
+    profile = ((dataset.get("demand") or {}).get("residents") or {}).get("profile")
+    if profile is None:
+        pytest.skip("この版のデータセットには居住者プロファイルがありません")
+    if not profile["available"]:
+        assert profile["reason"] in ("not_loaded", "not_migrated")
+        return
+    assert "常住地基準" in profile["definition"]
+    assert "昼間人口では" in profile["definition"]
+    assert "通ってくる在学者ではありません" in profile["schooling"]["note"]
+
+
+def test_the_commute_modes_are_shares_not_a_headcount():
+    """1人が複数の手段を使うので、合計は人数と一致しません。**比率で読むもの。**"""
+    from kaigyou_intel.report import _resident_profile_block
+
+    text = "\n".join(_resident_profile_block({
+        "available": True,
+        "commute_modes": [
+            {"key": "commute_rail", "label": "鉄道・電車", "people": 13452,
+             "share": 0.593},
+            {"key": "commute_car", "label": "自家用車", "people": 644,
+             "share": 0.028}],
+        "car_share": 0.028,
+        "residence": {"under_1_year": 3424, "twenty_years_plus": 10305,
+                      "note": "リコールの回り方が違います。"},
+        "schooling": {"university": 3802,
+                      "note": "そこに通ってくる在学者ではありません。"},
+        "definition": "常住地基準であり、昼間人口ではありません。"}))
+    assert "常住地基準。昼間人口ではありません" in text
+    assert "59.3%" in text and "2.8%" in text
+    assert "合計は人数と一致しません" in text
+    assert "来院手段そのものではありません" in text
+
+
+def test_the_parking_question_finally_has_something_behind_it():
+    """「来院手段のデータは手元にありません」としか書けませんでした。
+
+    通勤・通学の交通手段は来院手段そのものではありませんが、その地域で車が
+    使われるかどうかの手がかりにはなります。**手がかりであって答えではない**
+    ことを、枠に書いておきます。
+    """
+    frame = cfg.hypotheses_config()
+    parking = next(r for r in frame["requirements"] if r["id"] == "parking")
+    assert any("commute.car_share" in x for x in parking["decided_by"])
+    assert "来院手段では" in parking["note"]
+    assert "現地で確かめる" in parking["note"]
+    # 居住期間という新しい論点も入っていること。
+    assert any(r["id"] == "recall_base" for r in frame["requirements"])
+
+
+def test_the_resident_profile_loader_refuses_a_daytime_table():
+    """通学地基準の表を間違えて入れると、大学生が1メッシュに数万人という形で
+    現れます。常住なら千人の桁です（実測：東京都で最大 835 人）。"""
+    from kaigyou_core import config as _cfg
+    from kaigyou_etl.adapters import ADAPTERS
+
+    spec = _cfg.sources_config()["sources"]["estat_resident_profile"]
+    assert spec["adapter"] in ADAPTERS
+    # 交通手段と居住期間が取り込み対象に入っていること。これが無いなら、
+    # この取り込みは足す価値がありません。
+    assert "commute_car" in spec["columns"]
+    assert "resident_20y_plus" in spec["columns"]
+
+
+def test_the_municipality_daytime_is_never_offered_as_a_catchment_figure(dataset):
+    """新宿区の昼間人口 79万人のうち何人が早稲田駅前の半径1km にいるかは、
+    市区町村の表からは分かりません。歌舞伎町にも西新宿にもいます。
+
+    **面積で按分するのは完全に間違いです。** 取り違えを防ぐ手立ては、
+    キーとラベルと注記に「市区町村全体」と書くことだけです。
+    """
+    from kaigyou_intel.projection import for_step1
+
+    town = (dataset.get("location") or {}).get("daytime") or {}
+    if not town.get("available"):
+        assert town.get("reason") in ("not_loaded", "not_migrated", "no_municipality")
+        return
+    assert "この商圏の数字ではありません" in town["definition"]
+
+    entries = {c["key"]: c for c in for_step1(dataset)["citable"]}
+    key = "municipality_daytime.population"
+    assert key in entries, "引けるなら、引けるキーとして出す"
+    assert "全体" in entries[key]["label"], "ラベルで商圏と区別する"
+    assert "この商圏の数字ではありません" in entries[key]["note"]
+    # 商圏の昼間人口とは別のキーであること。同じキーだと混ざります。
+    assert key != "daytime.population"
+
+
+def test_the_municipality_block_is_labelled_so_it_cannot_be_misread():
+    """同じページに商圏の数字と並ぶので、区別が付かないと取り違えます。"""
+    from kaigyou_intel.report import _municipality_daytime_block
+
+    text = "\n".join(_municipality_daytime_block({
+        "available": True, "municipality_name": "新宿区",
+        "night_population": 349385, "daytime_population": 793528,
+        "daytime_over_night": 2.271,
+        "by_age": [{"age_band": "03_20～24歳", "night_population": 21906,
+                    "daytime_population": 80136, "daytime_over_night": 3.658}],
+        "young_inflow": {"note": "学生数ではありません。"},
+        "definition": "市区町村全体の数字であって、この商圏の数字ではありません。"}))
+    assert "新宿区全体" in text
+    assert "この商圏の数字ではありません" in text
+    assert "3.66倍" in text, "年齢別の膨らみ方が、学生流入の手がかり"
+    assert "学生数ではありません" in text
+    # 取り込んでいなければ、節そのものを出しません（商圏の欄と違い、
+    # これは無くても分析が成立するので）。
+    assert _municipality_daytime_block({"available": False}) == []
+    assert _municipality_daytime_block(None) == []
+
+
+def test_the_municipality_loader_rejects_a_wrong_area_filter():
+    """全国の昼間人口は夜間人口と一致します（国内で移動するだけなので）。
+
+    実測：地域識別コードを "0"（政令市の区＋特別区）だけに絞っていて、
+    都市部に偏ったため全国合計の比が 1.090 になりました。**この検算が
+    思い込みを捕まえました。** 正しくは {0, 2, 3}（区・市・町村）です。
+    """
+    from kaigyou_etl.adapters.estat_daytime_municipality import _MUNICIPALITY_LEVELS
+
+    assert _MUNICIPALITY_LEVELS == {"0", "2", "3"}
+    # "1"（政令市計）を入れると、その区と二重計上になります。
+    assert "1" not in _MUNICIPALITY_LEVELS
+    assert "a" not in _MUNICIPALITY_LEVELS
 
 
 def test_the_daytime_population_counts_the_people_who_are_not_workers(dataset):

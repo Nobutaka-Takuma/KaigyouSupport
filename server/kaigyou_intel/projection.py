@@ -203,6 +203,57 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
             census_daytime.get("other_here"), "人", "economy", label,
             note="引き算で出した残りです。")
 
+    # --- 住んでいる人の性格（交通手段・居住期間・在学） --------------------
+    profile = ((dataset.get("demand") or {}).get("residents")
+               or {}).get("profile") or {}
+    if profile.get("available"):
+        label = "国勢調査 就業状態等基本集計"
+        for mode in profile.get("commute_modes") or []:
+            add(f"commute.{mode.get('key', '')}".replace("commute.commute_",
+                                                         "commute."),
+                f"通勤・通学に{mode.get('label')}を使う人",
+                mode.get("people"), "人", "residents", label,
+                note="1人が複数の手段を使うので、合計は人数と一致しません。")
+        add("commute.car_share", "通勤・通学に自家用車を使う人の割合",
+            profile.get("car_share"), "", "residents", label,
+            note="**来院手段そのものではありません。** その地域で車が使われる"
+                 "かどうかの手がかりで、駐車場の要否を考える材料になります。")
+        residence = profile.get("residence") or {}
+        add("residence.twenty_years_plus", "20年以上住んでいる人",
+            residence.get("twenty_years_plus"), "人", "residents", label,
+            note="かかりつけとリコールが回る街かどうかの手がかり。")
+        add("residence.under_1_year", "住んで1年未満の人",
+            residence.get("under_1_year"), "人", "residents", label)
+        schooling = profile.get("schooling") or {}
+        add("schooling.preschool_total", "未就学者（商圏内に住んでいる）",
+            schooling.get("preschool_total"), "人", "residents", label,
+            note="0〜14歳より小児歯科の需要に近い数字です。")
+        add("schooling.university", "大学・大学院の在学者（商圏内に住んでいる）",
+            schooling.get("university"), "人", "residents", label,
+            note="**常住地基準です。そこに通ってくる学生ではありません。**")
+
+    # --- 市区町村全体の昼夜間人口 ------------------------------------------
+    # **商圏の数字ではありません。** キーとラベルの両方でそう言います。
+    # 新宿区の 79 万人を商圏の数字として引かれたら、この追加は害になります。
+    town = (dataset.get("location") or {}).get("daytime") or {}
+    if town.get("available"):
+        where = town.get("municipality_name") or "市区町村"
+        label = "国勢調査 従業地・通学地"
+        add("municipality_daytime.population", f"{where}全体の昼間人口",
+            town.get("daytime_population"), "人", "economy", label,
+            note="**市区町村全体の数字で、この商圏の数字ではありません。**"
+                 "商圏に按分することはできません。")
+        add("municipality_daytime.ratio", f"{where}全体の昼夜間人口比率",
+            town.get("daytime_over_night"), "", "economy", label)
+        young = town.get("young_inflow") or {}
+        add("municipality_daytime.young_daytime",
+            f"{where}全体の15〜24歳の昼間人口",
+            young.get("daytime_population"), "人", "economy", label,
+            note=young.get("note"))
+        add("municipality_daytime.young_night",
+            f"{where}全体の15〜24歳の夜間人口",
+            young.get("night_population"), "人", "economy", label)
+
     # --- 将来推計 ----------------------------------------------------------
     outlook = (dataset.get("demand") or {}).get("outlook") or {}
     if outlook.get("available"):

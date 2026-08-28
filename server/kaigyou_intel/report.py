@@ -77,6 +77,86 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
 # LLM を通さないので、桁の取り違えも書き落としも起きません。トークンも
 # 使いません。
 
+def _resident_profile_block(profile: Mapping[str, Any] | None) -> list[str]:
+    """住んでいる人の性格。交通手段・居住期間・在学。
+
+    **昼間人口ではありません。** 見出しにそう書きます。同じページに商圏の
+    昼間人口が並ぶので、区別が付かないと取り違えます。
+    """
+    if not profile:
+        return []
+    if not profile.get("available"):
+        return ["#### 居住者の通勤手段・居住期間", "",
+                f"**取得できていません。** {profile.get('note', '')}", ""]
+
+    lines = ["#### 居住者の通勤・通学手段（**常住地基準。昼間人口ではありません**）", ""]
+    modes = profile.get("commute_modes") or []
+    lines += _table(["手段", "人数", "割合"], [
+        [m.get("label"), _num(m.get("people")),
+         "—" if m.get("share") is None else f"{m['share'] * 100:.1f}%"]
+        for m in modes])
+    lines += ["1人が複数の手段を使うので、合計は人数と一致しません。"
+              "**来院手段そのものではありません**が、その地域で車が使われるか"
+              "どうかの手がかりになります。", ""]
+
+    residence = profile.get("residence") or {}
+    lines += ["#### 居住期間（商圏内）", ""]
+    lines += _table(["区分", "人数"], [
+        ["1年未満", _num(residence.get("under_1_year"))],
+        ["1〜5年未満", _num(residence.get("one_to_five_years"))],
+        ["20年以上", _num(residence.get("twenty_years_plus"))]])
+    if residence.get("note"):
+        lines += [str(residence["note"]), ""]
+
+    schooling = profile.get("schooling") or {}
+    if any(v for k, v in schooling.items() if k != "note"):
+        lines += ["#### 在学者・未就学者（商圏内に**住んでいる**人）", ""]
+        lines += _table(["区分", "人数"], [
+            ["未就学者", _num(schooling.get("preschool_total"))],
+            ["　うち 保育園・保育所", _num(schooling.get("preschool_nursery"))],
+            ["高校", _num(schooling.get("high_school"))],
+            ["大学・大学院", _num(schooling.get("university"))]])
+        if schooling.get("note"):
+            lines += [str(schooling["note"]), ""]
+    return lines
+
+
+def _municipality_daytime_block(daytime: Mapping[str, Any] | None) -> list[str]:
+    """市区町村全体の昼夜間人口。**商圏の数字と並べない。**
+
+    見出しに「市区町村全体」と書くのは飾りではありません。同じページに
+    商圏の数字と並ぶので、区別が付かないと読み手が取り違えます。新宿区の
+    79 万人を早稲田商圏の数字として読まれたら、この表は害になります。
+    """
+    if not daytime or not daytime.get("available"):
+        return []
+    name = daytime.get("municipality_name") or "市区町村"
+    rows = [["夜間人口（常住）", _num(daytime.get("night_population"))],
+            ["昼間人口（従業地・通学地）", _num(daytime.get("daytime_population"))],
+            ["昼夜間人口比率",
+             "—" if daytime.get("daytime_over_night") is None
+             else f"{daytime['daytime_over_night'] * 100:.1f}%"]]
+    lines = [f"#### 参考：{name}全体の昼夜間人口（**この商圏の数字ではありません**）", ""]
+    lines += _table(["区分", "人数"], rows)
+
+    # 年齢別。ここがメッシュ統計には無い切り口です。
+    bands = [b for b in (daytime.get("by_age") or [])
+             if b.get("daytime_over_night") is not None]
+    if bands:
+        top = sorted(bands, key=lambda b: b["daytime_over_night"], reverse=True)[:5]
+        lines += ["昼間にいちばん膨らむ年齢階級（昼間人口 ÷ 夜間人口）:", ""]
+        lines += _table(["年齢", "夜間", "昼間", "倍率"], [
+            [b["age_band"], _num(b["night_population"]),
+             _num(b["daytime_population"]),
+             f"{b['daytime_over_night']:.2f}倍"] for b in top])
+    young = daytime.get("young_inflow")
+    if young:
+        lines += [str(young.get("note", "")), ""]
+    if daytime.get("definition"):
+        lines += [str(daytime["definition"]), ""]
+    return lines
+
+
 def _daytime_block(daytime: Mapping[str, Any] | None) -> list[str]:
     """昼間人口（従業地・通学地）。取れていないときは、取れていないと書く。
 
@@ -194,6 +274,10 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
             for label, key in (("従業者数", "workers"), ("事業所数", "establishments"))
         ])
         lines += _daytime_block((demand.get("daytime") or {}).get("census_daytime"))
+        lines += _resident_profile_block(
+            ((demand.get("residents") or {}).get("profile")))
+        lines += _municipality_daytime_block(
+            (dataset.get("location") or {}).get("daytime"))
         lines += _industry_block((demand.get("daytime") or {}).get("industry_mix"))
 
     by_radius = competition.get("by_radius") or {}

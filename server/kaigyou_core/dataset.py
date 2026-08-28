@@ -383,6 +383,205 @@ VINTAGE_LONG_AGO_YEARS = 30
 VINTAGE_RECENT_YEARS = 5
 
 
+#: 「若い通学者」の代理として見る年齢階級。大学・専門学校の在学年齢です。
+#: 就業者も混じるので、これは**学生数ではありません**。そう名乗らせます。
+_STUDENT_AGE_ORDERS = (2, 3)   # 15〜19歳, 20〜24歳
+
+
+#: 通勤・通学の交通手段。**1人が複数を使うので合計は人数と一致しません。**
+#: 比率で読むものなので、割合も一緒に返します。
+_COMMUTE_MODES = (("commute_walk", "徒歩のみ"), ("commute_rail", "鉄道・電車"),
+                  ("commute_bus", "乗合バス"), ("commute_car", "自家用車"),
+                  ("commute_motorcycle", "オートバイ"),
+                  ("commute_bicycle", "自転車"))
+
+
+def resident_profile(conn: psycopg.Connection, lat: float, lng: float,
+                     radius_m: int, mesh_size_m: int) -> dict[str, Any]:
+    """そこに住んでいる人の性格（交通手段・居住期間・在学・雇用形態）。
+
+    **昼間人口ではありません。常住地基準です。** 実測：大学・大学院在学者が
+    いちばん多いメッシュでも 835 人、早稲田駅のメッシュで 393 人。通学地基準
+    ならキャンパスに数万人が出ます。「そこに住んでいる学生」であって
+    「そこに通ってくる学生」ではありません。
+
+    歯科の判断を変えるものが 3 つ入っています。
+
+    - **利用交通手段** … 駐車場が要るかどうかの代理。これまで「データが
+      無いので現地で確認」としか書けませんでした
+    - **居住期間** … かかりつけとリコールが回る街か。年齢構成では分かりません
+    - **未就学者の内訳** … 0〜14歳より小児歯科の需要に近い
+
+    重み付けは他のメッシュ集計と同じ面積按分です。
+    """
+    if not table_exists(conn, "mesh_resident_profile"):
+        return {"available": False, "reason": "not_migrated",
+                "note": "居住者プロファイルのテーブルがまだありません"
+                        "（kaigyou-etl migrate）。"}
+    fields = ([m for m, _l in _COMMUTE_MODES]
+              + ["resident_under_1y", "resident_1_to_5y", "resident_20y_plus",
+                 "preschool_total", "preschool_nursery", "students_high_school",
+                 "students_university", "workers_living_here",
+                 "students_living_here", "employees_regular",
+                 "employees_part_time", "self_employed"])
+    sums = ", ".join(f"SUM(p.{f} * s.w) AS {f}" for f in fields)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            WITH buf AS (
+                SELECT ST_Buffer(ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
+                                 %(radius)s)::geometry AS g
+            ),
+            share AS (
+                SELECT m.mesh_code,
+                       LEAST(1.0, GREATEST(0.0,
+                           ST_Area(ST_Intersection(m.geom, buf.g)::geography)
+                           / NULLIF(ST_Area(m.geom::geography), 0))) AS w
+                  FROM population_mesh m, buf
+                 WHERE m.mesh_size_m = %(mesh)s
+                   AND m.geom && buf.g AND ST_Intersects(m.geom, buf.g)
+            )
+            SELECT {sums}, count(*) AS mesh_count, MAX(p.source_date) AS source_date
+              FROM mesh_resident_profile p
+              JOIN share s ON s.mesh_code = p.mesh_code
+             WHERE p.mesh_size_m = %(mesh)s
+            """,
+            {"lat": lat, "lng": lng, "radius": radius_m, "mesh": mesh_size_m})
+        row = cur.fetchone()
+
+    if not row or not row["mesh_count"]:
+        return {"available": False, "reason": "not_loaded",
+                "note": "この地域の就業状態等基本集計（メッシュ）は"
+                        "取り込まれていません。来院手段の手がかり（通勤・通学の"
+                        "交通手段）と、居住期間の長さは分かりません。"}
+
+    values = {f: _round(row[f]) for f in fields}
+    modes = [{"key": key, "label": label, "people": values.get(key)}
+             for key, label in _COMMUTE_MODES]
+    # 1人が複数の手段を使うので、割合の分母は合計です（人数ではありません）。
+    denominator = sum(m["people"] or 0 for m in modes)
+    for mode in modes:
+        mode["share"] = (None if not denominator or mode["people"] is None
+                         else round(mode["people"] / denominator, 3))
+    settled = values.get("resident_20y_plus")
+    recent = values.get("resident_under_1y")
+    return {
+        "available": True,
+        "mesh_count": int(row["mesh_count"]),
+        "source_date": row["source_date"],
+        "commute_modes": modes,
+        "car_share": next((m["share"] for m in modes
+                           if m["key"] == "commute_car"), None),
+        "residence": {
+            "under_1_year": recent,
+            "one_to_five_years": values.get("resident_1_to_5y"),
+            "twenty_years_plus": settled,
+            "note": "20年以上住んでいる人が多い街と、1年未満が多い街では、"
+                    "かかりつけとリコール（定期管理）の回り方が違います。",
+        },
+        "schooling": {
+            "preschool_total": values.get("preschool_total"),
+            "preschool_nursery": values.get("preschool_nursery"),
+            "high_school": values.get("students_high_school"),
+            "university": values.get("students_university"),
+            "note": "**常住地基準です。そこに住んでいる在学者であって、"
+                    "そこに通ってくる在学者ではありません。** 大学の門前でも、"
+                    "この数字は通学者の数になりません。",
+        },
+        "employment": {
+            "regular": values.get("employees_regular"),
+            "part_time": values.get("employees_part_time"),
+            "self_employed": values.get("self_employed"),
+            "workers_living_here": values.get("workers_living_here"),
+            "students_living_here": values.get("students_living_here"),
+        },
+        "definition": ("国勢調査 就業状態等基本集計を、現在人口と同じ面積按分で"
+                       "商圏に切り出したもの。**常住地基準であり、昼間人口では"
+                       "ありません。** 交通手段は通勤・通学の手段で、来院手段"
+                       "そのものではありませんが、その地域で車が使われるか"
+                       "どうかの手がかりになります。"),
+    }
+
+
+def municipality_daytime(conn: psycopg.Connection,
+                         municipality_code: str | None) -> dict[str, Any]:
+    """市区町村の昼夜間人口と、年齢階級ごとの膨らみ方。
+
+    **商圏の数字ではありません。** 新宿区の昼間人口 793,528 人のうち何人が
+    早稲田駅前の半径1km にいるかは、この表からは分かりません。歌舞伎町にも
+    西新宿にもいます。**面積で按分するのは完全に間違いです。**
+
+    では何のために出すのか。**文脈と、年齢の切り口です。** 新宿区の 20〜24歳は
+    夜間 21,906 人に対して昼間 80,136 人（3.7倍）。「この街には昼間、若い
+    通学者が大量に流入している」は、商圏の数字が無くても意思決定に効きます。
+    そして年齢別は、メッシュ統計には無い切り口です。
+
+    この数字は外部調査（Web検索）で自治体の PDF から拾っていました。一次
+    データを手元に持てば、検索の枠が空き、値も正確になります。
+    """
+    if not municipality_code:
+        return {"available": False, "reason": "no_municipality",
+                "note": "市区町村が特定できていません（境界データが未取得）。"}
+    if not table_exists(conn, "municipality_daytime"):
+        return {"available": False, "reason": "not_migrated",
+                "note": "市区町村の昼間人口のテーブルがまだありません"
+                        "（kaigyou-etl migrate を実行してください）。"}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT age_band, age_order, night_population, daytime_population,
+                   municipality_name, source_date
+              FROM municipality_daytime
+             WHERE municipality_code = %s AND sex LIKE '0!_%%' ESCAPE '!'
+             ORDER BY age_order
+            """, (municipality_code,))
+        rows = [dict(r) for r in cur.fetchall()]
+
+    if not rows:
+        return {"available": False, "reason": "not_loaded",
+                "note": "この市区町村の従業地・通学地集計は取り込まれていません"
+                        "（kaigyou-etl run estat_daytime_municipality）。"}
+
+    def ratio(row: Mapping[str, Any]) -> float | None:
+        night = row.get("night_population")
+        day = row.get("daytime_population")
+        return (None if not night or day is None
+                else round(float(day) / float(night), 3))
+
+    total = next((r for r in rows if r["age_order"] == 0), None)
+    bands = [{"age_band": r["age_band"], "age_order": r["age_order"],
+              "night_population": r["night_population"],
+              "daytime_population": r["daytime_population"],
+              "daytime_over_night": ratio(r)}
+             for r in rows if r["age_order"] not in (None, 0)]
+    young = [b for b in bands if b["age_order"] in _STUDENT_AGE_ORDERS]
+    return {
+        "available": True,
+        "municipality_name": (total or rows[0]).get("municipality_name"),
+        "night_population": (total or {}).get("night_population"),
+        "daytime_population": (total or {}).get("daytime_population"),
+        "daytime_over_night": ratio(total or {}),
+        "by_age": bands,
+        # 15〜24歳の膨らみ方。学生が流入している街ほど大きくなります。
+        "young_inflow": {
+            "age_bands": [b["age_band"] for b in young],
+            "night_population": sum(b["night_population"] or 0 for b in young),
+            "daytime_population": sum(b["daytime_population"] or 0 for b in young),
+            "note": "15〜24歳は大学・専門学校の在学年齢ですが、**就業者も"
+                    "含みます。学生数ではありません。** この層が昼間に大きく"
+                    "膨らむ市区町村は、通学による流入が起きている可能性が"
+                    "高い、というところまでが言えることです。",
+        } if young else None,
+        "source_date": (total or rows[0]).get("source_date"),
+        "definition": ("国勢調査 従業地・通学地による人口（昼間人口）。"
+                       "**市区町村全体の数字であって、この商圏の数字では"
+                       "ありません。** 商圏に按分することはできません"
+                       "（同じ区の中でも場所によってまったく違うため）。"
+                       "商圏の昼間人口は demand.daytime.census_daytime を"
+                       "見てください。"),
+    }
+
+
 def daytime_population(conn: psycopg.Connection, lat: float, lng: float,
                        radius_m: int, mesh_size_m: int) -> dict[str, Any]:
     """商圏の昼間人口（従業地・通学地による人口）。取れなければ、取れないと言う。
@@ -1255,6 +1454,11 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "prefecture_name": prefecture_name(conn, prefecture_code),
             "municipality_code": (municipality or {}).get("municipality_code"),
             "municipality_name": (municipality or {}).get("name"),
+            # 市区町村全体の昼夜間人口。**商圏の数字ではありません。**
+            # location の下に置いているのは、そこが「この地点がどこにあるか」
+            # の欄で、商圏の集計と混ざらないからです。
+            "daytime": municipality_daytime(
+                conn, (municipality or {}).get("municipality_code")),
             # 隣接市区町村。比較の母集団として使うだけでなく、外部調査の
             # 検索語にもなります（「三島市 歯科 インプラント」）。
             "neighbour_municipalities": neighbours or None,
@@ -1297,11 +1501,19 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             # out inside the catchment.
             "distribution": _catchment_shape(conn, lat, lng, radius_m,
                                              mesh_size_m or 1000),
-            "residents": {"by_radius": {r: {
-                k: v for k, v in vals.items()
-                if k in ("population", "age_0_14", "age_15_64", "age_65_plus",
-                         "households", "population_growth", "mesh_count")}
-                for r, vals in by_radius.items()}},
+            "residents": {
+                "by_radius": {r: {
+                    k: v for k, v in vals.items()
+                    if k in ("population", "age_0_14", "age_15_64",
+                             "age_65_plus", "households", "population_growth",
+                             "mesh_count")}
+                    for r, vals in by_radius.items()},
+                # そこに住んでいる人の性格。交通手段は駐車場の判断に、
+                # 居住期間はかかりつけが回るかの判断に効きます。年齢構成
+                # からは出てきません。**常住地基準**なので residents の下です。
+                "profile": resident_profile(conn, lat, lng, radius_m,
+                                            mesh_size_m or 1000),
+            },
             # 20〜30年の意思決定に、過去5年の増減だけで答えない。
             "outlook": _outlook_with_actual(
                 population_outlook(conn, lat, lng, radius_m, mesh_size_m or 1000),
