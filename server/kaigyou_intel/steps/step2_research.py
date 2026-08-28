@@ -19,7 +19,9 @@ STEP1 が見つけた PATTERN の**背景**を Web検索で調べます。ここ
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
 
 from kaigyou_core import config as cfg
 from kaigyou_intel import client as llm
@@ -68,8 +70,59 @@ def _prompts(limits: Mapping[str, Any],
     return research, cfg.prompt_text(settings["prompt_structure"])
 
 
+@dataclass
+class _Finding:
+    """1 つの PATTERN について調べた結果。"""
+
+    pattern_id: str
+    text: str
+    sources: list[dict[str, Any]]
+    usage: llm.Usage
+    error: str | None = None
+    #: サーバ側ツールが返したエラー。**例外ではなく content の中身として
+    #: HTTP 200 で返ります。** 空の結果として扱うと「調査済み・該当なし」が
+    #: レポートに残ります。
+    search_errors: list[str] = field(default_factory=list)
+
+
+def _research_one(pattern: Mapping[str, Any], location: Mapping[str, Any],
+                  system: str, max_uses: int) -> _Finding:
+    """PATTERN 1 つを調べる。**失敗しても例外を上げません。**
+
+    4 本のうち 1 本が落ちただけで、通った 3 本ぶんの検索と時間を捨てるのは
+    割に合いません。落ちたことは呼び出し側が unanswered に書き残します。
+    """
+    pattern_id = str(pattern.get("id") or "P000")
+    asked = ("以下が STEP1 で見つかった商圏の特徴のうち、**あなたが調べる 1 つ**です。"
+             "この PATTERN の research_questions にだけ答えてください。"
+             "他の PATTERN は別の担当が調べています。\n\n"
+             "```json\n"
+             + json.dumps({"location": location, "pattern": pattern},
+                          ensure_ascii=False, indent=1)
+             + "\n```")
+    try:
+        result = llm.ask(step_number=STEP_NUMBER, system=system, user=asked,
+                         max_uses=max_uses)
+    except Exception as exc:  # noqa: BLE001 - 1 本の失敗で全部を捨てない
+        return _Finding(pattern_id, "", [], llm.Usage(),
+                        error=f"{type(exc).__name__}: {exc}")
+    return _Finding(
+        pattern_id, result.text or "",
+        [s for s in result.sources if s.get("url")], result.usage,
+        error=None if (result.text or "").strip() else "本文が空でした",
+        search_errors=[str(s["error"]) for s in result.sources if s.get("error")])
+
+
 def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     """PATTERN を調べて、外部事実と仮説を返す。
+
+    **PATTERN ごとに呼び出しを分けて、同時に走らせます。** 1 本にまとめると、
+    サーバ側の検索ループが 1 本の中で直列に回り、増えていく文脈を毎回読み
+    直します。実測（沼津・4検索）で入力 794,572 トークン・5分36秒。レポート
+    1 本 11 分のうち、この段だけで半分を使っていました。
+
+    調べる中身は PATTERN ごとに独立しているので、分けても答えは変わりません。
+    変わるのは待ち時間で、直列の合計から**いちばん遅い 1 本**になります。
 
     返り値は (出力, 使用量, 出典)。出典には pattern_id を付けて返します。
     どの PATTERN を調べていて出てきた URL かが分からないと、§25 の追跡が
@@ -79,20 +132,38 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     research_prompt, structure_prompt = _prompts(
         limits, payload.get("available_keys"))
 
-    asked = ("以下が STEP1 で見つかった商圏の特徴です。"
-             "research_questions に答えてください。\n\n"
-             "```json\n" + json.dumps(payload, ensure_ascii=False, indent=1) + "\n```")
+    patterns = [p for p in (payload.get("patterns") or []) if p.get("id")]
+    if not patterns:
+        raise StepFailed("調べる PATTERN がありません。STEP1 の出力を確認してください。")
+    location = payload.get("location") or {}
+    per_pattern = max(1, int(limits.get("searches_per_pattern", 2)))
+    # 全体の上限も守ります。PATTERN あたりの上限を掛けた数が全体を超える
+    # なら、調べる PATTERN のほうを削ります（importance の高い順に並んで
+    # いるので、削るのは後ろから）。
+    budget = llm.max_searches(limits)
+    keep = max(1, budget // per_pattern)
+    skipped = [str(p["id"]) for p in patterns[keep:]]
+    patterns = patterns[:keep]
 
-    # 1 回目：調べる。
-    research = llm.ask(step_number=STEP_NUMBER, system=research_prompt, user=asked)
-    retrieved = [s for s in research.sources if s.get("url")]
-    if not research.text.strip():
-        raise StepFailed("調査の本文が空でした")
-    errors = [s.get("error") for s in research.sources if s.get("error")]
-    if errors and not retrieved:
-        # 検索そのものが動かなかった。「外部情報が見つからなかった」ではないので、
-        # そう記録します。取り違えると、次に読む人が調査済みだと思います。
-        raise StepFailed("Web検索が実行できませんでした: " + ", ".join(map(str, errors)))
+    findings = _research_all(patterns, location, research_prompt, per_pattern)
+
+    retrieved = [s for finding in findings for s in finding.sources]
+    text = "\n\n".join(f"## {f.pattern_id}\n\n{f.text}"
+                        for f in findings if f.text.strip())
+    failed = [f for f in findings if f.error]
+
+    # 検索そのものが動かなかった。「外部情報が見つからなかった」ではないので、
+    # そう記録します。取り違えると、次に読む人が調査済みだと思います。
+    search_errors = [e for f in findings for e in f.search_errors]
+    if search_errors and not retrieved:
+        raise StepFailed("Web検索が実行できませんでした: " + ", ".join(search_errors))
+
+    if not text.strip():
+        raise StepFailed(
+            "調査の本文が空でした"
+            + (f"（{len(failed)}件の呼び出しが失敗: "
+               + "; ".join(f"{f.pattern_id} {f.error}" for f in failed) + "）"
+               if failed else ""))
 
     # 2 回目：書き写す。取得した URL の一覧を明示して渡します。ここに無い URL を
     # 書けば下の検算で落ちるので、「一覧から選ぶ」ほうが易しい問題になります。
@@ -103,11 +174,11 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
         # 書き写すだけの呼び出しです。考えさせると、調べていないことを補い
         # 始めます（そして下の出典の検算で落ちます）。
         effort=llm.step_settings(STEP_NUMBER)["effort_structure"],
-        user=("## 調査結果\n\n" + research.text
+        user=("## 調査結果\n\n" + text
               + "\n\n## 今回の検索で取得した URL（source_url はこの中から選ぶこと）\n\n"
               + catalogue
               + "\n\n## 調べていた PATTERN\n\n```json\n"
-              + json.dumps(payload.get("patterns") or [], ensure_ascii=False, indent=1)
+              + json.dumps(patterns, ensure_ascii=False, indent=1)
               + "\n```"),
         schema=Step2Output, web_search=False)
 
@@ -115,9 +186,15 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     if output is None:
         raise StepFailed("構造化出力を受け取れませんでした")
 
-    allowed = {p.get("id") for p in (payload.get("patterns") or []) if p.get("id")}
+    allowed = {p["id"] for p in patterns}
     urls = {s["url"] for s in retrieved}
     dropped = _drop_unverifiable(output, urls)
+    # 調べられなかったぶんは黙って消しません。「調べたが確認できなかった」と
+    # 「そもそも調べていない」は別のことです。
+    output.unanswered = list(output.unanswered) + [
+        f"{f.pattern_id} は調査の呼び出しが失敗したため調べられていません: {f.error}"
+        for f in failed] + [
+        f"{pid} は検索回数の上限に達したため調べていません。" for pid in skipped]
 
     problems = verify_step2(output, allowed, urls)
     if problems:
@@ -130,15 +207,39 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
             f"（{len(dropped)}件を除外）。")
 
     usage = llm.Usage(
-        input_tokens=research.usage.input_tokens + structured.usage.input_tokens,
-        output_tokens=research.usage.output_tokens + structured.usage.output_tokens,
-        web_searches=research.usage.web_searches + structured.usage.web_searches,
-        cache_read_tokens=(research.usage.cache_read_tokens
-                           + structured.usage.cache_read_tokens),
-        cache_write_tokens=(research.usage.cache_write_tokens
-                            + structured.usage.cache_write_tokens),
+        input_tokens=sum(f.usage.input_tokens for f in findings)
+        + structured.usage.input_tokens,
+        output_tokens=sum(f.usage.output_tokens for f in findings)
+        + structured.usage.output_tokens,
+        web_searches=sum(f.usage.web_searches for f in findings)
+        + structured.usage.web_searches,
+        cache_read_tokens=sum(f.usage.cache_read_tokens for f in findings)
+        + structured.usage.cache_read_tokens,
+        cache_write_tokens=sum(f.usage.cache_write_tokens for f in findings)
+        + structured.usage.cache_write_tokens,
     )
     return output.model_dump(), usage, _sources_with_patterns(retrieved, output)
+
+
+def _research_all(patterns: Sequence[Mapping[str, Any]],
+                  location: Mapping[str, Any], system: str,
+                  per_pattern: int) -> list[_Finding]:
+    """PATTERN ごとの調査を同時に走らせる。
+
+    順序は入力どおりに揃えます。並行実行の完了順のまま返すと、同じ入力から
+    毎回違う本文が組み上がり、プロンプトを直したときの比較ができません。
+
+    同時実行数は設定で上げ下げできます。1 にすれば直列に戻ります
+    （API のレート制限に当たったときの逃げ道）。
+    """
+    limit = max(1, int((cfg.analysis_config().get("limits") or {})
+                       .get("parallel_research", 4)))
+    if limit == 1 or len(patterns) == 1:
+        return [_research_one(p, location, system, per_pattern) for p in patterns]
+    with ThreadPoolExecutor(max_workers=min(limit, len(patterns))) as pool:
+        futures = [pool.submit(_research_one, p, location, system, per_pattern)
+                   for p in patterns]
+        return [f.result() for f in futures]
 
 
 def _drop_unverifiable(output: Step2Output, urls: set[str]) -> list[str]:

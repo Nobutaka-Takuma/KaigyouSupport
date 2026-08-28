@@ -669,7 +669,7 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     captured: dict[str, object] = {}
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None, effort=None):
+                 web_search=None, effort=None, max_uses=None):
         captured.update(step_number=step_number, system=system, user=user,
                         schema=schema, tools=tools)
         return llm.Result(parsed=_crossing_output(), text="",
@@ -1313,7 +1313,7 @@ def test_step2_searches_once_and_then_writes_it_down(monkeypatch):
     calls: list[dict] = []
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None, effort=None):
+                 web_search=None, effort=None, max_uses=None):
         calls.append({"system": system, "user": user, "schema": schema,
                       "web_search": web_search})
         if schema is None:
@@ -1352,6 +1352,114 @@ def test_step2_searches_once_and_then_writes_it_down(monkeypatch):
     assert cited["https://www.e-stat.go.jp/x"] is None, "引用されなかった出典も残す"
 
 
+def _many_patterns(count: int) -> dict:
+    return {"patterns": [
+        {"id": f"P{i:03d}", "title": "t", "evidence_summary": "s",
+         "importance": "high", "research_questions": ["q"]}
+        for i in range(1, count + 1)]}
+
+
+def test_step2_researches_each_pattern_in_its_own_call(monkeypatch):
+    """**1 本にまとめると、検索ループが 1 本の中で直列に回ります。**
+
+    サーバ側の検索は、増えていく文脈を毎回読み直します。実測（沼津・4検索）
+    で入力 794,572 トークン・5分36秒。レポート1本 11分のうち、この段だけで
+    半分を使っていました。
+
+    調べる中身は PATTERN ごとに独立しているので、分けても答えは変わりません。
+    変わるのは待ち時間で、直列の合計からいちばん遅い1本になります。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    seen: list[str] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None, effort=None, max_uses=None):
+        if schema is None:
+            # 1 本に渡されたのは 1 つの PATTERN だけであること。
+            assert user.count('"id"') == 1, "PATTERN をまとめて渡していないこと"
+            seen.append(user)
+            pattern_id = json.loads(
+                user.split("```json", 1)[1].rsplit("```", 1)[0])["pattern"]["id"]
+            return llm.Result(
+                parsed=None, text=f"{pattern_id} を調べました。",
+                usage=llm.Usage(input_tokens=100, output_tokens=50, web_searches=2),
+                model="m",
+                sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html",
+                          "title": "中央区 人口統計"}])
+        # 4 本ぶんの本文が、入力どおりの順で 1 つにまとまっていること。
+        body = user.split("## 今回の検索", 1)[0]
+        assert body.index("P001") < body.index("P002") < body.index("P003")
+        return llm.Result(parsed=_step2_output(), usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(_many_patterns(3), {"location": {}})
+    _output, usage, _sources = step2_research.run(payload)
+
+    assert len(seen) == 3, "PATTERN ごとに 1 本"
+    # 使用量は全部の合計。分けたぶんを数え落とすと、費用が実際より安く見えます。
+    assert usage.web_searches == 6 and usage.output_tokens == 150
+
+
+def test_step2_gives_each_call_only_its_own_share_of_the_searches(monkeypatch):
+    """全体の上限をそのまま渡すと、1 本が全部使い切れてしまいます。"""
+    from kaigyou_intel.steps import step2_research
+
+    budgets: list[int | None] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None, effort=None, max_uses=None):
+        if schema is None:
+            budgets.append(max_uses)
+            return llm.Result(parsed=None, text="調べました。",
+                              usage=llm.Usage(), model="m",
+                              sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html"}])
+        return llm.Result(parsed=_step2_output(), usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    step2_research.run(step2_research.build_input(_many_patterns(2), {"location": {}}))
+    per_pattern = cfg.analysis_config()["limits"]["searches_per_pattern"]
+    assert budgets == [per_pattern, per_pattern]
+
+
+def test_step2_does_not_throw_away_three_good_calls_because_one_failed(monkeypatch):
+    """4 本のうち 1 本が落ちただけで、通った 3 本ぶんの検索と時間を捨てるのは
+    割に合いません。**ただし黙って捨てません。**"""
+    from kaigyou_intel.steps import step2_research
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None, effort=None, max_uses=None):
+        if schema is None:
+            if "P002" in user:
+                raise RuntimeError("upstream hiccup")
+            return llm.Result(parsed=None, text="調べました。",
+                              usage=llm.Usage(), model="m",
+                              sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html"}])
+        return llm.Result(parsed=_step2_output(), usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    output, _usage, _sources = step2_research.run(
+        step2_research.build_input(_many_patterns(3), {"location": {}}))
+    unanswered = " ".join(output["unanswered"])
+    assert "P002" in unanswered and "upstream hiccup" in unanswered
+
+
+def test_step2_stops_when_every_call_failed(monkeypatch):
+    """全部落ちたのを「外部情報が見つからなかった」と記録しない。
+
+    取り違えると、次に読む人が調査済みだと思います。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    def fake_ask(**kwargs):
+        raise RuntimeError("upstream down")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    with pytest.raises(step2_research.StepFailed, match="upstream down"):
+        step2_research.run(
+            step2_research.build_input(_many_patterns(2), {"location": {}}))
+
+
 def test_step2_fails_only_when_nothing_survives_verification(monkeypatch):
     """出典を確かめられた外部事実がひとつも残らないなら、それは調査ではありません。
 
@@ -1360,7 +1468,7 @@ def test_step2_fails_only_when_nothing_survives_verification(monkeypatch):
     from kaigyou_intel.steps import step2_research
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None, effort=None):
+                 web_search=None, effort=None, max_uses=None):
         if schema is None:
             return llm.Result(parsed=None, text="調べました。", usage=llm.Usage(),
                               model="m", sources=[{"url": "https://example.com/a"}])
@@ -1733,7 +1841,7 @@ def test_step3_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     captured: dict[str, object] = {}
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
-                 web_search=None, effort=None):
+                 web_search=None, effort=None, max_uses=None):
         captured.update(step_number=step_number, schema=schema, tools=tools,
                         system=system)
         return llm.Result(parsed=_step3_output(),

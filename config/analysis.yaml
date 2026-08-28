@@ -63,6 +63,16 @@ limits:
   max_patterns: 4              # STEP1 が出す PATTERN の最大数
   searches_per_pattern: 2      # PATTERN あたりの Web 検索回数
   max_searches_total: 8
+  # STEP2 を PATTERN ごとに分けて同時に走らせる本数。1 で直列（API の
+  # レート制限に当たったときの逃げ道）。
+  #
+  # なぜ分けるか。1 本にまとめると、サーバ側の検索ループが 1 本の中で直列に
+  # 回り、増えていく文脈を毎回読み直します。実測（沼津・4検索）で入力
+  # 794,572 トークン・5分36秒。レポート1本 11分のうち、この段だけで半分を
+  # 使っていました。調べる中身は PATTERN ごとに独立しているので、分けても
+  # 答えは変わりません。変わるのは待ち時間で、直列の合計から**いちばん
+  # 遅い1本**になります。
+  parallel_research: 4
   max_clinics_in_projection: 20
   # 層を跨いだ PATTERN の下限は config/hypotheses.yaml の crossing にあります。
   # 仮説の枠組み（層・定性要因・So What? のふるい）は 1 か所にまとめてあり、
@@ -193,7 +203,7 @@ steps:
     # 事実が増えて、出典の照合が合わなくなります。
     prompt: step2_research.md
     prompt_structure: step2_structure.md
-    prompt_version: step2-v1.4
+    prompt_version: step2-v1.5
     # 検索が律速する段で、待っている間の思考は増やしても意味がありません。
     effort: medium
     # 2 回目は**書き写すだけ**です。ここで考えさせると、調べていないことを

@@ -139,11 +139,14 @@ def max_searches(limits: Mapping[str, Any]) -> int:
     return int(limits.get("max_searches_total", 15))
 
 
-def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any]) -> dict[str, Any]:
+def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any],
+                     max_uses: int | None = None) -> dict[str, Any]:
     tool: dict[str, Any] = {
         "type": WEB_SEARCH_TOOL_TYPE,
         "name": "web_search",
-        "max_uses": max_searches(limits),
+        # PATTERN ごとに呼び出しを分けるときは、その 1 本ぶんの上限を渡します。
+        # 全体の上限をそのまま渡すと、1 本が全部使い切れてしまいます。
+        "max_uses": int(max_uses) if max_uses else max_searches(limits),
     }
     # 要件 §9 の優先順位は、プロンプトでのお願いではなく API 側で効かせます。
     # 守らせられるものは仕組みで守らせるほうが確実です。
@@ -175,7 +178,8 @@ def _cache_control() -> dict[str, Any]:
 def build_request(step_number: int, system: str, user: str, *,
                   tools: Sequence[Mapping[str, Any]] | None = None,
                   web_search: bool | None = None,
-                  effort: str | None = None) -> dict[str, Any]:
+                  effort: str | None = None,
+                  max_uses: int | None = None) -> dict[str, Any]:
     """送信する本体を組み立てる。呼び出しとは分けてあります。
 
     分けているのは検算のためです。API キーの無い環境でも、この戻り値が
@@ -224,7 +228,7 @@ def build_request(step_number: int, system: str, user: str, *,
     searching = settings["web_search"] if web_search is None else bool(web_search)
     if searching:
         declared.append(_web_search_tool(config.get("limits") or {},
-                                         config.get("search") or {}))
+                                         config.get("search") or {}, max_uses))
     if declared:
         request["tools"] = declared
     return request
@@ -234,7 +238,8 @@ def ask(*, step_number: int, system: str, user: str,
         schema: Type[T] | None = None,
         tools: Sequence[Mapping[str, Any]] | None = None,
         web_search: bool | None = None,
-        effort: str | None = None) -> Result:
+        effort: str | None = None,
+        max_uses: int | None = None) -> Result:
     """1 ステップぶんの呼び出し。
 
     ``schema`` を渡すと構造化出力で受け取り、Pydantic で検証します。
@@ -244,7 +249,8 @@ def ask(*, step_number: int, system: str, user: str,
     settings = step_settings(step_number)
     client = _client()
     request = build_request(step_number, system, user, tools=tools,
-                            web_search=web_search, effort=effort)
+                            web_search=web_search, effort=effort,
+                            max_uses=max_uses)
 
     # 常にストリームで受けます。SDK は「10 分を超えうる操作」を非ストリームで
     # 呼ぶと送信前に ValueError を投げ、その境目は max_tokens で決まります。
