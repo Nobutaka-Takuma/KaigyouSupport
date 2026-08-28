@@ -12,6 +12,19 @@
 
 active_profile: default
 
+# --- 成長を、いつからいつまでで見るか ---------------------------------------
+#
+# プロファイルごとの好みではなく、データ全体の設定です。「小児歯科寄りモデル
+# だけ 2040 年で見る」に意味はありません。プロファイルの中に置いていたとき、
+# default にしか書かれておらず、他の4つは「最初に見つかったものを使う」に
+# 頼っていました。設定が1か所に無いと、いつか静かにずれます。
+#
+# 2050 年なのは、開業してから引退までのおおよその幅だからです。
+# 基準年は公表データの基準年（総人口のみで年齢内訳が無い年）。
+growth_horizon:
+  from_year: 2020
+  to_year: 2050
+
 # How a raw metric is mapped onto 0-100 before weighting.
 #   minmax_p05_p95 : linear between the 5th and 95th percentile of the
 #                    observed mesh distribution, clamped. Robust to outliers.
@@ -77,7 +90,7 @@ profiles:
       age_0_14: 0.12
       age_65_plus: 0.12
       households: 0.16
-      population_growth: 0.12
+      population_change_projected: 0.12
 
     # --- Competition -------------------------------------------------------
     # Base metric: catchment population per facility. Higher = fewer clinics
@@ -94,13 +107,20 @@ profiles:
 
     # --- Growth ------------------------------------------------------------
     growth:
-      metric: population_growth
-      # Fractional change over the source's comparison interval (2015->2020)
-      # that maps to the bottom and top of the scale. Set from the observed
-      # spread of Tokyo 500m meshes with 100+ residents: p10 = -7.6%,
-      # p90 = +11.4%. Small meshes swing hard, so the tails are clipped.
-      low: -0.08    #  -8%  -> 0
-      high: 0.12    # +12%  -> 100
+      # **将来推計を見ます。** 以前は 2015→2020 の実績（population_growth）でした。
+      # 歯科の開業は 20〜30 年の意思決定なので、過去 5 年はその代理として弱い。
+      # 実績も引き続き算出していて、レポートには両方載ります。
+      metric: population_change_projected
+      # 目盛り。**相対順位ではなく絶対値です。** 「25%減る商圏」は静岡でも
+      # 東京でも同じ意味なので、県内の順位に直すと「県全体が縮んでいる」
+      # という事実が消えます。買い手が知りたいのはそこです。
+      #
+      # 実測（静岡県・500mメッシュ・2020年に100人以上）: 2020→2050 の変化は
+      # p10 = -45.3%、中央値 = -24.7%、p90 = -7.4%。**全ての分位が負**でした。
+      # 増える商圏のために上側に少し余地を残しています。
+      # 他県を取り込んだら、この幅を見直してください。
+      low: -0.40    # -40% -> 0
+      high: 0.05    #  +5% -> 100
 
     # --- Accessibility -----------------------------------------------------
     accessibility:
@@ -140,7 +160,7 @@ profiles:
       age_0_14: 0.38
       age_65_plus: 0.05
       households: 0.17
-      population_growth: 0.15
+      population_change_projected: 0.15
     competition:
       # 標榜科目で競合を絞る。キーは config/sources.yaml の specialty_codes に
       # あるもの（general / pediatric / orthodontics / oral_surgery /
@@ -161,9 +181,12 @@ profiles:
       # 東京都の 1km 商圏の中央値はおよそ 1,300 人／小児歯科 1 件。
       cap: 6000
     growth:
-      metric: population_growth
-      low: -0.08
-      high: 0.12
+      metric: population_change_projected
+      # 目盛りは default と同じ。実測の根拠は default の growth に書いてあります。
+      # ここだけ過去の実績用（-8%〜+12%）のままにすると、将来推計の値
+      #（静岡の中央値は -24.7%）が全部下限に張り付いて 0 点になります。
+      low: -0.40
+      high: 0.05
     accessibility:
       weights:
         station_distance: 0.6
@@ -194,7 +217,7 @@ profiles:
       age_15_64: 0.15
       age_65_plus: 0.02
       households: 0.13
-      population_growth: 0.10
+      population_change_projected: 0.10
     competition:
       specialty: orthodontics
       population_metric: population
@@ -206,9 +229,12 @@ profiles:
       # 人口は全科目のときのおよそ 2 倍になります。
       cap: 40000
     growth:
-      metric: population_growth
-      low: -0.08
-      high: 0.12
+      metric: population_change_projected
+      # 目盛りは default と同じ。実測の根拠は default の growth に書いてあります。
+      # ここだけ過去の実績用（-8%〜+12%）のままにすると、将来推計の値
+      #（静岡の中央値は -24.7%）が全部下限に張り付いて 0 点になります。
+      low: -0.40
+      high: 0.05
     accessibility:
       weights:
         station_distance: 0.6
@@ -237,7 +263,7 @@ profiles:
       age_0_14: 0.02
       age_65_plus: 0.03
       households: 0.05
-      population_growth: 0.10
+      population_change_projected: 0.10
       establishments: 0.25
     competition:
       metric: population_per_facility
@@ -245,9 +271,12 @@ profiles:
       zero_population_score: 0
       cap: 20000
     growth:
-      metric: population_growth
-      low: -0.08
-      high: 0.12
+      metric: population_change_projected
+      # 目盛りは default と同じ。実測の根拠は default の growth に書いてあります。
+      # ここだけ過去の実績用（-8%〜+12%）のままにすると、将来推計の値
+      #（静岡の中央値は -24.7%）が全部下限に張り付いて 0 点になります。
+      low: -0.40
+      high: 0.05
     accessibility:
       weights:
         station_distance: 0.6
@@ -291,16 +320,19 @@ profiles:
       age_0_14: 0.12
       age_65_plus: 0.12
       households: 0.16
-      population_growth: 0.12
+      population_change_projected: 0.12
     competition:
       metric: population_per_facility
       zero_facility_score: 95
       zero_population_score: 0
       cap: 20000
     growth:
-      metric: population_growth
-      low: -0.08
-      high: 0.12
+      metric: population_change_projected
+      # 目盛りは default と同じ。実測の根拠は default の growth に書いてあります。
+      # ここだけ過去の実績用（-8%〜+12%）のままにすると、将来推計の値
+      #（静岡の中央値は -24.7%）が全部下限に張り付いて 0 点になります。
+      low: -0.40
+      high: 0.05
     accessibility:
       weights:
         station_distance: 0.6

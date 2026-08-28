@@ -193,7 +193,15 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
         "working_age": _round(metrics.get("age_15_64")),
         "elderly": _round(metrics.get("age_65_plus")),
         "households": _round(metrics.get("households")),
+        # 2015→2020 の実績。**成長スコアの根拠ではありません**（そちらは
+        # 下の将来推計）。両方返すのは、どちらも事実だからです。過去だけを
+        # 見せると「これまで増えてきた」で判断され、将来だけを見せると
+        # 「これまでどうだったか」が消えます。
         "population_growth": metrics.get("population_growth"),
+        # 成長スコアが実際に見ている値。点数だけ出して根拠を隠さない。
+        "population_change_projected": metrics.get("population_change_projected"),
+        "population_change_from_year": metrics.get("population_change_from_year"),
+        "population_change_to_year": metrics.get("population_change_to_year"),
         # Which shape these numbers came from. A population figure is not
         # interpretable without it: the same point can differ threefold.
         "catchment_kind": metrics.get("catchment_kind"),

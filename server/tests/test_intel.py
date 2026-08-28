@@ -2928,3 +2928,97 @@ def test_a_year_without_an_age_breakdown_is_not_reported_as_zero(conn, dataset, 
     assert by_year[2020]["elderly_share"] is None, "内訳が無い年は None のまま"
     assert by_year[2020]["late_elderly_share"] is None
     assert by_year[2040]["elderly_share"] == round(6000.0 / 18731.0, 3)
+
+
+def test_the_growth_metric_comes_from_the_projection(conn):
+    """商圏の 2020→2050 が、面積按分で正しく出ること。
+
+    分子と分母が同じメッシュ集合なので、按分の重みは比では打ち消し合う。
+    それでも同じ重み付けを使うのは、現在人口と並べたときに「差が推計の差か
+    数え方の差か」を読み手が悩まないようにするため。
+    """
+    from kaigyou_core.analysis import projected_change
+
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO data_sources (id, name, publisher, dataset_kind) "
+                    "VALUES ('proj_t','t','t','official') ON CONFLICT (id) DO NOTHING")
+        # 商圏の中心をすっぽり覆う1メッシュ。按分は 1.0 になる。
+        cur.execute("""
+            INSERT INTO population_mesh (source_id, mesh_code, mesh_size_m,
+                prefecture_code, geom, centroid, population)
+            VALUES ('proj_t','TESTMESH1',500,'99',
+                    ST_MakeEnvelope(139.00, 35.00, 139.02, 35.02, 4326),
+                    ST_SetSRID(ST_MakePoint(139.01, 35.01), 4326), 1000)""")
+        for year, pop in ((2020, 1000.0), (2050, 780.0)):
+            cur.execute("""
+                INSERT INTO mesh_population_projection (source_id, mesh_code,
+                    mesh_size_m, prefecture_code, projection_year, population)
+                VALUES ('proj_t','TESTMESH1',500,'99',%s,%s)""", (year, pop))
+    conn.commit()
+    try:
+        change = projected_change(conn, 35.01, 139.01, 500, 500, 2020, 2050)
+        assert change is not None
+        assert abs(change - (-0.22)) < 1e-6, f"780/1000-1 = -0.22 のはず: {change}"
+
+        # 推計の無い年を頼まれたら、0 ではなく None。
+        assert projected_change(conn, 35.01, 139.01, 500, 500, 2020, 2099) is None
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM data_sources WHERE id = 'proj_t'")
+        conn.commit()
+
+
+def test_the_demand_input_follows_the_configured_growth_metric():
+    """成長の指標を変えたとき、demand 側が取り残されないこと。
+
+    demand も同じ目盛り（growth.low/high）を共用している。名前を直書きして
+    いたので、片方だけ将来推計にすると**過去の実績を将来の目盛りで採点する**
+    ことになっていた。
+    """
+    from kaigyou_core.scoring import ScoringModel
+    from kaigyou_core import config as cfg
+
+    profiles = cfg.scoring_config()["profiles"]
+    for name, profile in profiles.items():
+        metric = (profile.get("growth") or {}).get("metric")
+        weights = profile.get("demand_weights") or {}
+        rate_keys = [k for k in weights if "growth" in k or "change" in k]
+        for key in rate_keys:
+            assert key == metric, (
+                f"{name}: demand の率指標 {key!r} が growth.metric {metric!r} と"
+                "違う。目盛りを共用しているので、揃っていないと別物を同じ物差しで測る")
+
+
+def test_every_profile_scores_growth_on_the_same_scale():
+    """目盛りだけ取り残されると、静かに全部 0 点になる。
+
+    実測：default の目盛りだけ将来推計向け（-40%〜+5%）に直し、他の4つを
+    過去の実績向け（-8%〜+12%）のままにしていた。静岡の中央値は -24.7% なので、
+    その4つは全メッシュが下限に張り付いて成長スコアが 0 になる。点数は出るので
+    気づけない。
+    """
+    from kaigyou_core import config as cfg
+
+    profiles = cfg.scoring_config()["profiles"]
+    scales = {name: ((p.get("growth") or {}).get("low"),
+                     (p.get("growth") or {}).get("high"))
+              for name, p in profiles.items()}
+    assert len(set(scales.values())) == 1, f"目盛りが揃っていない: {scales}"
+
+    # 実測の中央値が、目盛りの内側に入っていること。端に張り付く目盛りは
+    # 点数を出しても地点を選ぶ手掛かりにならない。
+    low, high = next(iter(scales.values()))
+    assert low < -0.247 < high, "静岡の中央値 -24.7% が目盛りの外にある"
+
+
+def test_the_growth_horizon_lives_in_one_place():
+    """年次はデータ全体の設定。プロファイルごとの好みではない。"""
+    from kaigyou_core import config as cfg
+    from kaigyou_core.analysis import growth_years
+
+    scoring = cfg.scoring_config()
+    assert scoring.get("growth_horizon", {}).get("to_year") == 2050
+    for name, profile in scoring["profiles"].items():
+        growth = profile.get("growth") or {}
+        assert "to_year" not in growth, f"{name} に年次が重複している"
+    assert growth_years() == {"from_year": 2020, "to_year": 2050}

@@ -170,8 +170,18 @@ export function AccessTable({ analysis }: { analysis: CandidateAnalysis }) {
           <td className="right">{num(analysis.nearest_station.daily_passengers)}</td>
         </tr>
         <tr>
-          <td>人口増減率</td>
+          {/* 過去の実績。**成長スコアの根拠ではありません。** ラベルに年を
+              入れないと、下の将来推計とどちらが点数の元か分かりません。 */}
+          <td>人口増減率（2015→2020 実績）</td>
           <td className="right">{percent(analysis.population_growth)}</td>
+        </tr>
+        <tr>
+          {/* 成長スコアが見ている値。点数だけ出して根拠を隠さない。 */}
+          <td>
+            人口増減率（{analysis.population_change_from_year ?? 2020}→
+            {analysis.population_change_to_year ?? 2050} 推計）
+          </td>
+          <td className="right">{percent(analysis.population_change_projected)}</td>
         </tr>
       </tbody>
     </table>

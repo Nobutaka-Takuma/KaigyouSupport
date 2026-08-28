@@ -273,7 +273,28 @@ def analyze_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         row = cur.fetchone() or {}
     metrics = {_RENAME.get(k, k): v for k, v in row.items()}
     metrics["radius_m"] = radius_m
+    # 成長は将来推計で見ます。過去の実績（population_growth）も残したまま
+    # 並べて返します。置き換えると、レポートから「これまで」が消えます。
+    settings = growth_years()
+    metrics["population_change_projected"] = projected_change(
+        conn, lat, lng, radius_m, mesh_size_m,
+        settings["from_year"], settings["to_year"])
+    metrics["population_change_from_year"] = settings["from_year"]
+    metrics["population_change_to_year"] = settings["to_year"]
     return metrics
+
+
+def growth_years() -> dict[str, int]:
+    """成長を何年から何年で見るか。設定の1か所にあり、コードには書きません。
+
+    プロファイルではなく上位に置いてあります。「小児歯科寄りモデルだけ
+    2040 年で見る」に意味は無く、どの推計年で採点するかはデータ全体の性質です。
+    """
+    from kaigyou_core import config as cfg
+
+    horizon = (cfg.scoring_config().get("growth_horizon") or {})
+    return {"from_year": int(horizon.get("from_year", 2020)),
+            "to_year": int(horizon.get("to_year", 2050))}
 
 
 def catchment_geojson(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
@@ -464,6 +485,99 @@ def score_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
 CATCHMENT_BATCH = 1000
 
 
+
+#: 将来推計から「基準年 → 目標年」の変化率を出す。
+#:
+#: population_growth（2015→2020 の実績）と同じ形の値です。置き換えではなく
+#: 並べて持ちます。過去の実績も、それはそれで意味のある事実だからです。
+#:
+#: **kg_analyze_point は触りません。** あの関数は出力列を変えるのに DROP が
+#: 要り、古いシグネチャが残ると「エラーも出ないまま違う数字が返る」という
+#: 壊れ方をします（analysis.py:484 の但し書き）。分子と分母が同じ集合なので、
+#: 比は別クエリで出しても同じ答えになります。
+def _projection_change_sql(alias_geom: str) -> str:
+    return f"""
+        SELECT SUM(p_to.population * w.share)
+               / NULLIF(SUM(p_from.population * w.share), 0) - 1
+          FROM (
+              SELECT n.mesh_code,
+                     LEAST(1.0, GREATEST(0.0,
+                         ST_Area(ST_Intersection(n.geom, {alias_geom})::geography)
+                         / NULLIF(ST_Area(n.geom::geography), 0))) AS share
+                FROM population_mesh n
+               WHERE n.mesh_size_m = %(mesh)s
+                 AND n.geom && {alias_geom}
+                 AND ST_Intersects(n.geom, {alias_geom})
+          ) w
+          JOIN mesh_population_projection p_from
+            ON p_from.mesh_code = w.mesh_code AND p_from.mesh_size_m = %(mesh)s
+           AND p_from.projection_year = %(from_year)s
+          JOIN mesh_population_projection p_to
+            ON p_to.mesh_code = w.mesh_code AND p_to.mesh_size_m = %(mesh)s
+           AND p_to.projection_year = %(to_year)s
+    """
+
+
+def projected_change(conn: psycopg.Connection, lat: float, lng: float,
+                     radius_m: int, mesh_size_m: int,
+                     from_year: int, to_year: int) -> float | None:
+    """1 地点の商圏について、基準年から目標年への人口の変化率。
+
+    取り込んでいなければ None。0 ではありません。「分からない」を「増減なし」
+    と言い換えると、推計が無い地域の成長スコアが平均点になります。
+    """
+    from kaigyou_core.db import table_exists
+
+    if not table_exists(conn, "mesh_population_projection"):
+        return None
+    buffer = ("ST_Buffer(ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,"
+              " %(radius)s)::geometry")
+    with conn.cursor() as cur:
+        cur.execute(_projection_change_sql(buffer),
+                    {"lat": lat, "lng": lng, "radius": radius_m, "mesh": mesh_size_m,
+                     "from_year": from_year, "to_year": to_year})
+        row = cur.fetchone()
+    value = (list(row.values())[0] if row else None)
+    return None if value is None else float(value)
+
+
+def projected_change_by_mesh(conn: psycopg.Connection, radius_m: int, *,
+                             mesh_size_m: int, prefecture_code: str,
+                             from_year: int, to_year: int,
+                             progress: Any = None) -> dict[int, float]:
+    """都道府県の全メッシュぶんを 1 文で。
+
+    メッシュごとに 1 往復すると、5,449 メッシュがそのまま 5,449 回の
+    問い合わせになります。まとめて出して Python 側で突き合わせます。
+    """
+    from kaigyou_core.db import table_exists
+
+    say = progress or (lambda _m: None)
+    if not table_exists(conn, "mesh_population_projection"):
+        say("    将来推計人口が未取得のため、成長は算出できません。")
+        return {}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT m.id AS mesh_id, ({_projection_change_sql("buf.g")}) AS change
+              FROM population_mesh m
+              CROSS JOIN LATERAL (
+                  SELECT ST_Buffer(m.centroid::geography, %(radius)s)::geometry AS g
+              ) buf
+             WHERE m.mesh_size_m = %(mesh)s
+               AND m.prefecture_code = %(prefecture)s
+               AND COALESCE(m.population, 0) > 0
+            """,
+            {"radius": radius_m, "mesh": mesh_size_m, "prefecture": prefecture_code,
+             "from_year": from_year, "to_year": to_year})
+        rows = cur.fetchall()
+    found = {int(r["mesh_id"]): float(r["change"])
+             for r in rows if r["change"] is not None}
+    say(f"    将来推計から成長を算出: {len(found):,} / {len(rows):,} メッシュ")
+    return found
+
+
 def mesh_catchments(conn: psycopg.Connection, radius_m: int, *,
                     mesh_size_m: int = DEFAULT_MESH_SIZE_M,
                     prefecture_code: str = "13",
@@ -531,6 +645,15 @@ def mesh_catchments(conn: psycopg.Connection, radius_m: int, *,
         say(f"    商圏を集計中: {len(out):,} メッシュ")
         if len(rows) < batch_size:
             break
+
+    # 将来推計の変化率は 1 文でまとめて出して突き合わせます。メッシュごとに
+    # 問い合わせると 5,449 往復になります。
+    settings = growth_years()
+    changes = projected_change_by_mesh(
+        conn, radius_m, mesh_size_m=mesh_size_m, prefecture_code=prefecture_code,
+        from_year=settings["from_year"], to_year=settings["to_year"], progress=say)
+    for row in out:
+        row["population_change_projected"] = changes.get(row.get("mesh_id"))
     return out
 
 

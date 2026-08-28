@@ -76,6 +76,10 @@ export interface CandidateAnalysis {
   /** 参考表示のみ。取り込んでいないときは null。 */
   land_price?: LandPriceSummary | null;
   population_outlook?: PopulationOutlook | null;
+  /** 成長スコアが実際に見ている値（将来推計）。population_growth は過去の実績で別物。 */
+  population_change_projected?: number | null;
+  population_change_from_year?: number | null;
+  population_change_to_year?: number | null;
   /** コスト軸の入力。商圏内の地価公示の中央値。 */
   land_price_yen_per_sqm?: number | null;
   land_price_points?: number | null;

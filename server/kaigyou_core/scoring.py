@@ -270,8 +270,13 @@ class ScoringModel:
         # profile is a configuration change, which is the whole point of the
         # weights living in a file. Growth is the exception -- it is a rate, so
         # it is placed on its own configured scale rather than a percentile.
+        # 率の指標は、百分位ではなく設定した目盛りに載せます。名前を直書き
+        # しないのは、どれが率かをプロファイルの growth.metric が決めるため。
+        # 直書きしていたので、成長の指標を将来推計に変えたときに demand 側が
+        # 取り残され、**過去の実績を将来の目盛りで採点する**ところでした。
+        rate_metric = self.profile.get("growth", {}).get("metric", "population_growth")
         for metric in weights:
-            if metric == "population_growth":
+            if metric == rate_metric:
                 parts[metric] = self._growth_value(m.get(metric))
             elif metric in DISTRIBUTION_METRICS:
                 parts[metric] = self.normalize(metric, m.get(metric), distributions)
