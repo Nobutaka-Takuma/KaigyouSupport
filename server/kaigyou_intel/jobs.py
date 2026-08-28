@@ -12,6 +12,8 @@ import json
 from typing import Any, Iterable, Mapping
 
 import psycopg
+
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from psycopg.types.json import Json
 
 STEP_NAMES = {
@@ -30,7 +32,7 @@ STEP_NAMES = {
 
 def create_job(conn: psycopg.Connection, *, lat: float, lng: float, radius_m: int,
                dataset: Mapping[str, Any], base_hash: str,
-               business_type: str = "dental_clinic",
+               business_type: str = DEFAULT_CATEGORY,
                location_name: str | None = None,
                profile: str | None = None,
                user_id: str | None = None) -> str:

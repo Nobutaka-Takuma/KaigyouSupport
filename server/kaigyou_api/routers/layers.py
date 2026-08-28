@@ -45,7 +45,7 @@ def _features(rows: list[dict[str, Any]], geom_key: str = "geojson") -> list[dic
 def clinics(
     conn: psycopg.Connection = Depends(get_conn),
     bbox: str | None = Query(None, description="min_lng,min_lat,max_lng,max_lat"),
-    category: str = Query("dental_clinic"),
+    category: str = Query(DEFAULT_CATEGORY),
     clinic_type: str | None = Query(None, description="公表名称そのままの標榜診療科で絞り込み"),
     specialty: str | None = Query(
         None, description="正規化した標榜科目キーで絞り込み（general / pediatric / "

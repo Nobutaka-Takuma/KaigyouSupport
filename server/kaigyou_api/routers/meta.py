@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_core import specialties as vocab
 from kaigyou_core.analysis import default_prefecture, loaded_prefectures
 from kaigyou_core.db import table_exists
@@ -101,7 +102,7 @@ def prefectures(conn: psycopg.Connection = Depends(get_conn)) -> dict[str, Any]:
 @router.get("/specialties", summary="標榜診療科目（読み込み済みのもの）")
 def specialties(
     prefecture_code: str | None = None,
-    category: str = "dental_clinic",
+    category: str = DEFAULT_CATEGORY,
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """絞り込みに使える標榜科目と、それぞれの医院数。

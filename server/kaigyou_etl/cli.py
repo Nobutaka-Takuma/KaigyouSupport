@@ -27,6 +27,8 @@ from kaigyou_core import config as cfg
 from kaigyou_core.db import connect
 from kaigyou_core.status import data_status
 
+from kaigyou_core.analysis import DEFAULT_CATEGORY
+
 EXIT_OK = 0
 EXIT_PARTIAL = 2
 EXIT_ERROR = 1
@@ -270,20 +272,32 @@ def cmd_load_local(args: argparse.Namespace) -> int:
               ", ".join(f"{k}={v}" for k, v in removed.items() if v))
 
     from kaigyou_etl.scores import compute_mesh_scores, refresh_stats
-    print("\nスコア基準を再計算しています（数分かかります）...")
-    with connect() as conn:
-        refresh_stats(conn, prefecture_code=prefecture, progress=print)
-    # Every configured profile, not just the active one: the UI offers all of
-    # them in a dropdown, and a profile with no scores renders an empty ranking
-    # and a note telling the reader to run a command. The trade-area sweep is
-    # shared between them, so the extra profiles cost little.
+    # **取り込まれている業態すべてを採点します。** 既定の業態だけを回すと、
+    # 医科のファイルを入れたのにランキングが空、という状態になります。しかも
+    # load-local は成功と表示するので、気づけるのは画面を見たときです。
+    # 歯科しか入っていない環境では、今までどおり 1 業態です。
+    categories = _loaded_categories(prefecture)
     names = list(cfg.scoring_config().get("profiles") or {})
-    print(f"メッシュスコアを再計算しています（プロファイル {len(names)} 件）...")
-    with connect() as conn:
-        summary = compute_mesh_scores(conn, profiles=names,
-                                      prefecture_code=prefecture,
-                                      progress=print)
-    print(json.dumps(summary, ensure_ascii=False, default=_json_default))
+    summary: dict[str, Any] = {}
+    for category in categories:
+        label = "" if category == DEFAULT_CATEGORY else f"（{category}）"
+        print(f"\nスコア基準を再計算しています{label}（数分かかります）...")
+        with connect() as conn:
+            refresh_stats(conn, prefecture_code=prefecture,
+                          facility_category=category, progress=print)
+        # Every configured profile, not just the active one: the UI offers all of
+        # them in a dropdown, and a profile with no scores renders an empty ranking
+        # and a note telling the reader to run a command. The trade-area sweep is
+        # shared between them, so the extra profiles cost little.
+        print(f"メッシュスコアを再計算しています{label}"
+              f"（プロファイル {len(names)} 件）...")
+        with connect() as conn:
+            summary[category] = compute_mesh_scores(
+                conn, profiles=names, prefecture_code=prefecture,
+                facility_category=category, progress=print)
+    print(json.dumps(summary if len(summary) > 1 else
+                     summary.get(DEFAULT_CATEGORY, summary),
+                     ensure_ascii=False, default=_json_default))
 
     print()
     return cmd_status(argparse.Namespace(json=False))
@@ -300,7 +314,6 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
     """
     from kaigyou_api.deps import DISCLAIMER
     from kaigyou_core.analysis import (
-        DEFAULT_CATEGORY,
         default_prefecture,
         prefecture_at,
         resolve_mesh_size,
@@ -318,10 +331,11 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
         prefecture_code = default_prefecture(conn, prefecture_at(conn, args.lat, args.lng))
         mesh_size_m = resolve_mesh_size(conn, None, prefecture_code)
         print(f"基礎データを作成しています（{prefecture_code} / メッシュ {mesh_size_m}m）...")
+        category = getattr(args, "category", None) or DEFAULT_CATEGORY
         dataset = to_jsonable(build_dataset(
             conn, args.lat, args.lng, args.radius,
             prefecture_code=prefecture_code, mesh_size_m=mesh_size_m,
-            profile=profile,
+            profile=profile, category=category,
             max_clinics=int((cfg.analysis_config().get("limits") or {})
                             .get("max_clinics_in_projection", 20)),
             disclaimer=DISCLAIMER))
@@ -329,7 +343,7 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
         job_id = jobs.create_job(
             conn, lat=args.lat, lng=args.lng, radius_m=args.radius,
             dataset=dataset, base_hash=base_data_hash(dataset),
-            business_type=DEFAULT_CATEGORY, location_name=args.name, profile=profile)
+            business_type=category, location_name=args.name, profile=profile)
 
     population = ((dataset.get("demand") or {}).get("residents") or {}) \
         .get("by_radius", {}).get(str(args.radius), {}).get("population")
@@ -338,6 +352,8 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
     print(f"  地点        {args.lat}, {args.lng} / 半径 {args.radius}m"
           + (f" / {args.name}" if args.name else ""))
     print(f"  プロファイル {profile}")
+    if category != DEFAULT_CATEGORY:
+        print(f"  業態        {category}")
     if population is not None:
         print(f"  商圏人口    {population:,} 人 / 歯科医院 {clinics} 件")
     print()
@@ -907,7 +923,8 @@ def cmd_refresh_stats(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import refresh_stats
 
     with connect() as conn:
-        summary = refresh_stats(conn, prefecture_code=args.prefecture, progress=print)
+        summary = refresh_stats(conn, prefecture_code=args.prefecture,
+                                facility_category=_category(args), progress=print)
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
     return EXIT_OK
 
@@ -920,6 +937,7 @@ def cmd_compute_scores(args: argparse.Namespace) -> int:
     with connect() as conn:
         summary = compute_mesh_scores(conn, profile=args.profile, profiles=names,
                                       prefecture_code=args.prefecture,
+                                      facility_category=_category(args),
                                       progress=print)
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
     return EXIT_OK
@@ -1024,6 +1042,36 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------- parser
+def _loaded_categories(prefecture_code: str) -> list[str]:
+    """その県に実際に入っている業態。**無ければ既定を 1 つ返します。**
+
+    施設をまだ取り込んでいない環境で空を返すと、スコアの再計算が丸ごと
+    飛ばされて、原因の分からない「ランキングが空」になります。
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT facility_category AS c FROM facilities "
+            "WHERE prefecture_code = %s ORDER BY 1", (prefecture_code,))
+        found = [r["c"] for r in cur.fetchall() if r["c"]]
+    return found or [DEFAULT_CATEGORY]
+
+
+def _add_category(parser: argparse.ArgumentParser) -> None:
+    """業態を選ぶ口。**既定は歯科で、省略したときのふるまいは今までどおりです。**
+
+    口が無いと、内科を入れても「歯科として」採点されます。しかも成功と
+    表示されるので、気づけるのはレポートの中身を読んだときです。
+    """
+    parser.add_argument(
+        "--category", default=None, metavar="ID",
+        help=f"施設の業態（既定 {DEFAULT_CATEGORY}）。"
+             "facilities.facility_category と同じ値を指定します")
+
+
+def _category(args: argparse.Namespace) -> str:
+    return getattr(args, "category", None) or DEFAULT_CATEGORY
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kaigyou-etl", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1070,6 +1118,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", default=None, help="レポートに載せる地点名")
     p.add_argument("--profile", default=None,
                    help="スコアリングプロファイル（省略時は active_profile）")
+    _add_category(p)
     p.set_defaults(func=cmd_new_analysis)
 
     p = sub.add_parser("analyze", help="商圏インテリジェンスの worker を動かす")
@@ -1108,6 +1157,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("refresh-stats", help="recompute score normalisation statistics")
     p.add_argument("--prefecture", default="13")
+    _add_category(p)
     p.set_defaults(func=cmd_refresh_stats)
 
     p = sub.add_parser("compute-scores", help="score every mesh (ranking + heat map)")
@@ -1115,6 +1165,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all-profiles", action="store_true",
                    help="設定済みのプロファイルすべてを計算する（商圏集計は共有されるため追加分は軽い）")
     p.add_argument("--prefecture", default="13")
+    _add_category(p)
     p.set_defaults(func=cmd_compute_scores)
 
     p = sub.add_parser(

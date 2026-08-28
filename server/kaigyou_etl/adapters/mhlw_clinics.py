@@ -20,6 +20,7 @@ from typing import Any, Iterable, Iterator
 import psycopg
 from psycopg.types.json import Json
 
+from kaigyou_core.scoring import DEFAULT_FACILITY_CATEGORY
 from kaigyou_etl.acquisition import ERROR_EMPTY, ERROR_SCHEMA, AcquisitionError
 from kaigyou_etl.adapters._util import read_text, to_float
 from kaigyou_etl.adapters.base import SourceAdapter
@@ -125,7 +126,9 @@ class MHLWClinicsAdapter(SourceAdapter):
             key: header for key, header in (self.spec.get("attribute_columns") or {}).items()
             if header in headers
         }
-        category = self.spec.get("facility_category", "dental_clinic")
+        # 業態は設定が決めます。既定を歯科にしているのは、いま入っている
+        # ファイルが歯科だからで、**この行が業態を決めているのではありません。**
+        category = self.spec.get("facility_category", DEFAULT_FACILITY_CATEGORY)
         source_date = self.source_date() or date.today()
         default_pref = self.ctx.prefecture_code
         wanted = self.spec.get("prefecture_filter") or self.ctx.prefecture_filter

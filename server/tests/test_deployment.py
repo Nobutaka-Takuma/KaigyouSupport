@@ -1025,3 +1025,65 @@ def test_the_projection_file_names_its_prefecture(name, code):
     from kaigyou_etl.adapters._util import prefecture_from_filename
 
     assert prefecture_from_filename(Path(name)) == code
+
+
+# ------------------------------------------------------ 業態を名指しできること
+#
+# 医科（病院・診療所・助産所）への拡張の 2 段目。**歯科版を止めないことが
+# 最優先**なので、既定値は dental_clinic のまま、引数で上書きできることだけを
+# 保証します。詳細は docs/refactoring-multi-specialty.md。
+
+#: 業態の直書きが許される場所。
+#:
+#: - `scoring.py`  唯一の定義
+#: - `db/migrations/`  列と関数の既定値。SQL に定数は書けません
+#: - `sample/generate.py`  合成データ。歯科の見た目を作るためのもの
+_CATEGORY_LITERAL_ALLOWED = (
+    "kaigyou_core/scoring.py",
+    "kaigyou_etl/sample/generate.py",
+)
+
+
+def test_the_business_type_is_defined_in_one_place():
+    """**直書きが増えると、業態を足すたびに探し回ることになります。**
+
+    既定値そのものは歯科のままで構いません。変えたいのは「どこに書いてあるか」
+    で、1 か所に集めておけば、次の業態を足すときに見落としが起きません。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith("tests/") or "__pycache__" in rel:
+            continue
+        if any(rel.endswith(ok) for ok in _CATEGORY_LITERAL_ALLOWED):
+            continue
+        for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "'dental_clinic'" in line or '"dental_clinic"' in line:
+                offenders.append(f"{rel}:{number}")
+    assert not offenders, (
+        "業態が直書きされています。DEFAULT_CATEGORY を使ってください: "
+        f"{offenders}")
+
+
+def test_every_command_that_scores_can_name_the_business_type():
+    """口が無いと、医科を入れても「歯科として」採点されます。
+
+    しかも compute-scores は成功と表示するので、気づけるのはレポートの
+    中身を読んだときです。
+    """
+    from kaigyou_core.analysis import DEFAULT_CATEGORY
+    from kaigyou_etl import cli
+
+    parser = cli.build_parser()
+    for command, extra in (("refresh-stats", []),
+                           ("compute-scores", []),
+                           ("new-analysis", ["--lat", "35.0", "--lng", "139.0"])):
+        args = parser.parse_args([command] + extra)
+        assert cli._category(args) == DEFAULT_CATEGORY, \
+            f"{command}: 省略時は今までどおり歯科であること"
+        named = parser.parse_args([command] + extra + ["--category", "clinic"])
+        assert cli._category(named) == "clinic", f"{command}: 上書きできること"

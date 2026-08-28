@@ -12,6 +12,8 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
+from kaigyou_core.analysis import DEFAULT_CATEGORY
+
 OK = "OK"
 WARN = "警告"
 FAIL = "NG"
@@ -278,11 +280,11 @@ def _check_specialties(report: Report, conn: Any) -> None:
                    count(ff.facility_id)::int AS with_data
             FROM facilities f
             LEFT JOIN facility_features ff ON ff.facility_id = f.facility_id
-            WHERE f.facility_category = 'dental_clinic'
+            WHERE f.facility_category = %s
             GROUP BY f.prefecture_code
             HAVING count(*) > 0
             ORDER BY f.prefecture_code
-            """)
+            """, (DEFAULT_CATEGORY,))
         rows = cur.fetchall()
 
     covered = [r for r in rows if r["with_data"]]
@@ -418,8 +420,9 @@ def _check_walk_network(report: Report, conn: Any) -> None:
         row = fetch_one(
             conn,
             "SELECT catchment_kind AS kind, catchment_area_km2 AS km2 "
-            "FROM kg_analyze_point(%s, %s, 500, 'dental_clinic', %s, 'walk')",
-            (point["lat"], point["lng"], (mesh or {}).get("m") or 500),
+            "FROM kg_analyze_point(%s, %s, 500, %s, %s, 'walk')",
+            (point["lat"], point["lng"], DEFAULT_CATEGORY,
+             (mesh or {}).get("m") or 500),
         ) or {}
     except Exception as exc:  # noqa: BLE001 - this is the message worth having
         conn.rollback()  # a failed statement poisons the rest of the checks

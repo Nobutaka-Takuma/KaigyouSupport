@@ -234,3 +234,25 @@ def test_two_business_types_can_be_scored_on_the_same_mesh(conn):
 
     assert rows == [("dental_clinic", 70.0), ("medical_clinic", 30.0)], \
         "業態ごとに 1 行ずつ残ること。片方が消えたら主キーが足りていません"
+
+
+def test_loading_a_folder_scores_every_business_type_that_is_in_it(conn):
+    """既定の業態だけを回すと、医科を入れたのにランキングが空になります。
+
+    **しかも load-local は成功と表示します。** 気づけるのは画面を見たときです。
+    施設が 1 件も無い県では、空を返して採点を丸ごと飛ばすのではなく、既定の
+    業態を 1 つ返します（そうしないと原因の分からない「空のランキング」に
+    なります）。
+    """
+    from kaigyou_core.analysis import DEFAULT_CATEGORY
+    from kaigyou_etl.cli import _loaded_categories
+
+    assert _loaded_categories("99") == [DEFAULT_CATEGORY], \
+        "何も入っていない県では、既定を1つ返すこと"
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT facility_category AS c FROM facilities "
+                    "WHERE prefecture_code = '13' ORDER BY 1")
+        loaded = [r["c"] for r in cur.fetchall() if r["c"]]
+    if loaded:
+        assert _loaded_categories("13") == loaded
