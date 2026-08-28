@@ -846,9 +846,70 @@ def test_the_surroundings_scan_is_not_given_the_statistics(dataset):
 
     payload = step1_features.build_input(dataset)
     asked = step1_features.scan_input(payload)
-    assert set(asked) == {"prefecture", "municipality", "address", "lat", "lng",
-                          "radius_m", "nearest_station", "stations_in_radius"}
+    assert set(asked) == {"prefecture", "municipality", "address", "nearby_address",
+                          "lat", "lng", "radius_m", "nearest_station",
+                          "stations_in_radius"}
     assert "measures" not in asked and "demand" not in asked
+
+
+def test_the_scan_is_told_which_side_of_the_station_the_pin_is_on(dataset):
+    """実測（沼津駅前）のレポートは「候補地が南口側・北口側のどちらに位置する
+    のかは基礎データからは特定できていない」と書きました。ピンは明確に南側に
+    ありました。**特定できていなかったのは、計算していなかったからです。**
+
+    駅の座標は S12 にあり、候補地の座標は利用者が置いたピンそのものです。
+    """
+    from kaigyou_intel.steps import step1_features
+
+    payload = step1_features.build_input(dataset)
+    heading = (payload.get("access") or {}).get("direction_from_station")
+    if not heading:
+        # 駅が取り込まれていない環境。方角が無いことは黙って通します。
+        assert (payload.get("access") or {}).get("nearest_station", {}).get("name") \
+            in (None, "")
+        return
+    assert heading["compass"] in _ALL_COMPASS
+    assert 0 <= heading["bearing_deg"] < 360
+    # **出口の名前まで断定させません。** 「南口」が西側にある駅は実在します。
+    assert "出口の名前は別の話" in heading["note"]
+    assert step1_features.scan_input(payload)["nearest_station"]["direction"] == heading
+
+
+_ALL_COMPASS = ("北", "北北東", "北東", "東北東", "東", "東南東", "南東", "南南東",
+                "南", "南南西", "南西", "西南西", "西", "西北西", "北西", "北北西")
+
+
+def test_the_bearing_is_measured_from_the_station_to_the_pin():
+    """向きを取り違えると、南の候補地が「駅の北」になります。"""
+    from kaigyou_core.dataset import _COMPASS, _bearing
+
+    def compass(a, b, c, d):
+        return _COMPASS[int((_bearing(a, b, c, d) + 11.25) % 360 // 22.5)]
+
+    # 駅(35.10, 138.86) から見て、南にある候補地は「南」。
+    assert compass(35.10, 138.86, 35.09, 138.86) == "南"
+    assert compass(35.10, 138.86, 35.11, 138.86) == "北"
+    assert compass(35.10, 138.86, 35.10, 138.87) == "東"
+    assert compass(35.10, 138.86, 35.10, 138.85) == "西"
+    # 実測（沼津駅前）。ピンは駅の南側にあります。
+    assert compass(35.1036, 138.8615, 35.101942, 138.861033).startswith("南")
+
+
+def test_the_scan_gets_a_place_name_it_can_actually_search(dataset):
+    """緯度経度では検索が当たりません。候補地そのものの住所は手元に無い
+    （利用者が置いたのは座標）ので、いちばん近い地価公示の標準地の住所を
+    渡します。**候補地の住所ではないことを、距離と注記で示します。**
+    """
+    from kaigyou_intel.steps import step1_features
+
+    payload = step1_features.build_input(dataset)
+    nearby = step1_features.scan_input(payload)["nearby_address"]
+    if nearby is None:
+        assert not (payload.get("cost") or {}).get("nearest_points")
+        return
+    assert nearby["address"]
+    assert nearby["distance_m"] is not None, "距離が無いと候補地の住所に見えます"
+    assert "候補地の住所ではありません" in nearby["note"]
 
 
 def test_the_surroundings_reach_every_later_step(dataset):

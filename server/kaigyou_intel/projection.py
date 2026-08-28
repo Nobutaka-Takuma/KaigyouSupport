@@ -133,6 +133,21 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     competition = dataset.get("competition") or {}
 
+    # --- 立地：駅から見てどちら側か ---------------------------------------
+    # **「南口か北口か」はここで決まります。** 駅の座標も候補地の座標も
+    # 手元にあるので、方位は引き算で出ます。実測（沼津駅）のレポートは
+    # 「南口側か北口側かは基礎データからは特定できていない」と書いていました
+    # が、特定できていなかったのは計算していなかったからです。
+    heading = ((dataset.get("access") or {}).get("nearest_station") or {}) \
+        .get("direction") or {}
+    if heading.get("compass"):
+        add("access.station_direction", "最寄り駅から見た候補地の方角",
+            heading["compass"], "", "access", "国土数値情報 S12 と候補地の座標",
+            note=heading.get("note"))
+        add("access.station_bearing_deg", "最寄り駅から見た方位角",
+            heading.get("bearing_deg"), "度（真北から時計回り）", "access",
+            "国土数値情報 S12 と候補地の座標")
+
     # --- 競合の提供体制：診療時間 -----------------------------------------
     hours = competition.get("hours") or {}
     declared = hours.get("declared") or 0
@@ -392,6 +407,9 @@ def _access_summary(dataset: Mapping[str, Any],
              "daily_passengers": s.get("daily_passengers")}
             for s in stations[:5]
         ] if include_list else None),
+        # 駅からの距離だけだと、駅の周り 360 度のどこでも同じ数字になります。
+        # 方角を落とすと「南口か北口か」は永久に分かりません。
+        "direction_from_station": (access.get("nearest_station") or {}).get("direction"),
     }
 
 
@@ -417,11 +435,26 @@ def _competition_summary(dataset: Mapping[str, Any],
     return out
 
 
+#: 渡す地価公示地点の数。**住所を知るためなので 1〜2 件で足ります。**
+#: 全部渡すと 4KB になりますが、増えたぶんで分かることはありません。
+_LAND_POINTS_IN_PROJECTION = 2
+
+
 def _cost_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
     cost = dataset.get("cost") or {}
-    return {k: cost.get(k) for k in
-            ("land_price_yen_per_sqm", "surveyed_points", "basis",
-             "by_use_division", "note", "rent_estimate")}
+    out = {k: cost.get(k) for k in
+           ("land_price_yen_per_sqm", "surveyed_points", "basis",
+            "by_use_division", "note", "rent_estimate")}
+    # いちばん近い公示地点の**住所**。候補地そのものの住所は手元にありません
+    # （利用者が置いたのは座標です）が、公示地点は住所付きで入っていて、
+    # 市街地なら数十mから数百m先にあります。町名が分かると、外部調査の
+    # 検索がまるで当たるようになります。距離を必ず添えるのは、候補地の
+    # 住所として使われないためです。
+    out["nearest_points"] = [
+        {"address": p.get("address"), "distance_m": p.get("distance_m"),
+         "use_category": p.get("use_category")}
+        for p in (cost.get("nearest_points") or [])[:_LAND_POINTS_IN_PROJECTION]]
+    return out
 
 
 def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],

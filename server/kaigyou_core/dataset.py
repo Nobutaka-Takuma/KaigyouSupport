@@ -33,6 +33,7 @@ looked" will confidently write the wrong sentence.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -902,6 +903,66 @@ def _clinics(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
             "items": items}
 
 
+#: 16 方位。8 方位だと「南南東」が「南」に丸まり、南口か東口かの手掛かりが
+#: 1 段落ちます。北から時計回り。
+_COMPASS = ("北", "北北東", "北東", "東北東", "東", "東南東", "南東", "南南東",
+            "南", "南南西", "南西", "西南西", "西", "西北西", "北西", "北北西")
+
+
+def _bearing(from_lat: float, from_lng: float,
+             to_lat: float, to_lng: float) -> float:
+    """真北からの方位角（度）。原点から見て相手がどちらにあるか。"""
+    phi1, phi2 = math.radians(from_lat), math.radians(to_lat)
+    dl = math.radians(to_lng - from_lng)
+    y = math.sin(dl) * math.cos(phi2)
+    x = (math.cos(phi1) * math.sin(phi2)
+         - math.sin(phi1) * math.cos(phi2) * math.cos(dl))
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def _direction_from_station(conn: psycopg.Connection, lat: float, lng: float,
+                            name: str | None) -> dict[str, Any] | None:
+    """最寄り駅から見て、候補地はどちらの方角か。
+
+    **これは「南口か北口か」の手掛かりです。** 駅の座標は S12 で手元にあり、
+    候補地の座標は利用者が置いたピンそのものなので、方位は引き算で出ます。
+    実測（沼津駅・35.101942,138.861033）で「南南東 132m」。レポートは
+    「南口側か北口側かは基礎データからは特定できていない」と書いていましたが、
+    **特定できていなかったのは計算していなかったからです。**
+
+    ただし**出口の名前まで断定はしません。** 駅の出口の呼び名は駅ごとに決まって
+    いて、方角と一致しない駅があります（「南口」が西側にある駅は実在します）。
+    ここが言えるのは「駅のどちら側か」までで、出口名は外部で確かめる話です。
+    """
+    if not name:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ST_Y(geom) AS lat, ST_X(geom) AS lng,
+                   ST_Distance(geom::geography,
+                               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS distance_m
+            FROM stations
+            WHERE name = %s
+            ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+            LIMIT 1
+            """, (lng, lat, name, lng, lat))
+        row = cur.fetchone()
+    if not row:
+        return None
+    degrees = _bearing(row["lat"], row["lng"], lat, lng)
+    compass = _COMPASS[int((degrees + 11.25) % 360 // 22.5)]
+    return {
+        "bearing_deg": round(degrees, 1),
+        "compass": compass,
+        "statement": f"候補地は{name}駅の{compass}、直線 {round(row['distance_m']):,}m",
+        "note": ("駅の座標と候補地の座標から計算した方位です。**駅のどちら側か**"
+                 "までが言えることで、**出口の名前は別の話です。** 出口の呼び名は"
+                 "駅ごとに決まっていて、方角と一致しない駅があります。"
+                 "「南口」と書くなら、その駅の出口名を外部で確かめてください。"),
+    }
+
+
 def _stations(conn: psycopg.Connection, lat: float, lng: float,
               radius_m: int) -> dict[str, Any]:
     with conn.cursor() as cur:
@@ -1595,6 +1656,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 "name": metrics.get("nearest_station"),
                 "distance_m": _round(metrics.get("station_distance_m")),
                 "daily_passengers": metrics.get("daily_passengers"),
+                # 駅のどちら側か。**「南口か北口か」はここで決まります。**
+                "direction": _direction_from_station(
+                    conn, lat, lng, metrics.get("nearest_station")),
             },
             "stations_in_radius": _stations(conn, lat, lng, radius_m),
         },

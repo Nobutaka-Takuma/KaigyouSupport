@@ -536,10 +536,17 @@ def _access_figures(dataset: Mapping[str, Any]) -> list[str]:
     stations = (access.get("stations_in_radius") or {}).get("items") or []
     if not stations:
         return []
-    return ["### 交通アクセス", ""] + _table(
+    lines = ["### 交通アクセス", ""] + _table(
         ["距離", "駅", "事業者", "乗降客数/日"],
         [[_num(s.get("distance_m"), "m"), s.get("name"), s.get("operator"),
           _num(s.get("daily_passengers"), "人")] for s in stations[:10]])
+    # 駅からの距離だけだと、駅の周り 360 度のどこでも同じ数字になります。
+    # 南側か北側かで、商業施設も動線も競合もまるで違います。
+    heading = (access.get("nearest_station") or {}).get("direction") or {}
+    if heading.get("statement"):
+        lines += [f"**{heading['statement']}**（方位 {heading.get('bearing_deg')}°）。",
+                  "", str(heading.get("note") or ""), ""]
+    return lines
 
 
 def _cost_figures(dataset: Mapping[str, Any]) -> list[str]:

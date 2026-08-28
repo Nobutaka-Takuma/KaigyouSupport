@@ -182,6 +182,12 @@ def scan_input(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     駅名は渡します。緯度経度だけでは検索の取っかかりが無く、モデルは
     「35.7,139.7 周辺 施設」のような当たらない問い合わせを作ります。
+
+    **方角と町名も渡します。** 実測（沼津駅前）のレポートは「候補地が南口側・
+    北口側のどちらに位置するのかは基礎データからは特定できていない」と書いて
+    いましたが、ピンは明確に南側にありました。特定できていなかったのは
+    計算していなかったからです。駅の座標は S12 にあり、候補地の座標は利用者が
+    置いたピンそのものなので、方位は引き算で出ます。
     """
     location = dict(payload.get("location") or {})
     access = payload.get("access") or {}
@@ -190,14 +196,44 @@ def scan_input(payload: Mapping[str, Any]) -> dict[str, Any]:
         "prefecture": location.get("prefecture_name"),
         "municipality": location.get("municipality_name"),
         "address": location.get("address") or location.get("name"),
+        # 最寄りの地価公示地点の住所。**町名を知る唯一の手立てです。**
+        # 商圏の中心の住所は手元にありませんが、公示地点は住所付きで入って
+        # いて、数十mから数百m先にあります。「沼津市大手町」まで分かれば
+        # 検索の当たり方がまるで変わります。
+        "nearby_address": _nearest_address(payload),
         "lat": location.get("lat"),
         "lng": location.get("lng"),
         "radius_m": (payload.get("query") or {}).get("radius_m"),
-        "nearest_station": {"name": nearest.get("name"),
-                            "distance_m": nearest.get("distance_m")},
+        "nearest_station": {
+            "name": nearest.get("name"),
+            "distance_m": nearest.get("distance_m"),
+            # 駅のどちら側か。出口を絞り込むための手掛かりです。
+            "direction": nearest.get("direction"),
+        },
         "stations_in_radius": [s.get("name")
                                for s in (access.get("stations") or [])],
     }
+
+
+def _nearest_address(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """いちばん近い地価公示地点の住所と、そこまでの距離。
+
+    候補地そのものの住所は手元にありません（利用者が置いたのは座標です）。
+    ですが地価公示の標準地は住所付きで入っていて、市街地なら数十mから
+    数百m先にあります。**町名が分かれば検索が当たります。**
+
+    距離を必ず添えます。**その地点の住所であって、候補地の住所ではありません。**
+    添えないと、モデルは候補地の住所として使います。
+    """
+    points = ((payload.get("cost") or {}).get("nearest_points") or [])
+    for point in points:
+        if point.get("address"):
+            return {"address": point["address"],
+                    "distance_m": point.get("distance_m"),
+                    "note": "**候補地の住所ではありません。** いちばん近い地価"
+                            "公示の標準地の住所で、そこまでの距離が distance_m "
+                            "です。町名の見当を付けるために渡しています。"}
+    return None
 
 
 def scan_surroundings(payload: Mapping[str, Any],
