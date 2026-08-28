@@ -11,7 +11,7 @@ BENCHMARK は生成しません。パーセンタイル・順位・significance 
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from kaigyou_core import config as cfg
 from kaigyou_intel import client as llm
@@ -71,7 +71,8 @@ def requirement_frame(frame: Mapping[str, Any]) -> str:
     return "\n".join(lines).strip() or "（設定されていません）"
 
 
-def _factor_frame(frame: Mapping[str, Any]) -> str:
+def _factor_frame(frame: Mapping[str, Any],
+                  available: Iterable[str] | None = None) -> str:
     """歯科経営の定性要因を、プロンプトに差し込める形にする。
 
     **統計には載らないが開業の成否を分けるもの**の一覧です。データから
@@ -80,22 +81,41 @@ def _factor_frame(frame: Mapping[str, Any]) -> str:
 
     設定に置いているのは、これが業界知識だからです（統計と違い、扱う人が
     入れ替えるもの）。config/hypotheses.yaml を参照。
+
+    ``available`` を渡すと、**その地点で実際に引ける代理指標だけ**を並べます。
+    これは飾りではありません。設定に書いた代理指標が、その地点では取れて
+    いないことがあります（実例：開設年月日は医療機能情報提供制度の配布
+    ファイルに列が無く、``clinic_vintage.*`` はどの地点でも作られません）。
+    フィルタしないと、**存在しないキーを使えと指示する**ことになり、それを
+    引いた FACT は検算で落ちて段ごとやり直しになります。
+
+    取れなかったものは黙って消さず、「取れていない」と名前ごと書きます。
+    消すと「そもそも見ていない」と「調べたが無かった」が区別できません。
     """
+    known = None if available is None else set(available)
     lines: list[str] = []
     for factor in frame.get("factors") or []:
         lines.append(f"### {factor.get('name')}")
         lines.append("")
         lines.append(str(factor.get("question") or "").strip())
         lines.append("")
-        proxies = factor.get("proxies") or []
-        if proxies:
+        declared = factor.get("proxies") or []
+        usable = [p for p in declared
+                  if known is None or p.get("key") in known]
+        missing = [p for p in declared if p not in usable]
+        if usable:
             lines.append("手元にある代理指標（弱いものも含みます。**強い根拠として"
                          "使わないでください**）:")
-            for proxy in proxies:
+            for proxy in usable:
                 lines.append(f"- `{proxy.get('key')}` … {proxy.get('why')}")
         else:
-            lines.append("手元に代理指標はありません。**この要因について、"
-                         "統計からは何も言えません。**")
+            lines.append("**手元に代理指標はありません。この要因について、"
+                         "統計からは何も言えません。** 外部情報でしか扱えません。")
+        if missing:
+            names = "、".join(f"`{p.get('key')}`" for p in missing)
+            lines.append("")
+            lines.append(f"この地点では取れていないもの: {names}"
+                         "（**使わないでください。引くと出力ごと破棄されます**）")
         lines.append("")
         research = factor.get("research") or []
         if research:
@@ -123,7 +143,8 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
               .replace("{min_cross_layer_patterns}", str(min_cross_layer()))
               .replace("{crossing_examples}", _bullets(
                   (frame.get("crossing") or {}).get("examples")))
-              .replace("{qualitative_factors}", _factor_frame(frame)))
+              .replace("{qualitative_factors}",
+                       _factor_frame(frame, citable_keys(payload))))
 
     user = (
         "以下が基礎商圏データです。この中にある事実だけを使ってください。\n\n"

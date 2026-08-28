@@ -376,6 +376,29 @@ def _format_seconds(seconds: float) -> str:
     return f"{int(seconds // 60)}分{seconds % 60:.0f}秒"
 
 
+def _print_timing_summary(steps: list[dict]) -> None:
+    """通しの所要時間と、その内訳。
+
+    段ごとの合計ではなく、最初の開始から最後の完了までを「所要」とします。
+    ホスティングされた worker では段の間に cron の待ちが入るので、
+    「実行 4分」と「所要 12分」が両方本当のことがあります。**どちらが
+    効いているかで、打つ手がまったく違います。**
+    """
+    spans = [(s["started_at"], s["completed_at"]) for s in steps
+             if s.get("started_at") and s.get("completed_at")]
+    if not spans:
+        print("  まだ完了した段がありません。")
+        return
+    wall = (max(e for _s, e in spans) - min(s for s, _e in spans)).total_seconds()
+    worked = sum((e - s).total_seconds() for s, e in spans)
+    waiting = max(0.0, wall - worked)
+    print(f"  所要 {_format_seconds(wall)}"
+          f"（うち実行 {_format_seconds(worked)}、待ち {_format_seconds(waiting)}）")
+    if waiting > worked:
+        print("  ※ 待ちのほうが長い。段の間で cron を待っています"
+              "（worker.reserve_seconds を下げるか、手元の --once で回す）")
+
+
 def _print_step_cost_line(step: dict) -> None:
     """使ったトークンと概算。
 
@@ -602,6 +625,52 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print("\nworker は古い順に処理します。不要なものは --cancel <id> で取り下げてください。")
         return EXIT_OK
 
+    if args.timing is not None:
+        # 段ごとに何秒かかったか**だけ**。--show は各段の出力も全部出すので、
+        # 「どこに時間が溶けているか」を見るには長すぎます。縮めようがない
+        # ものは縮められないので、まずここを見ます。
+        with connect() as conn:
+            with conn.cursor() as cur:
+                if args.timing:
+                    cur.execute("SELECT id, location_name FROM analysis_jobs "
+                                "WHERE id = %s", (args.timing,))
+                else:
+                    cur.execute("SELECT id, location_name FROM analysis_jobs "
+                                "ORDER BY created_at DESC LIMIT 1")
+                row = cur.fetchone()
+            if row is None:
+                print("ジョブが見つかりません。")
+                return EXIT_OK
+            job_id = str(row["id"])
+            steps = _jobs.get_steps(conn, job_id)
+
+        print(f"ジョブ {job_id}（{row['location_name'] or job_id[:8]}）")
+        _print_timing_summary(steps)
+        for step in steps:
+            seconds = _step_seconds(step)
+            head = f"  STEP{step['step_number']} {step['step_name']}"
+            if seconds is None:
+                print(f"{head}  — {step['status']}")
+                continue
+            price = _step_cost(step)
+            read = step.get("cache_read_tokens") or 0
+            written = step.get("cache_write_tokens") or 0
+            counted = (step.get("input_tokens") or 0) + read + written
+            print(f"{head}  {_format_seconds(seconds)}"
+                  f"  / 入力 {counted:,} tok"
+                  f" / 出力 {step.get('output_tokens') or 0:,} tok"
+                  + (f" / 検索 {step['web_searches']}回"
+                     if step.get("web_searches") else "")
+                  + (f"  ≒ ${price:.3f}" if price else ""))
+            if read or written:
+                # 区切りが可変ブロックに当たっていると、書き込みだけが毎回
+                # 増えて読み出しが 0 のままになります。そこが見えるように。
+                print(f"        キャッシュ 読 {read:,} / 書 {written:,}")
+            if step.get("attempts") and step["attempts"] > 1:
+                print(f"        試行 {step['attempts']} 回"
+                      "（やり直したぶんの時間は上に含まれません）")
+        return EXIT_OK
+
     if args.show is not None:
         # STEP の出力を人が読める形で出す。プロンプトを直すかどうかの判断は
         # ここを読んでするので、JSON をそのまま出すより畳んで見せます。
@@ -622,17 +691,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
         name = row["location_name"] or job_id[:8]
         print(f"ジョブ {job_id}（{name}）")
-        # 通しの所要時間。段ごとの合計ではなく、最初の開始から最後の完了まで
-        # です。ホスティングされた worker では段の間に cron の待ちが入るので、
-        # 「合計 4 分」と「通し 12 分」が両方本当のことがあります。
-        spans = [(s["started_at"], s["completed_at"]) for s in steps
-                 if s.get("started_at") and s.get("completed_at")]
-        if spans:
-            wall = (max(e for _s, e in spans) - min(s for s, _e in spans)).total_seconds()
-            worked = sum((e - s).total_seconds() for s, e in spans)
-            print(f"  所要 {_format_seconds(wall)}"
-                  f"（うち実行 {_format_seconds(worked)}、"
-                  f"待ち {_format_seconds(max(0.0, wall - worked))}）")
+        _print_timing_summary(steps)
         for step in steps:
             if step["status"] != "completed":
                 print(f"\n  STEP{step['step_number']} {step['step_name']}: "
@@ -1027,6 +1086,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list", action="store_true", help="ジョブの一覧を表示する")
     p.add_argument("--show", nargs="?", const="", metavar="ID",
                    help="各ステップの出力を読める形で表示（省略時は最新のジョブ）")
+    p.add_argument("--timing", nargs="?", const="", metavar="ID",
+                   help="段ごとの所要時間・トークン・費用だけを表示"
+                        "（省略時は最新のジョブ）")
     p.add_argument("--cancel", metavar="ID", default=None,
                    help="ジョブを取り下げる（all で待機中すべて）")
     p.set_defaults(func=cmd_analyze)

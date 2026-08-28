@@ -364,6 +364,11 @@ def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
             for c in clinics if c.get("name")
         ],
         "searches_per_pattern": int(limits.get("searches_per_pattern", 3)),
+        # この地点で実際に引けた指標のキー。STEP2 は数字を使いませんが、
+        # 定性要因の枠を STEP1 と同じ形で見せるために要ります。片方だけ
+        # 「代理指標あり」と書くと、STEP1 が立てた問いを STEP2 が別の前提で
+        # 読むことになります。
+        "available_keys": sorted(citable_keys(for_step1(dataset))),
     }
 
 

@@ -50,7 +50,8 @@ def build_input(step1_output: Mapping[str, Any],
     return for_step2(step1_output, dataset, limits)
 
 
-def _prompts(limits: Mapping[str, Any]) -> tuple[str, str]:
+def _prompts(limits: Mapping[str, Any],
+             available: Any = None) -> tuple[str, str]:
     settings = llm.step_settings(STEP_NUMBER)
     if not settings.get("prompt_structure"):
         raise StepFailed("config/analysis.yaml の steps.2 に prompt_structure がありません")
@@ -62,7 +63,8 @@ def _prompts(limits: Mapping[str, Any]) -> tuple[str, str]:
     research = cfg.prompt_text(settings["prompt"]) \
         .replace("{searches_per_pattern}", str(limits.get("searches_per_pattern", 3))) \
         .replace("{max_searches_total}", str(total)) \
-        .replace("{qualitative_factors}", _factor_frame(cfg.hypotheses_config()))
+        .replace("{qualitative_factors}",
+                 _factor_frame(cfg.hypotheses_config(), available))
     return research, cfg.prompt_text(settings["prompt_structure"])
 
 
@@ -74,7 +76,8 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     「この主張の出典は」で止まります。
     """
     limits = cfg.analysis_config().get("limits") or {}
-    research_prompt, structure_prompt = _prompts(limits)
+    research_prompt, structure_prompt = _prompts(
+        limits, payload.get("available_keys"))
 
     asked = ("以下が STEP1 で見つかった商圏の特徴です。"
              "research_questions に答えてください。\n\n"

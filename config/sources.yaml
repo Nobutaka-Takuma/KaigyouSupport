@@ -64,7 +64,17 @@ sources:
       # 3-digit municipality part; combined with the prefecture code to form
       # the 5-digit JIS X0402 code.
       municipality_code: ["市区町村コード", "自治体コード"]
-      # Present in some releases / companion files, absent in others. Optional.
+      # **現在配布されているファイルには、この列がありません。** 2026年6月版
+      # （03-1_dental_facility_info）で確認済みです。列名が違うのではなく、
+      # 開設年月日そのものが収録されていません。
+      #
+      # 列名の候補は残してあります。将来の版で復活したら、ここを直さずに
+      # そのまま拾えるからです。取れなかったことは競合の「開設年」ブロックに
+      # 「1件も取得できていません」と出ます（黙って0件にはしません）。
+      #
+      # これが取れないと、院長の世代交代による供給縮小は**手元のデータでは
+      # 一切扱えません**。外部情報（都道府県の歯科医師の年齢構成、各院の
+      # 公式サイトの開院年）に頼るしかない論点になります。
       opening_date:      ["開設年月日", "開設日"]
       clinic_types:      ["診療科目", "標榜診療科"]
       founder_type:      ["開設者区分", "開設者"]

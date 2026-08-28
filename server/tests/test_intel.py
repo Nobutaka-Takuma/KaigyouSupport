@@ -1091,6 +1091,84 @@ def test_the_levers_in_the_config_and_the_schema_agree():
     assert list(get_args(DecisionLever)) == configured
 
 
+def test_a_proxy_that_this_location_cannot_produce_is_not_offered():
+    """**設定に書いた代理指標が、その地点では取れていないことがあります。**
+
+    実例：開設年月日は医療機能情報提供制度の配布ファイルに列が無く、
+    `clinic_vintage.*` はどの地点でも作られません。フィルタしないと、
+    存在しないキーを使えと指示することになり、それを引いた FACT は検算で
+    落ちて段ごとやり直しになります（1回 $1 前後）。
+
+    ただし黙って消しません。消すと「そもそも見ていない」と「調べたが
+    無かった」が区別できなくなります。
+    """
+    from kaigyou_intel.steps.step1_features import _factor_frame
+
+    frame = cfg.hypotheses_config()
+    text = _factor_frame(frame, {"population", "workers"})
+    assert "手元に代理指標はありません" in text
+    assert "clinic_vintage.median_year" in text, "消さずに、取れていないと書く"
+    assert "使わないでください" in text
+    # 外部で調べる道は残っていること。手元に無い＝諦める、ではありません。
+    assert "歯科医師数・年齢構成" in text
+
+    # 取れているものは、これまでどおり代理指標として出す。
+    with_proxies = _factor_frame(frame, {"clinic_hours.sunday", "station_distance_m"})
+    assert "`clinic_hours.sunday`" in with_proxies
+
+
+def test_the_two_steps_see_the_same_picture_of_what_is_available(dataset):
+    """片方だけ「代理指標あり」と書くと、STEP1 が立てた問いを STEP2 が
+    別の前提で読むことになります。"""
+    from kaigyou_intel.projection import citable_keys, for_step1, for_step2
+
+    payload = for_step2({"patterns": []}, dataset, {"max_patterns": 4})
+    assert set(payload["available_keys"]) == set(citable_keys(for_step1(dataset)))
+
+
+def test_a_missing_opening_date_is_reported_as_a_gap_in_the_source(dataset):
+    """「古い医院は0件」と「1件も分からなかった」は別のことです。
+
+    そして、取り込みに失敗したのか、元のファイルに列が無いのかも別です。
+    前者なら直せますが、後者は直せません。読む人が取り違えると、
+    無い列を探して時間を使います。
+    """
+    vintage = dataset["competition"].get("vintage") or {}
+    if vintage.get("available"):
+        pytest.skip("この環境では開設年月日が取れています")
+    assert vintage["reason"] == "no_opening_dates"
+    assert "取り込みの失敗ではありません" in vintage["note"]
+
+
+def test_the_timing_view_separates_running_from_waiting():
+    """「実行 4分」と「所要 12分」が両方本当のことがあります。
+
+    どちらが効いているかで、打つ手がまったく違います。段が遅いのか、
+    段の間で cron を待っているのか。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from kaigyou_etl.cli import _print_timing_summary
+
+    start = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+    steps = [
+        {"started_at": start, "completed_at": start + timedelta(seconds=60)},
+        # 4 分空いてから次の段（cron 待ち）。
+        {"started_at": start + timedelta(seconds=300),
+         "completed_at": start + timedelta(seconds=360)},
+    ]
+    import io
+    import contextlib
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        _print_timing_summary(steps)
+    text = buffer.getvalue()
+    assert "所要 6分0秒" in text
+    assert "実行 2分0秒" in text and "待ち 4分0秒" in text
+    assert "cron を待っています" in text, "待ちのほうが長いときは、そう言う"
+
+
 def test_a_report_that_never_says_what_to_build_is_refused():
     """**商圏の説明で終わらせないための最低線です。**
 

@@ -345,7 +345,10 @@ def _clinic_vintage(conn: psycopg.Connection, lat: float, lng: float,
         return {"available": False, "reason": "no_opening_dates",
                 "total_clinics": int(row["total"]), "with_opening_date": 0,
                 "note": "商圏内の医院について開設年月日が1件も取得できていません。"
-                        "取り込み元のファイルにこの列が無い可能性があります。"}
+                        "医療機能情報提供制度の配布ファイル（2026年6月版）には"
+                        "開設年月日の列が無いためで、取り込みの失敗ではありません。"
+                        "院長の世代交代による供給の増減は、この商圏について"
+                        "手元のデータからは何も言えません。"}
     return {
         "available": True,
         "total_clinics": int(row["total"]),
