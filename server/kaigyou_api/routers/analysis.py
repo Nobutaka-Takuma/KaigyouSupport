@@ -103,7 +103,8 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     # 科目で絞った件数と比率。どの科目が要るかはプロファイルの設定が決めます。
     augment_specialty_metrics(metrics, competition_specialties(cfg.scoring_config()))
     scope, distributions = resolve_distributions(
-        conn, mesh_size_m, radius_m, prefecture_code, cfg.scoring_config())
+        conn, mesh_size_m, radius_m, prefecture_code, cfg.scoring_config(),
+        category)
     scores = model.score(metrics, distributions)
 
     # Every configured profile, from the same metrics. The catchment sweep is
@@ -401,6 +402,7 @@ def rankings(
     area: str | None = Query(None, description="エリア名の部分一致で絞り込み"),
     prefecture_code: str | None = Query(
         None, description="省略時は読み込み済みデータから自動判定（人口が最大の都道府県）"),
+    category: str = Query(DEFAULT_CATEGORY),
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
@@ -409,9 +411,13 @@ def rankings(
     # so a combined table would rank a Shizuoka mesh against a Tokyo one on
     # scales that were never comparable. One prefecture at a time, always.
     prefecture_code = default_prefecture(conn, prefecture_code)
-    where = ["ms.profile = %s", "ms.radius_m = %s", "ms.overall_score IS NOT NULL",
+    # **業態で絞ります。** 絞らないと、内科を入れたあとに歯科のランキングを
+    # 引くと全業態が混ざった順位が返ります。
+    where = ["ms.profile = %s", "ms.radius_m = %s", "ms.facility_category = %s",
+             "ms.overall_score IS NOT NULL",
              "COALESCE(ms.population, 0) >= %s", "pm.prefecture_code = %s"]
-    params: list[Any] = [model.profile_name, radius_m, min_population, prefecture_code]
+    params: list[Any] = [model.profile_name, radius_m, category,
+                         min_population, prefecture_code]
     if area:
         where.append("ms.area_label ILIKE %s")
         params.append(f"%{area}%")

@@ -13,6 +13,7 @@ import psycopg
 
 from kaigyou_core.db import table_exists
 from kaigyou_core.scoring import (
+    DEFAULT_FACILITY_CATEGORY,
     Distribution,
     ScoringModel,
     augment_specialty_metrics,
@@ -22,7 +23,10 @@ from kaigyou_core.scoring import (
     scope_key,
 )
 
-DEFAULT_CATEGORY = "dental_clinic"
+#: 別名です。**定義は scoring.DEFAULT_FACILITY_CATEGORY 1 か所。** 目盛りの鍵を
+#: 作る側と商圏を数える側で別々に持つと、片方だけ直したときに、歯科の目盛りで
+#: 内科を採点する状態になります。
+DEFAULT_CATEGORY = DEFAULT_FACILITY_CATEGORY
 
 #: Fallback only. The real value comes from whatever mesh data is loaded --
 #: see :func:`resolve_mesh_size`. Hard-coding it would mean that loading 500m
@@ -436,21 +440,28 @@ def facility_counts(conn: psycopg.Connection, lat: float, lng: float,
 
 def resolve_distributions(conn: psycopg.Connection, mesh_size_m: int, radius_m: int,
                           prefecture_code: str,
-                          config: Mapping[str, Any]) -> tuple[str, dict[str, Distribution]]:
+                          config: Mapping[str, Any],
+                          facility_category: str = DEFAULT_CATEGORY,
+                          ) -> tuple[str, dict[str, Distribution]]:
     """設定の目盛りを探し、無ければ実際に書かれている方を使う。
 
-    目盛りは「歯科医院が実在する商圏」から作るのが既定ですが、候補地が
+    目盛りは「その業態の施設が実在する商圏」から作るのが既定ですが、候補地が
     少ない県では refresh-stats が全件に落とします。設定どおりの鍵だけを見て
     「未計算」と答えると、実際には目盛りがあるのにスコアが出ません。
     どちらを使ったかは呼び出し元が応答に載せます。
+
+    **業態を跨いで探しません。** 内科の目盛りが無いときに歯科の目盛りを
+    使うと、それらしい点が出て、しかも間違っています。
     """
     preferred = normalization_reference(config)
     for reference in (preferred, "all", "with_clinics"):
-        scope = scope_key(mesh_size_m, radius_m, prefecture_code, reference)
+        scope = scope_key(mesh_size_m, radius_m, prefecture_code, reference,
+                          facility_category)
         distributions = load_distributions(conn, scope)
         if distributions:
             return scope, distributions
-    return scope_key(mesh_size_m, radius_m, prefecture_code, preferred), {}
+    return scope_key(mesh_size_m, radius_m, prefecture_code, preferred,
+                     facility_category), {}
 
 
 def load_distributions(conn: psycopg.Connection, scope: str) -> dict[str, Distribution]:
@@ -467,7 +478,8 @@ def score_point(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     metrics = analyze_point(conn, lat, lng, radius_m, facility_category, mesh_size_m)
     augment_specialty_metrics(metrics, competition_specialties(model.config))
     scope, distributions = resolve_distributions(
-        conn, mesh_size_m, radius_m, prefecture_code, model.config)
+        conn, mesh_size_m, radius_m, prefecture_code, model.config,
+        facility_category)
     scores = model.score(metrics, distributions)
     scores["normalization_scope"] = scope
     scores["normalization_sample_count"] = max(

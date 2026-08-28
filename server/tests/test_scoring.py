@@ -317,6 +317,68 @@ def test_the_scale_used_is_part_of_the_scope_key():
     assert scope_key(500, 1000, "13", "with_clinics").endswith(":with_clinics")
 
 
+def test_the_business_type_is_part_of_the_scope_key():
+    """**目盛りの定義そのものが業態に依存しています。**
+
+    `with_clinics` は「歯科医院が実在する商圏」という意味です。内科では別の
+    集合になるので、同じ文字列に二つの意味を持たせることはできません。
+    入れないと、歯科の目盛りで内科を採点しても、それらしい点が出ます。
+    """
+    from kaigyou_core.scoring import scope_key
+
+    dental = scope_key(500, 1000, "13", "with_clinics", "dental_clinic")
+    medical = scope_key(500, 1000, "13", "with_clinics", "medical_clinic")
+    assert dental != medical
+    assert ":catdental_clinic:" in dental
+
+
+def test_the_migrated_scope_matches_what_the_code_now_builds():
+    """**歯科版を止めないための約束です。**
+
+    移行（030）は既存の scope 文字列をその場で書き換えます。書き換えた結果が
+    今のコードが作る鍵と 1 文字でも違えば、マイグレーション直後に目盛りが
+    見つからなくなり、compute-scores と refresh-stats をやり直すまで（東京・
+    静岡で数十分）スコアもランキングも出ません。
+
+    移行の SQL は
+        '^(mesh:[0-9]+:r[0-9]+:pref[0-9]+):([a-z_]+)$' -> '\1:catdental_clinic:\2'
+    なので、この2つが一致することを、SQL を読まずに確かめられるようにします。
+    """
+    import re
+
+    from kaigyou_core.scoring import scope_key
+
+    def migrate(old: str) -> str:
+        return re.sub(r"^(mesh:[0-9]+:r[0-9]+:pref[0-9]+):([a-z_]+)$",
+                      r"\1:catdental_clinic:\2", old)
+
+    for old, size, radius, pref, reference in (
+        ("mesh:500:r1000:pref13:with_clinics", 500, 1000, "13", "with_clinics"),
+        ("mesh:1000:r1000:pref22:all", 1000, 1000, "22", "all"),
+    ):
+        assert migrate(old) == scope_key(size, radius, pref, reference,
+                                         "dental_clinic")
+    # 二度当てても二重に入らないこと（移行後は区切りが6つになり当たらない）。
+    once = migrate("mesh:500:r1000:pref13:with_clinics")
+    assert migrate(once) == once
+
+
+def test_a_dropped_prefecture_takes_its_scales_with_it():
+    """鍵は pref13 で終わりません。後ろに業態と目盛りの種類が続きます。
+
+    `LIKE '%pref13'` にしていたので、drop-prefecture はこれまで目盛りを
+    1 件も消していませんでした。残った目盛りは、入れ直した別の県のデータに
+    そのまま使われます。
+    """
+    from kaigyou_core.scoring import scope_key
+
+    key = scope_key(500, 1000, "13", "with_clinics", "dental_clinic")
+    assert not key.endswith("pref13"), "この形を前提にした削除は 1 件も消しません"
+    # cli.py が使う条件。
+    assert ":pref13:" in key
+    assert ":pref22:" not in key
+
+
 def test_an_input_at_the_end_of_the_scale_is_reported_as_such():
     """上限に達した入力は、そこから先の違いを捨てている。同点は「測れていない」。"""
     model = ScoringModel({

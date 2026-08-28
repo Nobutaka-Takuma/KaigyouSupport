@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, Query
 
 from kaigyou_api.deps import feature_collection, get_conn, parse_bbox
 from kaigyou_core import provenance
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_core.db import table_exists
 
 router = APIRouter()
@@ -252,6 +253,7 @@ def meshes(
     mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
     profile: str | None = Query(None, description="指定するとスコアも返す"),
     radius_m: int | None = Query(None),
+    category: str = Query(DEFAULT_CATEGORY),
     limit: int = Query(4000, ge=1, le=40000),
 ) -> dict[str, Any]:
     """Mesh polygons with their population attributes, and -- when a scoring
@@ -285,15 +287,18 @@ def meshes(
         """
         select = ", b.workers, b.establishments"
     if profile:
+        # 業態も結合条件に入れます。入れないと、内科を入れたあとに歯科の
+        # ヒートマップを引くと、メッシュごとにどちらかの点が当たります。
         join += """
             LEFT JOIN mesh_scores ms
                    ON ms.mesh_id = m.id AND ms.profile = %s
+                  AND ms.facility_category = %s
                   AND (%s::int IS NULL OR ms.radius_m = %s)
         """
         select += (", ms.overall_score, ms.demand_score, ms.competition_score,"
                    " ms.growth_score, ms.accessibility_score, ms.facility_count,"
                    " ms.population_per_facility, ms.area_label")
-        params = [profile, radius_m, radius_m] + params
+        params = [profile, category, radius_m, radius_m] + params
 
     params.append(limit)
     with conn.cursor() as cur:

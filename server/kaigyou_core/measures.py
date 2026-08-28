@@ -37,6 +37,7 @@ from typing import Any, Mapping, Sequence
 import psycopg
 
 from kaigyou_core.db import column_exists, table_exists
+from kaigyou_core.scoring import DEFAULT_FACILITY_CATEGORY
 
 #: percentile（その値以下のメッシュの割合）から言葉を決める閾値。
 #: 定義にも出すので、読み手は「極めて高い」が何を意味するか確かめられます。
@@ -419,6 +420,7 @@ class BenchmarkScope:
 
 
 def viable_floor(conn: psycopg.Connection, *, profile: str, radius_m: int,
+                 facility_category: str = DEFAULT_FACILITY_CATEGORY,
                  prefecture_code: str, percentile: float) -> float | None:
     """その県で開業が成立している商圏人口の下限。実測値であって、決め打ちではない。
 
@@ -435,10 +437,11 @@ def viable_floor(conn: psycopg.Connection, *, profile: str, radius_m: int,
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
             WHERE ms.profile = %s AND ms.radius_m = %s
+              AND ms.facility_category = %s
               AND pm.prefecture_code = %s AND ms.facility_count > 0
               AND ms.population IS NOT NULL
             """,
-            (percentile, profile, radius_m, prefecture_code))
+            (percentile, profile, radius_m, facility_category, prefecture_code))
         row = cur.fetchone()
     if not row or not row["n"] or row["floor"] is None:
         return None
@@ -527,7 +530,8 @@ def benchmark_scopes(*, prefecture_code: str, prefecture_label: str,
 
 
 def measure_scope_shape(conn: psycopg.Connection, scope: BenchmarkScope, *,
-                        profile: str, radius_m: int, floor: float | None,
+                        profile: str, radius_m: int,
+                        facility_category: str = DEFAULT_FACILITY_CATEGORY, floor: float | None,
                         max_share_below: float, min_sample: int) -> None:
     """母集団の大きさと、そのうち生活圏の下限を下回る割合を測る。
 
@@ -543,9 +547,11 @@ def measure_scope_shape(conn: psycopg.Connection, scope: BenchmarkScope, *,
                    count(*) FILTER (WHERE ms.population < %s)::int AS below
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
-            WHERE ms.profile = %s AND ms.radius_m = %s AND {scope.where}
+            WHERE ms.profile = %s AND ms.radius_m = %s
+              AND ms.facility_category = %s AND {scope.where}
             """,
-            (floor if floor is not None else -1.0, profile, radius_m) + scope.params)
+            (floor if floor is not None else -1.0, profile, radius_m,
+             facility_category) + scope.params)
         row = cur.fetchone()
 
     scope.sample_count = int(row["n"] or 0)
@@ -582,6 +588,7 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
                    profile: str, radius_m: int, prefecture_code: str,
                    prefecture_label: str, municipality: str | None,
                    lat: float, lng: float,
+                   facility_category: str = DEFAULT_FACILITY_CATEGORY,
                    neighbours: Sequence[str] | None = None,
                    specialty: str | None = None,
                    specialty_label: str | None = None,
@@ -634,6 +641,7 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
                          f"順位を算出できません（kaigyou-etl migrate）。")
 
     floor = viable_floor(conn, profile=profile, radius_m=radius_m,
+                         facility_category=facility_category,
                          prefecture_code=prefecture_code,
                          percentile=float(config.get("viable_floor_percentile", 0.10)))
     scopes = benchmark_scopes(
@@ -643,6 +651,7 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
         viable_floor_population=floor, neighbours=neighbours)
     for scope in scopes:
         measure_scope_shape(conn, scope, profile=profile, radius_m=radius_m,
+                            facility_category=facility_category,
                             floor=floor, max_share_below=max_share,
                             min_sample=min_sample)
 
@@ -700,7 +709,8 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
     for scope in ordered:
         if scope.sample_count < min_sample:
             continue
-        rows = _scope_statistics(conn, usable, values, profile, radius_m, scope)
+        rows = _scope_statistics(conn, usable, values, profile, radius_m, scope,
+                                 facility_category)
         if rows is None:
             continue
         for key, bench in rows.items():
@@ -735,7 +745,9 @@ def _bare(key: str, spec: Mapping[str, Any], metrics: Mapping[str, Any]) -> Meas
 
 def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str, Any]],
                       values: Mapping[str, float | None], profile: str, radius_m: int,
-                      scope: BenchmarkScope) -> dict[str, Benchmark] | None:
+                      scope: BenchmarkScope,
+                      facility_category: str = DEFAULT_FACILITY_CATEGORY,
+                      ) -> dict[str, Benchmark] | None:
     """1 つの比較対象について、全指標の中央値・四分位・順位を 1 クエリで。
 
     指標ごとにクエリを投げると、比較対象 3 つ × 指標 16 個で 48 往復になります。
@@ -765,9 +777,10 @@ def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str,
             SELECT count(*)::int AS meshes, {', '.join(parts)}
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
-            WHERE ms.profile = %s AND ms.radius_m = %s AND {scope.where}
+            WHERE ms.profile = %s AND ms.radius_m = %s
+              AND ms.facility_category = %s AND {scope.where}
             """,
-            params + [profile, radius_m] + list(scope.params))
+            params + [profile, radius_m, facility_category] + list(scope.params))
         row = cur.fetchone()
 
     if not row or (row["meshes"] or 0) < MIN_BENCHMARK_SAMPLE:

@@ -112,7 +112,9 @@ config/sources.yaml    2ブロック  mhlw_dental_clinics / mhlw_dental_specialt
 
 ## 進める順序
 
-### 1. スコア鍵に業態を入れる（C）— 唯一、間違った答えが出る箇所
+進捗: **1 済** / 2 未 / 3 未 / 4 未 / 5 未
+
+### 1. スコア鍵に業態を入れる（C）— 唯一、間違った答えが出る箇所 ✔ 済（030）
 
 `scope_key()` と `mesh_scores` の主キーに `facility_category` を足します。
 
@@ -121,10 +123,17 @@ config/sources.yaml    2ブロック  mhlw_dental_clinics / mhlw_dental_specialt
 - `mesh_scores` に列を足し、既存行を `'dental_clinic'` で埋めてから主キーを張り直す
 - `metric_distributions.scope` の既存文字列を **その場で書き換える**
   （`mesh:500:r1000:pref13:with_clinics` →
-  `mesh:500:r1000:pref13:dental_clinic:with_clinics`）
+  `mesh:500:r1000:pref13:catdental_clinic:with_clinics`）
 
 こうすれば `compute-scores` も `refresh-stats` も**再実行不要**で、
-マイグレーション直後から歯科版は今日どおり動きます。
+マイグレーション直後から歯科版は今日どおり動きます。書き換えた鍵が今の
+コードの作る鍵と一致することは、`test_the_migrated_scope_matches_what_the_code_now_builds`
+が SQL を読まずに確かめます。ここが 1 文字でもずれると、移行直後に目盛りが
+見つからなくなり、数十分の再計算が終わるまでスコアもランキングも出ません。
+
+ついでに `drop-prefecture` の目盛り削除を直しました。`LIKE '%pref13'` に
+なっていて、鍵は `pref13` で終わらないので、**これまで 1 件も消していません
+でした**（残った目盛りが、入れ直した別の県のデータに使われます）。
 
 ### 2. 既定値を直す（B）
 

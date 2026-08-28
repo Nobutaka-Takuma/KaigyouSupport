@@ -972,8 +972,13 @@ def cmd_drop_prefecture(args: argparse.Namespace) -> int:
             """, (code,))
             for table in tables:
                 cur.execute(f"DELETE FROM {table} WHERE prefecture_code = %s", (code,))
+            # **鍵は pref13 で終わりません。** 形は
+            # `mesh:500:r1000:pref13:catdental_clinic:with_clinics` で、
+            # 後ろに目盛りの種類と業態が続きます。`%pref13` で終わる条件に
+            # していたので、この削除はこれまで 1 件も消していませんでした
+            # （残った目盛りが、入れ直した別の県のデータに使われます）。
             cur.execute("DELETE FROM metric_distributions WHERE scope LIKE %s",
-                        (f"%pref{code}",))
+                        (f"%:pref{code}:%",))
         conn.commit()
     print("削除しました。正しいファイルを load-local で取り込み直してください。")
     return EXIT_OK

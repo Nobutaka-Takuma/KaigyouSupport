@@ -563,6 +563,24 @@ def normalization_reference(config: Mapping[str, Any]) -> str:
     return value if value in NORMALIZATION_REFERENCES else DEFAULT_NORMALIZATION_REFERENCE
 
 
+#: 業態の既定値。**ここが唯一の定義で、`analysis.DEFAULT_CATEGORY` は別名です。**
+#: 目盛りの鍵を作る側（ここ）と商圏を数える側（analysis）で別々に持つと、
+#: 片方だけ直したときに、歯科の目盛りで内科を採点する状態になります。
+DEFAULT_FACILITY_CATEGORY = "dental_clinic"
+
+
 def scope_key(mesh_size_m: int, radius_m: int, prefecture_code: str,
-              reference: str = DEFAULT_NORMALIZATION_REFERENCE) -> str:
-    return f"mesh:{mesh_size_m}:r{radius_m}:pref{prefecture_code}:{reference}"
+              reference: str = DEFAULT_NORMALIZATION_REFERENCE,
+              facility_category: str = DEFAULT_FACILITY_CATEGORY) -> str:
+    """目盛りを識別する鍵。**業態が入っていないと、静かに混ざります。**
+
+    ``reference`` の ``with_clinics`` は「歯科医院が実在する商圏」という意味
+    です。目盛りの定義そのものが業態に依存していて、内科では別の集合になります。
+    同じ文字列に二つの意味を持たせることはできません。
+
+    形は ``mesh:500:r1000:pref13:catdental_clinic:with_clinics``。
+    移行（030）で既存の鍵もこの形に書き換えてあるので、歯科の呼び出しは
+    再計算なしで今日どおり当たります。
+    """
+    return (f"mesh:{mesh_size_m}:r{radius_m}:pref{prefecture_code}"
+            f":cat{facility_category}:{reference}")

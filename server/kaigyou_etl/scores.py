@@ -104,7 +104,8 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
             progress(f"  注意: 歯科医院のある商圏が{len(scale_rows)}件しかないため、"
                      f"目盛りは人口のある商圏すべてから作ります"
                      f"（{min_reference}件以上で候補地のみに切り替わります）。")
-        scope = scope_key(mesh_size_m, radius, prefecture_code, used_reference)
+        scope = scope_key(mesh_size_m, radius, prefecture_code, used_reference,
+                          facility_category)
         written = 0
         for metric in metrics:
             values = sorted(
@@ -190,7 +191,8 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
               else [ScoringModel(config, profile)])
     radius = radius_m or models[0].mesh_scoring_radius_m
     reference = normalization_reference(config)
-    scope = scope_key(mesh_size_m, radius, prefecture_code, reference)
+    scope = scope_key(mesh_size_m, radius, prefecture_code, reference,
+                      facility_category)
 
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM metric_distributions WHERE scope = %s", (scope,))
@@ -199,7 +201,10 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
         # 候補地が少ない県では refresh-stats が all に落としています。同じ
         # 判断をここでも繰り返すより、書かれている方を探すほうが確実です。
         for alternative in ("all", "with_clinics"):
-            fallback_scope = scope_key(mesh_size_m, radius, prefecture_code, alternative)
+            # **業態は落としません。** 目盛りが無いときに他業態の目盛りで
+            # 代用すると、それらしい点が出て、しかも間違っています。
+            fallback_scope = scope_key(mesh_size_m, radius, prefecture_code,
+                                       alternative, facility_category)
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM metric_distributions WHERE scope = %s",
                             (fallback_scope,))
@@ -243,17 +248,20 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                 USING population_mesh pm
                 WHERE pm.id = ms.mesh_id
                   AND ms.profile = %s AND ms.radius_m = %s
+                  AND ms.facility_category = %s
                   AND pm.prefecture_code = %s
                 """,
-                (model.profile_name, radius, prefecture_code),
+                (model.profile_name, radius, facility_category, prefecture_code),
             )
-            batch = [_score_row(model, row, distributions, radius, labels)
+            batch = [_score_row(model, row, distributions, radius, labels,
+                                facility_category)
                      for row in rows]
             for start in range(0, len(batch), 500):
                 cur.executemany(
                 """
                 INSERT INTO mesh_scores (
-                    mesh_id, profile, radius_m, land_price_yen_per_sqm, cost_score,
+                    mesh_id, profile, radius_m, facility_category,
+                    land_price_yen_per_sqm, cost_score,
                     facility_specialty_counts, facility_specialty_count,
                     population, age_0_14, age_15_64, age_65_plus, workers, establishments,
                     households, population_growth, population_change_projected,
@@ -263,7 +271,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     demand_score, competition_score, growth_score,
                     accessibility_score, overall_score, area_label, computed_at
                 ) VALUES (
-                    %(mesh_id)s, %(profile)s, %(radius_m)s,
+                    %(mesh_id)s, %(profile)s, %(radius_m)s, %(facility_category)s,
                     %(land_price_yen_per_sqm)s, %(cost)s,
                     %(facility_specialty_counts)s, %(facility_specialty_count)s,
                     %(population)s,
@@ -276,7 +284,8 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
                     %(demand)s, %(competition)s, %(growth)s, %(accessibility)s,
                     %(overall)s, %(area_label)s, now()
                 )
-                ON CONFLICT (mesh_id, profile, radius_m) DO UPDATE SET
+                ON CONFLICT (mesh_id, profile, radius_m, facility_category)
+                DO UPDATE SET
                     overall_score = EXCLUDED.overall_score,
                     cost_score = EXCLUDED.cost_score,
                     land_price_yen_per_sqm = EXCLUDED.land_price_yen_per_sqm,
@@ -305,7 +314,8 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
 
 def _score_row(model: ScoringModel, row: Mapping[str, Any],
                distributions: Mapping[str, Any], radius: int,
-               labels: Mapping[int, str | None]) -> dict[str, Any]:
+               labels: Mapping[int, str | None],
+               facility_category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
     scored = model.score(row, distributions)
     # ランキングに出す件数は、そのプロファイルが競合として数えたものと同じで
     # なければ意味がありません。科目を絞っていないプロファイルでは None。
@@ -317,6 +327,9 @@ def _score_row(model: ScoringModel, row: Mapping[str, Any],
             row.get(specialty_count_metric(specialty)) if specialty else None),
         "profile": model.profile_name,
         "radius_m": radius,
+        # **主キーの一部です。** 入れ忘れると、内科の行が歯科の行を
+        # ON CONFLICT で上書きします（しかも成功と表示されます）。
+        "facility_category": facility_category,
         "population": row.get("population"),
         "age_0_14": row.get("age_0_14"),
         "age_15_64": row.get("age_15_64"),

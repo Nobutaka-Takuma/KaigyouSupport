@@ -187,3 +187,50 @@ def test_nearest_station_carries_its_passenger_count(conn, fixture_data):
     result = analyze(conn, fixture_data, 1000)
     assert result["station_distance_m"] == pytest.approx(500, abs=5)
     assert result["daily_passengers"] == 30000
+
+
+def test_two_business_types_can_be_scored_on_the_same_mesh(conn):
+    """**同じ鍵に別業態の点が入って、片方が消えないこと。**
+
+    移行（030）の前は mesh_scores の主キーが (mesh_id, profile, radius_m) で、
+    業態が入っていませんでした。内科でスコアを流すと歯科の行が
+    ON CONFLICT で上書きされ、**compute-scores は成功と表示します。**
+    ラベルの間違いではなく答えの間違いなので、ここで固定します。
+    """
+    from kaigyou_core.db import column_exists
+
+    if not column_exists(conn, "mesh_scores", "facility_category"):
+        pytest.skip("030 未適用")
+
+    lng, lat = meshlib.centroid(MESH_CODE)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO data_sources (id, name, publisher, dataset_kind) "
+                    "VALUES (%s, 'test fixture', 'test', 'sample') "
+                    "ON CONFLICT (id) DO NOTHING", (SOURCE_ID,))
+        cur.execute(
+            """
+            INSERT INTO population_mesh (source_id, mesh_code, mesh_size_m,
+                prefecture_code, geom, centroid, population)
+            VALUES (%s, %s, 1000, '99',
+                    ST_SetSRID(ST_Buffer(ST_MakePoint(%s, %s)::geography, 500)::geometry, 4326),
+                    ST_SetSRID(ST_MakePoint(%s, %s), 4326), 10000)
+            RETURNING id
+            """, (SOURCE_ID, MESH_CODE, lng, lat, lng, lat))
+        mesh_id = cur.fetchone()["id"]
+
+        for category, score in (("dental_clinic", 70.0), ("medical_clinic", 30.0)):
+            cur.execute(
+                """
+                INSERT INTO mesh_scores (mesh_id, profile, radius_m,
+                                         facility_category, overall_score)
+                VALUES (%s, 'default', 1000, %s, %s)
+                ON CONFLICT (mesh_id, profile, radius_m, facility_category)
+                DO UPDATE SET overall_score = EXCLUDED.overall_score
+                """, (mesh_id, category, score))
+
+        cur.execute("SELECT facility_category, overall_score FROM mesh_scores "
+                    "WHERE mesh_id = %s ORDER BY facility_category", (mesh_id,))
+        rows = [(r["facility_category"], r["overall_score"]) for r in cur.fetchall()]
+
+    assert rows == [("dental_clinic", 70.0), ("medical_clinic", 30.0)], \
+        "業態ごとに 1 行ずつ残ること。片方が消えたら主キーが足りていません"

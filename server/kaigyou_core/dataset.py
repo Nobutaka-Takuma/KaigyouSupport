@@ -1454,7 +1454,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                           analyze_point(conn, lat, lng, comparison_radius, category,
                                         mesh_size_m or 1000, catchment, specialty))
     scope, distributions = resolve_distributions(
-        conn, mesh_size_m or 1000, radius_m, prefecture_code, scoring_config)
+        conn, mesh_size_m or 1000, radius_m, prefecture_code, scoring_config,
+        category)
 
     scores = []
     for name in (scoring_config.get("profiles") or {}):
@@ -1498,6 +1499,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         municipality=(municipality or {}).get("name"),
         neighbours=neighbours,
         lat=lat, lng=lng,
+        # **比較相手を業態で絞ります。** 絞らないと、内科を入れたあとに
+        # 歯科の順位を出すと全業態が混ざった母集団に対する順位になります。
+        facility_category=category,
         specialty=specialty,
         specialty_label=vocab.label(specialty) if specialty else None,
         config=insights_config.get("benchmarks") or {})
