@@ -620,3 +620,98 @@ def test_every_edge_is_a_simple_linestring(tmp_path):
     """pgRouting needs one source and one target per row."""
     for record in walk_adapter(tmp_path).transform(WALK_FIXTURE):
         assert record["geom_wkt"].startswith("LINESTRING(")
+
+
+# ----------------------------------------------------- 就業状態等基本集計メッシュ
+#: T001108 の実ファイルと同じ形（ヘッダ行＋ラベル行、Shift-JIS）。値は
+#: 手書きで、データではありません。
+_PROFILE_COLUMNS = {
+    "T001108004": "employees_regular", "T001108010": "employees_part_time",
+    "T001108013": "self_employed",
+    "T001108019": "preschool_total", "T001108025": "preschool_nursery",
+    "T001108034": "students_total", "T001108037": "students_primary",
+    "T001108040": "students_high_school", "T001108043": "students_junior",
+    "T001108046": "students_university", "T001108049": "graduates",
+    "T001108067": "resident_under_1y", "T001108070": "resident_1_to_5y",
+    "T001108079": "resident_20y_plus",
+    "T001108087": "workers_living_here", "T001108088": "students_living_here",
+    "T001108089": "commute_walk", "T001108090": "commute_rail",
+    "T001108091": "commute_bus", "T001108092": "commute_car",
+    "T001108093": "commute_motorcycle", "T001108094": "commute_bicycle",
+}
+
+
+def _profile_file(tmp_path: Path, rows: list[dict], *, drop: tuple = ()) -> Path:
+    ids = ["KEY_CODE"] + [c for c in _PROFILE_COLUMNS if _PROFILE_COLUMNS[c] not in drop]
+    lines = [",".join(ids), ",".join([""] * len(ids))]
+    for row in rows:
+        lines.append(",".join(
+            [row["mesh_code"]]
+            + [str(row.get(_PROFILE_COLUMNS[c], 0)) for c in ids[1:]]))
+    path = tmp_path / "tblT001108H13.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="cp932")
+    return path
+
+
+def _profile_rows() -> list[dict]:
+    """内訳が総数に収まり、居住期間も入っている、まっとうな2メッシュ。"""
+    return [
+        {"mesh_code": "533945572", "students_total": 927,
+         "students_primary": 150, "students_high_school": 108,
+         "students_junior": 0, "students_university": 669,
+         "graduates": 4084, "resident_under_1y": 210,
+         "resident_1_to_5y": 640, "resident_20y_plus": 980,
+         "commute_car": 53, "commute_rail": 1279},
+        {"mesh_code": "533945463", "students_total": 518,
+         "students_primary": 240, "students_high_school": 109,
+         "students_junior": 0, "students_university": 169,
+         "graduates": 2776, "resident_under_1y": 180,
+         "resident_1_to_5y": 500, "resident_20y_plus": 720,
+         "commute_car": 41, "commute_rail": 902},
+    ]
+
+
+def test_resident_profile_reads_the_columns_that_change_the_decision(tmp_path):
+    adapter = build("estat_resident_profile", tmp_path)
+    facts = adapter.validate(_profile_file(tmp_path, _profile_rows()))
+    assert facts["loadable_rows"] == 2
+    assert facts["totals"]["commute_car"] == 94
+    assert facts["totals"]["resident_20y_plus"] == 1700
+    assert facts["columns_not_in_file"] == []
+
+
+def test_resident_profile_refuses_a_table_without_residence_duration(tmp_path):
+    """通学地基準かどうかは、人数の大小では分かりません。**定義で分けます。**
+
+    居住期間は常住地にしかない項目なので、無ければこの表ではありません。
+    以前ここは「1メッシュの大学生が1万人を超えたら落とす」でしたが、
+    通学地基準でも1万を超えるメッシュはほとんど無いので効きませんでした。
+    """
+    rows = [dict(r, resident_under_1y=0, resident_1_to_5y=0,
+                 resident_20y_plus=0) for r in _profile_rows()]
+    adapter = build("estat_resident_profile", tmp_path)
+    with pytest.raises(AcquisitionError) as excinfo:
+        adapter.validate(_profile_file(tmp_path, rows))
+    assert "常住地基準" in str(excinfo.value)
+    assert "estat_daytime_mesh" in str(excinfo.value)
+
+
+def test_resident_profile_catches_a_column_id_that_moved(tmp_path):
+    """列 ID を設定に置いた以上、版が変われば静かにずれます。在学者の内訳が
+    総数を超えたら、その列は別の項目を指しています。"""
+    rows = [dict(r, students_university=r["students_total"] * 2)
+            for r in _profile_rows()]
+    adapter = build("estat_resident_profile", tmp_path)
+    with pytest.raises(AcquisitionError) as excinfo:
+        adapter.validate(_profile_file(tmp_path, rows))
+    assert "列 ID" in str(excinfo.value)
+
+
+def test_resident_profile_records_how_students_compare_with_adults(tmp_path):
+    """落とすための閾値ではなく、次に読む人のための目盛りです。実測（令和2年・
+    東京都、分母50人以上）の最大は 5.36 倍。"""
+    adapter = build("estat_resident_profile", tmp_path)
+    facts = adapter.validate(_profile_file(tmp_path, _profile_rows()))
+    assert facts["students_university_peak_mesh"] == 669
+    assert facts["students_per_adult_peak"] == round(669 / 4084, 3)
+    assert facts["residence_duration_columns"]
