@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Literal
+from typing import Literal, Mapping
 
 from pydantic import BaseModel, Field
 
@@ -71,15 +71,29 @@ class TraceProblem(BaseModel):
     problem: str
 
 
-def verify_step1(output: Step1Output, allowed_measure_keys: set[str]) -> list[TraceProblem]:
+def verify_step1(output: Step1Output, allowed_measure_keys: set[str],
+                 layer_of: Mapping[str, str] | None = None,
+                 min_cross_layer: int = 0) -> list[TraceProblem]:
     """FACT が実在の指標を、PATTERN が実在の FACT を指しているか。
 
     スキーマは形しか保証しません。存在しない measure_key を書いた FACT も、
     存在しない FACT を指す PATTERN も、スキーマ上は正しい JSON です。
     ここで落とさないと、レポートの末尾まで残って §25 の追跡が切れます。
+
+    ``layer_of`` を渡すと、**層を跨いでいるか**も見ます。単一の層の中で
+    数字を並べ替えただけのものは、PATTERN ではなく要約です。実測のレポートは
+    「人口が市内2位」「医院数も市内2位」を PATTERN として出していました。
+    どちらも同じ商圏の大きさを別の言葉で言っているだけで、掛けても何も
+    出てきません。
+
+    **層はモデルに申告させません。** 引かれた指標から数えます。自己申告に
+    すると「layers: [人口, 競合]」と書きながら人口の指標を2つ引く、という
+    形だけ整った出力が通ります。
     """
     problems: list[TraceProblem] = []
     fact_ids = {f.id for f in output.facts}
+    layer_of = layer_of or {}
+    layer_by_fact = {f.id: layer_of.get(f.measure_key) for f in output.facts}
 
     if len(fact_ids) != len(output.facts):
         problems.append(TraceProblem(where="facts", problem="FACT の id が重複しています"))
@@ -101,6 +115,35 @@ def verify_step1(output: Step1Output, allowed_measure_keys: set[str]) -> list[Tr
                 problems.append(TraceProblem(
                     where=f"patterns[{pattern.id}].evidence",
                     problem=f"存在しない FACT を参照しています: {ref!r}"))
+
+    if not layer_of:
+        return problems
+
+    # 層を跨いだ PATTERN。importance が high のものは必ず跨いでいること。
+    # high は「競合戦略・患者層・医院モデルに影響する」という宣言なので、
+    # 1 つの層の中で完結する観察がそれに当たることはありません。
+    crossing = 0
+    for pattern in output.patterns:
+        spanned = {layer_by_fact.get(ref) for ref in pattern.evidence}
+        spanned.discard(None)
+        if len(spanned) >= 2:
+            crossing += 1
+        elif pattern.importance == "high":
+            names = ", ".join(sorted(spanned)) or "（不明）"
+            problems.append(TraceProblem(
+                where=f"patterns[{pattern.id}]",
+                problem=(f"importance が high ですが、根拠が {names} の層だけで"
+                         "閉じています。同じ層の数字を並べ替えたものは要約で"
+                         "あって、構造ではありません。別の層の FACT を足すか、"
+                         "importance を下げてください")))
+
+    if crossing < min_cross_layer:
+        problems.append(TraceProblem(
+            where="patterns",
+            problem=(f"層を跨いだ PATTERN が {crossing} 件しかありません"
+                     f"（{min_cross_layer} 件以上）。人口動態・産業雇用・競合の"
+                     "提供体制・将来推計などを掛け合わせ、データ同士の矛盾や"
+                     "構造的なギャップを指摘してください")))
     return problems
 
 
@@ -126,6 +169,16 @@ class ExternalFact(BaseModel):
         description="high=一次資料に明記 / medium=公的資料からの読み取り / low=それ以外")
 
 
+#: 仮説が正しかったときに動きうるもの。**config/hypotheses.yaml の
+#: screening.levers と同じ並びにしてください。** 片方だけ足すと、設定に
+#: 書いてあるのにスキーマが受け付けない選択肢ができます。
+#:
+#: なぜ欄にするか。「思いつきの仮説」と「戦略が変わる仮説」を、文章の中で
+#: 区別するのは読み手の仕事になります。欄なら空にできません。
+DecisionLever = Literal["診療コンセプト", "設備投資", "診療時間",
+                        "人員体制", "立地判断", "患者層"]
+
+
 class Hypothesis(BaseModel):
     """PATTERN の背景についての仮説と、その判定（要件 §11）。"""
 
@@ -137,6 +190,15 @@ class Hypothesis(BaseModel):
         description="判定の根拠にした EXTERNAL FACT の id。1 つ以上", min_length=1)
     reasoning: str = Field(description="その外部事実からなぜその判定になるのか")
     confidence: Confidence
+    #: So What?。ここが埋まらない仮説は、正しくても何も変えません。
+    #: 実測：「区画整理により計画的に形成された市街地である」という仮説が
+    #: 出ましたが、正しくても診療コンセプトも設備も診療時間も変わりません。
+    changes: list[DecisionLever] = Field(
+        description="この仮説が正しかったとき、根本から変わりうるもの。1つ以上",
+        min_length=1)
+    decision_impact: str = Field(
+        description="何がどう変わるのかを1〜2文で。「〜を検討する余地がある」"
+                    "ではなく、「AではなくBにする」の形で書く")
 
 
 class Step2Output(BaseModel):
@@ -216,7 +278,40 @@ def verify_step2(output: Step2Output, allowed_pattern_ids: set[str],
                 problems.append(TraceProblem(
                     where=f"hypotheses[{hypothesis.id}].evidence",
                     problem=f"存在しない EXTERNAL FACT を参照しています: {ref!r}"))
+        problems.extend(_screen_for_impact(hypothesis))
     return problems
+
+
+#: 「正しくても何も変わらない」仮説を落とすための最低線。
+#:
+#: 中身のよしあしは機械には判定できません。判定できるのは、**そもそも
+#: 書こうとしていない**ことだけです。それでも実測ではこの2つがいちばん
+#: 多い抜け方でした。仮説文をそのまま写す、1行に満たない言い切りで済ませる。
+_MIN_IMPACT_CHARS = 20
+
+
+def _screen_for_impact(hypothesis: Hypothesis) -> list[TraceProblem]:
+    """So What? が書かれているか（要件の「意思決定へのインパクト」）。
+
+    ``changes`` が空でないことはスキーマが保証します。ここで見るのは、
+    ``decision_impact`` が仮説の言い換えになっていないかどうかです。
+    「区画整理で計画的に形成された市街地である」に対して
+    「計画的に形成された市街地であることが分かる」と書かれても、
+    次の一手は 1 ミリも動きません。
+    """
+    impact = (hypothesis.decision_impact or "").strip()
+    where = f"hypotheses[{hypothesis.id}].decision_impact"
+    if len(impact) < _MIN_IMPACT_CHARS:
+        return [TraceProblem(
+            where=where,
+            problem=("何がどう変わるのかが書かれていません。"
+                     "「AではなくBにする」の形で、変わる先まで書いてください"))]
+    if impact == hypothesis.statement.strip():
+        return [TraceProblem(
+            where=where,
+            problem=("仮説文と同じです。仮説が正しかったときに**別のもの**が"
+                     "選ばれる、という形で書いてください"))]
+    return []
 
 
 # ------------------------------------------------------- STEP3 と最終段の共通部

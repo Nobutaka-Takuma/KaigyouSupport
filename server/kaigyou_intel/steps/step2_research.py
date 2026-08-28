@@ -55,9 +55,14 @@ def _prompts(limits: Mapping[str, Any]) -> tuple[str, str]:
     if not settings.get("prompt_structure"):
         raise StepFailed("config/analysis.yaml の steps.2 に prompt_structure がありません")
     total = llm.max_searches(limits)
+    # 統計に載らない定性要因の枠は STEP1 と同じものを渡します。片方だけに
+    # 書くと、STEP1 が立てた問いを STEP2 が別の枠で読むことになります。
+    from kaigyou_intel.steps.step1_features import _factor_frame
+
     research = cfg.prompt_text(settings["prompt"]) \
         .replace("{searches_per_pattern}", str(limits.get("searches_per_pattern", 3))) \
-        .replace("{max_searches_total}", str(total))
+        .replace("{max_searches_total}", str(total)) \
+        .replace("{qualitative_factors}", _factor_frame(cfg.hypotheses_config()))
     return research, cfg.prompt_text(settings["prompt_structure"])
 
 

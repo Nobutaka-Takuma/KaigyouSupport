@@ -296,6 +296,85 @@ def _neighbour_municipalities(conn: psycopg.Connection,
 _ADJACENCY_TOLERANCE_DEG = 0.001
 
 
+def _clinic_vintage(conn: psycopg.Connection, lat: float, lng: float,
+                    radius_m: int, category: str) -> dict[str, Any] | None:
+    """商圏内の医院の開設年の分布。
+
+    **なぜ要るか。** 「院長の世代交代で医院が減るかもしれない」は、歯科の
+    開業で効く仮説のひとつです。20年後の競合の数は、いまの数ではなく
+    「いまの院長があと何年やるか」で決まります。ところがこれを支える数字が
+    どこにも出ていませんでした。年齢は公表されていませんが、**開設年は
+    届出にあり、既に取り込んであります**（facilities.opening_date）。
+
+    開設年は院長の年齢ではありません。承継で代替わりした医院も、法人が
+    分院を出した医院も、開設は新しいままです。だから「40年前に開設」は
+    「院長が高齢」ではなく、**そこを調べる価値がある**という意味です。
+    仮説の代理指標であって、結論ではありません。
+
+    取れなかった件数を必ず返します。3件しか分からない商圏で「中央値
+    1998年」と書くと、10件ぶんの話に読めます。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*)                                    AS total,
+                   count(opening_date)                         AS known,
+                   min(EXTRACT(YEAR FROM opening_date))::int    AS oldest_year,
+                   max(EXTRACT(YEAR FROM opening_date))::int    AS newest_year,
+                   percentile_cont(0.5) WITHIN GROUP (
+                       ORDER BY EXTRACT(YEAR FROM opening_date)) AS median_year,
+                   count(*) FILTER (
+                       WHERE opening_date <= (CURRENT_DATE - make_interval(years => %s))
+                   ) AS opened_long_ago,
+                   count(*) FILTER (
+                       WHERE opening_date >= (CURRENT_DATE - make_interval(years => %s))
+                   ) AS opened_recently
+            FROM facilities
+            WHERE facility_category = %s
+              AND ST_DWithin(geom::geography,
+                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+            """,
+            (VINTAGE_LONG_AGO_YEARS, VINTAGE_RECENT_YEARS,
+             category, lng, lat, radius_m))
+        row = cur.fetchone()
+
+    if not row or not row["total"]:
+        return None
+    if not row["known"]:
+        # 「古い医院は0件」ではありません。**1件も分からなかった**のです。
+        return {"available": False, "reason": "no_opening_dates",
+                "total_clinics": int(row["total"]), "with_opening_date": 0,
+                "note": "商圏内の医院について開設年月日が1件も取得できていません。"
+                        "取り込み元のファイルにこの列が無い可能性があります。"}
+    return {
+        "available": True,
+        "total_clinics": int(row["total"]),
+        "with_opening_date": int(row["known"]),
+        "coverage": round(row["known"] / row["total"], 3),
+        "median_opening_year": (None if row["median_year"] is None
+                                else int(row["median_year"])),
+        "oldest_opening_year": row["oldest_year"],
+        "newest_opening_year": row["newest_year"],
+        "opened_over_years_ago": VINTAGE_LONG_AGO_YEARS,
+        "opened_long_ago": int(row["opened_long_ago"]),
+        "opened_within_years": VINTAGE_RECENT_YEARS,
+        "opened_recently": int(row["opened_recently"]),
+        "note": (f"開設年月日は医療機能情報提供制度の届出値。{row['known']}/"
+                 f"{row['total']}件で取得できています。**開設年は院長の年齢では"
+                 "ありません。** 承継で代替わりした医院も、法人の分院も、開設は"
+                 "新しいままです。世代交代の可能性を調べる手がかりであって、"
+                 "その証拠ではありません。"),
+    }
+
+
+#: 「古くからある医院」の線。開業から30年経っていれば、開設者がそのまま
+#: 院長なら還暦前後です。決め打ちの閾値なので、意味づけではなく件数として
+#: 出します。
+VINTAGE_LONG_AGO_YEARS = 30
+#: 「最近できた医院」の線。この商圏にいま参入が起きているかどうか。
+VINTAGE_RECENT_YEARS = 5
+
+
 def _industry_mix(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
                   mesh_size_m: int) -> dict[str, Any] | None:
     """Workers by industry division, apportioned like every other mesh figure.
@@ -1021,6 +1100,10 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "by_specialty": _by_specialty(metrics, by_radius),
             # 診療時間。空いている曜日・時間帯は、件数には出てこない競合の形。
             "hours": _hours_block(metrics),
+            # 開設年。20年後の競合の数は、いまの数ではなく「いまの院長が
+            # あと何年やるか」で決まります。年齢は公表されていませんが、
+            # 開設年は届出にあります。
+            "vintage": _clinic_vintage(conn, lat, lng, radius_m, category),
         },
         "access": {
             "nearest_station": {

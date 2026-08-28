@@ -249,6 +249,74 @@ def test_step1_keeps_the_gaps(dataset):
         assert "component_keys" in insight
 
 
+def test_the_clinic_opening_years_reach_the_analysis(dataset):
+    """20年後の競合の数は、いまの数ではなく「いまの院長があと何年やるか」で
+    決まります。年齢は公表されていませんが、開設年は届出にあり、既に
+    取り込んであります。それを出していませんでした。
+
+    **開設年は院長の年齢ではありません。** 承継で代替わりした医院も、法人の
+    分院も、開設は新しいままです。だから代理指標であって結論ではない、と
+    データ自身に書かせます。
+    """
+    vintage = dataset["competition"].get("vintage")
+    assert vintage is not None, "商圏に医院が1件でもあれば、この欄は出ます"
+    # 取れたか取れなかったかを、必ずどちらかで名乗ること。
+    assert "available" in vintage
+    assert vintage["total_clinics"] >= 0
+    if vintage["available"]:
+        assert "院長の年齢ではありません" in vintage["note"]
+        # 分母を必ず並べる。3件しか分からない商圏で「中央値1998年」と書くと
+        # 10件ぶんの話に読めます。
+        assert vintage["with_opening_date"] <= vintage["total_clinics"]
+    else:
+        assert vintage["reason"] == "no_opening_dates"
+        assert vintage["with_opening_date"] == 0
+
+
+def test_the_report_says_when_no_opening_date_could_be_read(dataset):
+    """「古い医院は0件」と「1件も分からなかった」は別のことです。
+
+    黙って省くと、調べたうえで該当なしと読まれます。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    data = to_jsonable(dataset)
+    data["competition"] = dict(data["competition"], vintage={
+        "available": False, "reason": "no_opening_dates",
+        "total_clinics": 10, "with_opening_date": 0,
+        "note": "商圏内の医院について開設年月日が1件も取得できていません。"})
+    markdown = to_markdown(_report_output().model_dump(), data)
+    assert "#### 開設年（商圏内）" in markdown
+    assert "1件も取得できていません" in markdown
+
+
+def test_the_hours_and_specialties_can_be_cited_as_evidence(dataset):
+    """実測：レポートは「日曜診療は2院」と本文に書きながら、根拠には別の
+    指標の id を添えていました。§25 の追跡がそこで切れています。
+
+    診療時間も標榜科目も measures ではありません（比較用の分布が
+    mesh_scores に無いので指標にできない）。**引けないものは、掛け合わせ
+    ようもありません。**
+    """
+    from kaigyou_intel.projection import citable_keys
+
+    payload = for_step1(dataset)
+    keys = citable_keys(payload)
+    assert "clinic_hours.sunday" in keys
+    assert keys["clinic_hours.sunday"] == "competition_offer"
+    # 数の層と、提供体制の層は別。医院数と1院あたり人口を掛けても、それは
+    # 同じ数の割り算でしかありません。
+    assert keys["dental_clinics"] == "competition"
+    assert keys["workers"] == "economy"
+    assert len({keys[k] for k in keys}) >= 4, "掛け合わせる相手が要ります"
+
+    # 値はデータセットから写すだけ。ここで計算しません。
+    hours = {c["key"]: c for c in payload["citable"]}
+    counts = {e["key"]: e["count"]
+              for e in dataset["competition"]["hours"]["counts"]}
+    assert hours["clinic_hours.sunday"]["value"] == counts["sunday"]
+
+
 def test_step2_is_not_given_the_base_data(dataset):
     """渡さなかったものについては何も言えない。
 
@@ -347,6 +415,31 @@ def _output(**kwargs) -> Step1Output:
     return Step1Output(**base)
 
 
+#: 層を跨いだ出力。人口動態 × 競合の提供体制。
+def _crossing_output(**kwargs) -> Step1Output:
+    facts = [
+        Fact(id="F001", statement="65歳以上の割合は31.2%", measure_key="elderly_share"),
+        Fact(id="F002", statement="日曜に開けている医院は2院",
+             measure_key="clinic_hours.sunday"),
+        Fact(id="F003", statement="従業者数は4,035人", measure_key="workers"),
+    ]
+    patterns = [
+        Pattern(id=f"P00{i}", title="高齢化は進むが日曜の受け皿が薄い",
+                evidence=["F001", "F002"], evidence_summary="…",
+                importance="high", research_questions=["日曜に人は採れるか"])
+        for i in (1, 2, 3)
+    ]
+    base = dict(facts=facts, patterns=patterns)
+    base.update(kwargs)
+    return Step1Output(**base)
+
+
+#: 指標 -> 層。実データでは citable_keys が返すもの。
+_LAYERS = {"child_population": "residents", "child_share": "residents",
+           "elderly_share": "residents", "workers": "economy",
+           "clinic_hours.sunday": "competition_offer"}
+
+
 def test_a_pattern_must_rest_on_at_least_two_facts():
     """単一の事実の言い換えは PATTERN ではありません（要件 §6）。"""
     with pytest.raises(Exception):
@@ -373,6 +466,68 @@ def test_a_pattern_pointing_at_a_fact_that_does_not_exist_is_caught():
 
 def test_a_clean_output_has_no_problems():
     assert verify_step1(_output(), {"child_population", "child_share"}) == []
+
+
+def test_a_pattern_that_stays_inside_one_layer_is_not_a_pattern():
+    """実測：「人口が市内2位」「歯科医院数も市内2位」を並べたレポートが
+    出ました。どちらも同じ商圏の大きさを別の言葉で言っているだけで、
+    掛けても何も出てきません。読み手は「だから何なのか」を自分で考える
+    ことになります。
+
+    `importance` が high は「競合戦略・患者層・医院モデルに影響する」と
+    いう宣言です。1つの層の中で完結する観察がそれに当たることはありません。
+    """
+    from kaigyou_intel.schemas import Pattern
+
+    inside = _output(patterns=[Pattern(
+        id="P001", title="絶対数も構成比も低い", evidence=["F001", "F002"],
+        evidence_summary="…", importance="high", research_questions=["q"])])
+    problems = verify_step1(inside, set(_LAYERS), _LAYERS)
+    assert any("閉じています" in p.problem for p in problems)
+
+    # importance を下げれば通ります。単一の層の観察が無価値なのではなく、
+    # 「これが判断を変える」と名乗るのが違うだけです。
+    inside.patterns[0].importance = "medium"
+    assert verify_step1(inside, set(_LAYERS), _LAYERS) == []
+
+
+def test_the_layers_are_counted_from_the_data_not_from_the_model():
+    """層をモデルに申告させません。
+
+    自己申告にすると「人口 × 競合」と書きながら人口の指標を2つ引く、と
+    いう形だけ整った出力が通ります。引かれた指標から数えます。
+    """
+    assert verify_step1(_crossing_output(), set(_LAYERS), _LAYERS,
+                        min_cross_layer=3) == []
+
+    # 同じ形でも、引いている指標が同じ層なら跨いでいません。
+    same_layer = _crossing_output()
+    for pattern in same_layer.patterns:
+        pattern.evidence = ["F001", "F002"]
+    same_layer.facts[1].measure_key = "child_share"   # residents に移す
+    problems = verify_step1(same_layer, set(_LAYERS) | {"child_share"},
+                            {**_LAYERS, "child_share": "residents"},
+                            min_cross_layer=3)
+    assert any("層を跨いだ PATTERN が 0 件" in p.problem for p in problems)
+
+
+def test_the_crossing_requirement_is_off_unless_it_is_configured():
+    """層の情報が無い呼び出し（古いテスト・別の用途）まで落とさない。"""
+    assert verify_step1(_output(), {"child_population", "child_share"}) == []
+
+
+def test_the_prompt_and_the_check_read_the_same_threshold():
+    """「3件以上」と書いておきながら2件で通る、の逆も含めて防ぐ。
+
+    別々に読むと、書いていない条件で落ちます。落ちるとその段はやり直しで、
+    費用も倍かかります。
+    """
+    from kaigyou_intel.steps.step1_features import min_cross_layer
+
+    configured = (cfg.hypotheses_config()["crossing"]["min_cross_layer_patterns"])
+    assert min_cross_layer() == configured
+    # 上げすぎると無い矛盾を作り始めます。PATTERN の上限を超えないこと。
+    assert configured <= cfg.analysis_config()["limits"]["max_patterns"]
 
 
 def test_the_step1_schema_does_not_ask_for_benchmarks():
@@ -517,7 +672,7 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
                  web_search=None, effort=None):
         captured.update(step_number=step_number, system=system, user=user,
                         schema=schema, tools=tools)
-        return llm.Result(parsed=_output(), text="",
+        return llm.Result(parsed=_crossing_output(), text="",
                           usage=llm.Usage(input_tokens=1000, output_tokens=200),
                           model="claude-opus-5")
 
@@ -531,8 +686,15 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     limit = cfg.analysis_config()["limits"]["max_patterns"]
     assert f"最大 {limit} 個" in captured["system"]
     assert "{max_patterns}" not in captured["system"]
+    # 定性要因の枠と、層の掛け合わせの指示が入っていること。
+    assert "デンタルIQ" in captured["system"]
+    assert "{qualitative_factors}" not in captured["system"]
+    assert "{crossing_examples}" not in captured["system"]
     assert usage.input_tokens == 1000
-    assert output["facts"][0]["measure_key"] == "child_population"
+    assert output["facts"][0]["measure_key"] == "elderly_share"
+    # measures に無いキーも FACT の根拠として引けること。診療時間は
+    # measures ではなく citable にあります。
+    assert output["facts"][1]["measure_key"] == "clinic_hours.sunday"
     assert sources == []
 
 
@@ -823,7 +985,9 @@ def _step2_output(**overrides) -> "Step2Output":
             id="H001", pattern_id="P001",
             statement="タワーマンション供給が子育て世帯を呼び込んだ",
             status="SUPPORTED", evidence=["C001"],
-            reasoning="区の統計で年少人口の増加が確認できる", confidence="medium")],
+            reasoning="区の統計で年少人口の増加が確認できる", confidence="medium",
+            changes=["患者層", "診療コンセプト"],
+            decision_impact="成人単独ではなく親子を一組として獲得する設計にする。")],
         "unanswered": ["小児歯科の開設年は確認できなかった"],
     }
     data.update(overrides)
@@ -859,10 +1023,98 @@ def test_step2_references_must_resolve():
     urls = {"https://www.city.chuo.lg.jp/toukei/jinkou.html"}
     stray = _step2_output(hypotheses=[Hypothesis(
         id="H001", pattern_id="P404", statement="s", status="UNSUPPORTED",
-        evidence=["C404"], reasoning="r", confidence="low")])
+        evidence=["C404"], reasoning="r", confidence="low",
+        changes=["診療時間"],
+        decision_impact="日曜ではなく平日夜間に診療枠を寄せる。")])
     problems = verify_step2(stray, {"P001"}, urls)
     assert any("P404" in p.problem for p in problems)
     assert any("C404" in p.problem for p in problems)
+
+
+def test_a_hypothesis_that_changes_nothing_is_refused():
+    """「正しくても次の一手が動かない仮説」を落とす。
+
+    実測：「裾野駅西地区は区画整理により計画的に形成された市街地である」と
+    いう仮説が出ました。正しくても、診療コンセプトも設備も診療時間も
+    変わりません。知識であって仮説ではありません。
+    """
+    from pydantic import ValidationError
+
+    from kaigyou_intel.schemas import Hypothesis
+
+    # 変わるものを1つも挙げられない仮説は、スキーマが通しません。
+    with pytest.raises(ValidationError):
+        Hypothesis(id="H001", pattern_id="P001", statement="s",
+                   status="SUPPORTED", evidence=["C001"], reasoning="r",
+                   confidence="high", changes=[],
+                   decision_impact="主要患者を居住者ではなく勤務者に置く。")
+
+
+def test_a_decision_impact_that_restates_the_hypothesis_is_caught():
+    """「AではなくBにする」の形で書かせる。
+
+    「計画的に形成された市街地である」に対して「計画的に形成された市街地で
+    あることが分かる」と書かれても、次の一手は1ミリも動きません。
+    """
+    from kaigyou_intel.schemas import Hypothesis, verify_step2
+
+    statement = "裾野駅西地区は区画整理により計画的に形成された市街地である"
+    echoed = _step2_output(hypotheses=[Hypothesis(
+        id="H001", pattern_id="P001", statement=statement, status="SUPPORTED",
+        evidence=["C001"], reasoning="r", confidence="high",
+        changes=["立地判断"], decision_impact=statement)])
+    problems = verify_step2(echoed, {"P001"},
+                            {"https://www.city.chuo.lg.jp/toukei/jinkou.html"})
+    assert any("仮説文と同じ" in p.problem for p in problems)
+
+
+def test_a_decision_impact_that_is_barely_written_is_caught():
+    """1行に満たない言い切りで済ませる、がいちばん多い抜け方でした。"""
+    from kaigyou_intel.schemas import Hypothesis, verify_step2
+
+    thin = _step2_output(hypotheses=[Hypothesis(
+        id="H001", pattern_id="P001", statement="s", status="SUPPORTED",
+        evidence=["C001"], reasoning="r", confidence="high",
+        changes=["診療時間"], decision_impact="時間を変える")])
+    problems = verify_step2(thin, {"P001"},
+                            {"https://www.city.chuo.lg.jp/toukei/jinkou.html"})
+    assert any("変わる先まで" in p.problem for p in problems)
+
+
+def test_the_levers_in_the_config_and_the_schema_agree():
+    """設定に書いてあるのにスキーマが受け付けない選択肢を作らない。"""
+    from typing import get_args
+
+    from kaigyou_intel.schemas import DecisionLever
+
+    configured = cfg.hypotheses_config()["screening"]["levers"]
+    assert list(get_args(DecisionLever)) == configured
+
+
+def test_the_qualitative_factors_are_a_frame_not_an_answer():
+    """統計にも外部資料にも無いことを、事実として書かせない。
+
+    「この地域はデンタルIQが高い」はどこにも書いていません。枠として
+    渡すのは、**調べる対象**を示すためであって、答えを渡すためでは
+    ありません。
+    """
+    from kaigyou_intel.steps.step1_features import _factor_frame
+
+    frame = cfg.hypotheses_config()
+    ids = [f["id"] for f in frame["factors"]]
+    assert {"dental_iq", "succession", "staffing"} <= set(ids)
+
+    text = _factor_frame(frame)
+    assert "強い根拠として使わないでください" in text
+    # 代理指標は、引けるキーで書かれていること。引けないキーを勧めると、
+    # そのキーを書いた FACT は検算で落ちます。
+    from kaigyou_core.measures import LAYERS, MEASURE_SPECS
+
+    for factor in frame["factors"]:
+        for proxy in factor.get("proxies") or []:
+            key = proxy["key"]
+            assert key in MEASURE_SPECS or "." in key, key
+    assert set(LAYERS) >= {"competition_offer", "future", "economy"}
 
 
 def test_an_unsupported_hypothesis_is_kept():
@@ -877,7 +1129,9 @@ def test_an_unsupported_hypothesis_is_kept():
         id="H001", pattern_id="P001", statement="再開発が原因である",
         status="UNSUPPORTED", evidence=["C001"],
         reasoning="区の資料では当該期間の大規模開発は確認できなかった",
-        confidence="medium")])
+        confidence="medium", changes=["立地判断"],
+        decision_impact="再開発による流入を前提にせず、現在の居住者だけで"
+                        "成り立つ規模で計画する。")])
     assert verify_step2(output, {"P001"},
                         {"https://www.city.chuo.lg.jp/toukei/jinkou.html"}) == []
     assert output.model_dump()["hypotheses"][0]["status"] == "UNSUPPORTED"
@@ -1333,6 +1587,18 @@ def test_step3_input_needs_both_earlier_steps(conn, dataset):
     with pytest.raises(worker.StepNotImplemented, match="STEP1 と STEP2"):
         worker.build_input(conn, job, 3)
     conn.rollback()
+
+
+def test_step3_is_told_what_to_do_with_a_refuted_hypothesis():
+    """反証を無視するのと、反証を採用するのは別です。
+
+    「日曜に開ければ空白を取れる」が反証されたなら、日曜開院を軸に据えない
+    という判断になります。前の段が調べた結果が判断に届いていないと、
+    調べた意味がありません。
+    """
+    text = cfg.prompt_text("step3_demand.md")
+    assert "decision_impact" in text and "changes" in text
+    assert "反証されたほうを採用する" in text
 
 
 def test_step3_is_not_asked_to_predict():
@@ -2578,10 +2844,12 @@ def test_an_unverifiable_source_costs_one_fact_not_the_whole_step():
         hypotheses=[
             Hypothesis(id="H001", pattern_id="P001", statement="s",
                        status="SUPPORTED", evidence=["C001"], reasoning="r",
-                       confidence="high"),
+                       confidence="high", changes=["患者層"],
+                       decision_impact="主要患者を居住者ではなく勤務者に置く。"),
             Hypothesis(id="H002", pattern_id="P001", statement="s",
                        status="SUPPORTED", evidence=["C002"], reasoning="r",
-                       confidence="low"),
+                       confidence="low", changes=["設備投資"],
+                       decision_impact="ユニットを増やさず個室に振る。"),
         ])
 
     dropped = _drop_unverifiable(output, {good})

@@ -50,6 +50,10 @@ limits:
   searches_per_pattern: 2      # PATTERN あたりの Web 検索回数
   max_searches_total: 8
   max_clinics_in_projection: 20
+  # 層を跨いだ PATTERN の下限は config/hypotheses.yaml の crossing にあります。
+  # 仮説の枠組み（層・定性要因・So What? のふるい）は 1 か所にまとめてあり、
+  # こことあちらに分けて置くと、片方だけ直したときに食い違います。
+  #
   # STEP2 に渡す競合医院の数（近い順）。自費診療の取り扱いを調べるための
   # 固有名詞で、これが無いと「インプラントの競合状況」は永久に分かりません。
   # 標榜診療科目にはインプラントが無く、届出には自由記載欄しかないためです。
@@ -159,7 +163,7 @@ steps:
   1:
     name: 商圏特徴抽出
     prompt: step1_features.md
-    prompt_version: step1-v1.4
+    prompt_version: step1-v1.5
     # 既に算出済みの順位とパーセンタイルから FACT を選び、食い違いを見つける
     # 段です。深く考えるより、たくさん見て取りこぼさないほうが効きます。
     # effort: high では思考だけで 10,094 トークン出ていました。
@@ -175,7 +179,7 @@ steps:
     # 事実が増えて、出典の照合が合わなくなります。
     prompt: step2_research.md
     prompt_structure: step2_structure.md
-    prompt_version: step2-v1.3
+    prompt_version: step2-v1.4
     # 検索が律速する段で、待っている間の思考は増やしても意味がありません。
     effort: medium
     # 2 回目は**書き写すだけ**です。ここで考えさせると、調べていないことを
@@ -185,7 +189,7 @@ steps:
   3:
     name: 需要形成・患者分析と経営判断
     prompt: step3_demand.md
-    prompt_version: step3-v1.2
+    prompt_version: step3-v1.3
     # ここが判断の段です。**深く考えるだけの価値があるのはここと STEP4 だけ**
     # なので、下げません。
     effort: high

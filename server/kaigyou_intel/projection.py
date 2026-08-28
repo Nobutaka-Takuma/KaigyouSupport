@@ -25,10 +25,14 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Mapping
 
+from kaigyou_core.measures import LAYERS
+
 #: measures から Step1 へ渡す欄。平坦な代表値（= primary の写し）と、
 #: 入れ子の benchmarks の両方を残します。
 _MEASURE_FIELDS = (
-    "key", "label", "value", "unit", "data_year", "source", "higher_means",
+    # ``layer`` は落とさないこと。層を跨いだ PATTERN かどうかは、引かれた
+    # 指標の層から機械的に数えます。落とすと全部が同じ層に見えます。
+    "key", "label", "layer", "value", "unit", "data_year", "source", "higher_means",
     "benchmark_type", "benchmark_value", "position_label",
     "rank", "of", "direction", "significance", "significance_withheld_reason",
     "growth",
@@ -92,6 +96,110 @@ def _measure(item: Mapping[str, Any], keep_benchmarks: bool = True) -> dict[str,
     return out
 
 
+#: measures に無いが、FACT の根拠として引ける数字。
+#:
+#: **なぜ要るか。** ``Fact.measure_key`` は ``measures`` のキーしか受け付けま
+#: せんでした。ところが診療時間・標榜科目・産業別従業者・将来推計・開設年は
+#: measures ではなく、別のブロックに入っています（比較用の分布が mesh_scores
+#: に無いので指標にできません）。
+#:
+#: つまり「日曜に開けている医院は2割」を根拠として**引けませんでした**。
+#: 実測のレポートはその事実を本文に書きながら、根拠には別の指標の id を
+#: 添えていました。追跡が切れています。
+#:
+#: そしてこれは、仮説の質にそのまま効きます。「人口動態 × 競合の提供体制」を
+#: 掛けろと言っても、片方が引けなければ掛けようがありません。
+_CITABLE_BLOCKS = "citable"
+
+
+def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """measures 以外のブロックから、引ける数字を平らに並べる。
+
+    値はデータセットからそのまま写します。ここで計算はしません（割合は
+    元のブロックが既に持っています）。層（layer）を付けるのは、PATTERN が
+    層を跨いだかどうかを機械的に数えるためです。
+    """
+    out: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, value: Any, unit: str, layer: str,
+            source: str, note: str | None = None) -> None:
+        if value is None:
+            return
+        item = {"key": key, "label": label, "value": value, "unit": unit,
+                "layer": layer, "source": source}
+        if note:
+            item["note"] = note
+        out.append(item)
+
+    competition = dataset.get("competition") or {}
+
+    # --- 競合の提供体制：診療時間 -----------------------------------------
+    hours = competition.get("hours") or {}
+    declared = hours.get("declared") or 0
+    for entry in hours.get("counts") or []:
+        add(f"clinic_hours.{entry.get('key')}", f"{entry.get('label')}の医院数",
+            entry.get("count"), "院", "competition_offer", MHLW,
+            note=(f"診療時間の届出がある{declared}院のうち。届出値であって"
+                  "運用実態ではありません。"))
+    add("clinic_hours.weekly_hours_median", "週間診療時間の中央値",
+        hours.get("weekly_hours_median"), "時間", "competition_offer", MHLW)
+
+    # --- 競合の提供体制：標榜科目 -----------------------------------------
+    specialty = competition.get("by_specialty") or {}
+    for entry in specialty.get("detail") or []:
+        key = entry.get("key")
+        if not key:
+            continue
+        add(f"clinic_specialty.{key}", f"{entry.get('label')}を標榜する医院数",
+            entry.get("count"), "院", "competition_offer", MHLW,
+            note=("自由記載欄の科目。書かなかった医院を「やっていない」と"
+                  "数えるので、実施医院数の下限にすぎません。"
+                  if entry.get("declared_only") else None))
+
+    # --- 競合の提供体制：開設年 -------------------------------------------
+    vintage = competition.get("vintage") or {}
+    if vintage.get("available"):
+        add("clinic_vintage.median_year", "商圏内医院の開設年（中央値）",
+            vintage.get("median_opening_year"), "年", "competition_offer", MHLW,
+            note=f"開設年が分かる{vintage.get('with_opening_date')}院のうち。"
+                 "開設年は院長の年齢ではありません。")
+        add("clinic_vintage.opened_long_ago",
+            f"開設から{vintage.get('opened_over_years_ago')}年以上経つ医院数",
+            vintage.get("opened_long_ago"), "院", "competition_offer", MHLW)
+        add("clinic_vintage.opened_recently",
+            f"直近{vintage.get('opened_within_years')}年に開設した医院数",
+            vintage.get("opened_recently"), "院", "competition_offer", MHLW)
+
+    # --- 産業・雇用 --------------------------------------------------------
+    mix = ((dataset.get("demand") or {}).get("daytime") or {}).get("industry_mix") or {}
+    for division, values in mix.items():
+        add(f"industry.{division}.workers", f"{division}の従業者数",
+            (values or {}).get("workers"), "人", "economy", CENSUS_BIZ)
+
+    # --- 将来推計 ----------------------------------------------------------
+    outlook = (dataset.get("demand") or {}).get("outlook") or {}
+    if outlook.get("available"):
+        label = outlook.get("estimate_label") or "将来推計人口"
+        for year in outlook.get("years") or []:
+            y = year.get("year")
+            add(f"outlook.{y}.population", f"{y}年の推計人口",
+                year.get("population"), "人", "future", label)
+            add(f"outlook.{y}.index_vs_base",
+                f"{y}年の推計人口（{outlook.get('base_year')}年=1）",
+                year.get("index_vs_base"), "", "future", label)
+            add(f"outlook.{y}.elderly_share", f"{y}年の65歳以上の割合",
+                year.get("elderly_share"), "", "future", label)
+            add(f"outlook.{y}.late_elderly_share", f"{y}年の75歳以上の割合",
+                year.get("late_elderly_share"), "", "future", label)
+            add(f"outlook.{y}.age_0_14", f"{y}年の0〜14歳人口",
+                year.get("age_0_14"), "人", "future", label)
+    return out
+
+
+MHLW = "厚生労働省 医療機能情報提供制度"
+CENSUS_BIZ = "総務省・経済産業省 経済センサス"
+
+
 def for_step1(dataset: Mapping[str, Any],
               settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """STEP1（商圏特徴抽出）の入力。
@@ -123,6 +231,10 @@ def for_step1(dataset: Mapping[str, Any],
         "benchmark_scopes": measures.get("benchmark_scopes"),
         "measures": [_measure(m, keep_benchmarks)
                      for m in (measures.get("items") or [])],
+        # measures に無いが引ける数字。層を跨いだ PATTERN は、これが無いと
+        # そもそも作れません（診療時間も標榜科目も measures ではありません）。
+        "citable": _citable(dataset),
+        "layers": LAYERS,
         # 組み合わせと「何が確認できていないか」だけ。成分の値は measures に
         # 既にあるので再掲しません（再掲すると 11.7KB が 1.4KB で済むところを
         # 使い、しかも同じ数字が 2 か所にある状態で読ませることになります）。
@@ -136,6 +248,18 @@ def for_step1(dataset: Mapping[str, Any],
         "reading_guide": (dataset.get("reading_guide") or {}).get("how_to_read_a_measure"),
         "significance_bands": (dataset.get("reading_guide") or {}).get("significance_bands"),
     }
+
+
+def citable_keys(payload: Mapping[str, Any]) -> dict[str, str]:
+    """FACT が引けるキーと、その層。**検算とプロンプトで同じものを使います。**
+
+    片方だけを見て作ると、「引いてよいと書いてあるのに落ちる」キーが出ます。
+    """
+    keys = {m["key"]: m.get("layer", "residents")
+            for m in (payload.get("measures") or []) if m.get("key")}
+    keys.update({c["key"]: c.get("layer", "residents")
+                 for c in (payload.get("citable") or []) if c.get("key")})
+    return keys
 
 
 def _insight(insight: Mapping[str, Any]) -> dict[str, Any]:

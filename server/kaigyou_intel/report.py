@@ -166,6 +166,27 @@ def _figures_block(dataset: Mapping[str, Any]) -> list[str]:
         if hours.get("weekly_hours_median") is not None:
             lines += [f"週間診療時間の中央値: {hours['weekly_hours_median']} 時間", ""]
 
+    vintage = competition.get("vintage") or {}
+    if vintage.get("available"):
+        lines += ["#### 開設年（商圏内）", ""]
+        lines += _table(["区分", "値"], [
+            ["開設年の中央値", vintage.get("median_opening_year")],
+            ["いちばん古い開設年", vintage.get("oldest_opening_year")],
+            ["いちばん新しい開設年", vintage.get("newest_opening_year")],
+            [f"開設から{vintage.get('opened_over_years_ago')}年以上",
+             _num(vintage.get("opened_long_ago"), "院")],
+            [f"直近{vintage.get('opened_within_years')}年の開設",
+             _num(vintage.get("opened_recently"), "院")],
+            ["開設年が分かる医院",
+             f"{vintage.get('with_opening_date')} / "
+             f"{vintage.get('total_clinics')} 院"],
+        ])
+        lines += [str(vintage.get("note", "")), ""]
+    elif vintage.get("reason") == "no_opening_dates":
+        # 「古い医院は0件」ではありません。1件も分からなかったのです。
+        # 黙って省くと、調べたうえで該当なしと読まれます。
+        lines += ["#### 開設年（商圏内）", "", str(vintage.get("note", "")), ""]
+
     clinics = (competition.get("clinics_in_radius") or {}).get("items") or []
     if clinics:
         lines += ["#### 商圏内の歯科医院", ""]

@@ -99,6 +99,21 @@ def analysis_config() -> dict[str, Any]:
         return {}
 
 
+def hypotheses_config() -> dict[str, Any]:
+    """仮説の枠組み（層の掛け合わせ、歯科経営の定性要因、So What? のふるい）。
+
+    ここに書いてあるのは統計ではなく**業界知識**です。データから出てくる
+    ものではないので、モデルに思いつかせるより枠として与えたほうが確実で、
+    扱う人が入れ替えるものなのでコードではなく設定に置きます。
+
+    無い環境では空で返します。枠が無くても分析は成立します（質は落ちます）。
+    """
+    try:
+        return load_yaml(config_dir() / "hypotheses.yaml")
+    except ConfigNotFound:
+        return {}
+
+
 def prompt_text(name: str) -> str:
     """config/prompts/<name> をそのまま読む。
 

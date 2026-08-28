@@ -146,6 +146,9 @@ class Measure:
     value: float | int | None
     unit: str
     source: str
+    #: どの層の数字か（LAYERS のキー）。層を跨いだ組み合わせだけが構造を
+    #: 見せるので、PATTERN の検算がここを読みます。
+    layer: str = "residents"
     data_year: int | None = None
     definition: str | None = None
     #: 値が大きいことが何を意味するか。competition 系は「多い＝競合が多い」
@@ -162,6 +165,7 @@ class Measure:
         out: dict[str, Any] = {
             "key": self.key,
             "label": self.label,
+            "layer": self.layer,
             "value": self.value,
             "unit": self.unit,
             "data_year": self.data_year,
@@ -201,8 +205,33 @@ MLIT_STATIONS = "国土交通省 国土数値情報 S12（駅別乗降客数）"
 MLIT_LAND = "国土交通省 国土数値情報 L01（地価公示）"
 
 #: (指標キー) -> 定義。`metric` は kg_analyze_point の返す名前。
+#: 数字の「層」。**別々の層を掛け合わせたときにだけ、構造が見えます。**
+#:
+#: 実測：レポートが「人口が市内2位」「医院数も市内2位」と並べて終わっていま
+#: した。どちらも同じ商圏の大きさを別の言葉で言っただけで、掛けても何も出て
+#: きません。「高齢化は進むのに日曜に開けている医院は2割」なら、そこには
+#: 埋まっていない需要があるかもしれない、という話になります。
+#:
+#: 層はモデルに申告させません。指標ごとにここで決めて、PATTERN が跨いだか
+#: どうかは引かれた指標から機械的に数えます（schemas.verify_step1）。
+#:
+#: ``competition`` と ``competition_offer`` を分けているのは、「何院あるか」と
+#: 「その医院が何を、いつ提供しているか」が別の話だからです。医院数と1院
+#: あたり人口を掛けても、それは同じ数の割り算でしかありません。
+LAYERS: dict[str, str] = {
+    "residents": "人口動態（誰が住んでいるか）",
+    "economy": "産業・雇用（どんな経済か）",
+    "competition": "競合の数（何院あるか）",
+    "competition_offer": "競合の提供体制（何を・いつ・いつから）",
+    "access": "交通・立地",
+    "cost": "地価・コスト",
+    "future": "将来推計",
+}
+
+
 MEASURE_SPECS: dict[str, dict[str, Any]] = {
     "population": {
+        "layer": "residents",
         "label": "商圏人口（常住）", "unit": "人", "metric": "population",
         "column": "ms.population", "source": CENSUS, "year": 2020,
         "definition": "常住人口（夜間人口）。500mメッシュを商圏との面積按分で合算。",
@@ -210,24 +239,28 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "growth_metric": "population_growth",
     },
     "child_population": {
+        "layer": "residents",
         "label": "0〜14歳人口", "unit": "人", "metric": "age_0_14",
         "column": "ms.age_0_14", "source": CENSUS, "year": 2020,
         "definition": "0〜14歳の常住人口。小児歯科の需要側の代理指標。",
         "higher_means": "子どもが多い",
     },
     "working_age_population": {
+        "layer": "residents",
         "label": "15〜64歳人口", "unit": "人", "metric": "age_15_64",
         "column": "ms.age_15_64", "source": CENSUS, "year": 2020,
         "definition": "15〜64歳の常住人口。",
         "higher_means": "生産年齢人口が多い",
     },
     "elderly_population": {
+        "layer": "residents",
         "label": "65歳以上人口", "unit": "人", "metric": "age_65_plus",
         "column": "ms.age_65_plus", "source": CENSUS, "year": 2020,
         "definition": "65歳以上の常住人口。",
         "higher_means": "高齢者が多い",
     },
     "child_share": {
+        "layer": "residents",
         "label": "0〜14歳の割合", "unit": "%", "metric": "age_0_14",
         "column": "100.0 * ms.age_0_14 / NULLIF(ms.population, 0)",
         "ratio_of": "population", "scale": 100.0,
@@ -236,6 +269,7 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "higher_means": "子どもの構成比が高い",
     },
     "elderly_share": {
+        "layer": "residents",
         "label": "65歳以上の割合", "unit": "%", "metric": "age_65_plus",
         "column": "100.0 * ms.age_65_plus / NULLIF(ms.population, 0)",
         "ratio_of": "population", "scale": 100.0,
@@ -244,12 +278,14 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "higher_means": "高齢化が進んでいる",
     },
     "households": {
+        "layer": "residents",
         "label": "世帯数", "unit": "世帯", "metric": "households",
         "column": "ms.households", "source": CENSUS, "year": 2020,
         "definition": "商圏内の世帯数。",
         "higher_means": "世帯が多い",
     },
     "population_growth": {
+        "layer": "residents",
         "label": "人口増減率", "unit": "%", "metric": "population_growth",
         "column": "100.0 * ms.population_growth", "scale": 100.0,
         "source": "総務省統計局 国勢調査（2015年・2020年の差）", "year": 2020,
@@ -257,6 +293,7 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "higher_means": "人口が増えている",
     },
     "workers": {
+        "layer": "economy",
         "label": "従業者数（昼）", "unit": "人", "metric": "workers",
         "column": "ms.workers", "source": ECONOMIC_CENSUS, "year": 2021,
         "definition": ("従業地ベースの従業者数。そこで働く人の数であり、昼間人口ではない"
@@ -264,18 +301,21 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "higher_means": "働きに来ている人が多い",
     },
     "establishments": {
+        "layer": "economy",
         "label": "事業所数", "unit": "事業所", "metric": "establishments",
         "column": "ms.establishments", "source": ECONOMIC_CENSUS, "year": 2021,
         "definition": "商圏内の事業所数。",
         "higher_means": "事業所が多い",
     },
     "dental_clinics": {
+        "layer": "competition",
         "label": "歯科医院数", "unit": "院", "metric": "facility_count",
         "column": "ms.facility_count", "source": MHLW, "year": 2026,
         "definition": "商圏内の歯科診療所の数（標榜科目を問わない）。",
         "higher_means": "競合が多い",
     },
     "population_per_clinic": {
+        "layer": "competition",
         "label": "歯科医院1院あたり人口", "unit": "人/院",
         "metric": "population_per_facility",
         "column": "ms.population_per_facility",
@@ -284,6 +324,7 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "higher_means": "1院あたりの人口が多い（＝相対的に競合が少ない）",
     },
     "clinics_per_10k": {
+        "layer": "competition",
         "label": "人口1万人あたり歯科医院数", "unit": "院/万人",
         "metric": "facility_count",
         "column": "10000.0 * ms.facility_count / NULLIF(ms.population, 0)",
@@ -293,18 +334,21 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
         "higher_means": "人口あたりの歯科医院が多い（＝相対的に競合が多い）",
     },
     "station_distance_m": {
+        "layer": "access",
         "label": "最寄り駅までの距離", "unit": "m", "metric": "station_distance_m",
         "column": "ms.station_distance_m", "source": MLIT_STATIONS, "year": 2025,
         "definition": "最寄り駅までの直線距離。徒歩経路の距離ではない。",
         "higher_means": "駅から遠い",
     },
     "daily_passengers": {
+        "layer": "access",
         "label": "最寄り駅の乗降客数", "unit": "人/日", "metric": "daily_passengers",
         "column": "ms.daily_passengers", "source": MLIT_STATIONS, "year": 2024,
         "definition": "最寄り駅の1日あたり乗降客数。同一駅を複数事業者が使う場合は代表値。",
         "higher_means": "最寄り駅の利用者が多い",
     },
     "land_price_yen_per_sqm": {
+        "layer": "cost",
         "label": "地価（公示・中央値）", "unit": "円/m²",
         "metric": "land_price_yen_per_sqm",
         "column": "ms.land_price_yen_per_sqm", "source": MLIT_LAND, "year": 2026,
@@ -321,6 +365,7 @@ MEASURE_SPECS: dict[str, dict[str, Any]] = {
 #: requires の文言が出て、「未確認」であることと、どう呼べば取れるかが残ります。
 SPECIALTY_SPECS: dict[str, dict[str, Any]] = {
     "specialty_clinics": {
+        "layer": "competition_offer",
         "label": "{label}を標榜する歯科医院数", "unit": "院",
         "metric": "facility_specialty_count",
         "column": "ms.facility_specialty_count", "source": MHLW, "year": 2026,
@@ -678,7 +723,7 @@ def _columns_in(expression: str) -> list[str]:
 def _bare(key: str, spec: Mapping[str, Any], metrics: Mapping[str, Any]) -> Measure:
     value = measure_value(spec, metrics)
     return Measure(
-        key=key, label=spec["label"],
+        key=key, label=spec["label"], layer=spec.get("layer", "residents"),
         value=None if value is None else round(value, 4),
         unit=spec["unit"], source=spec["source"], data_year=spec.get("year"),
         definition=spec.get("definition"), higher_means=spec.get("higher_means"),

@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 from kaigyou_core import config as cfg
 from kaigyou_intel import client as llm
-from kaigyou_intel.projection import for_step1
+from kaigyou_intel.projection import citable_keys, for_step1
 from kaigyou_intel.schemas import Step1Output, verify_step1
 
 STEP_NUMBER = 1
@@ -30,6 +30,55 @@ def build_input(dataset: Mapping[str, Any]) -> dict[str, Any]:
     return for_step1(dataset, cfg.analysis_config().get("projection") or {})
 
 
+def min_cross_layer() -> int:
+    """層を跨いだ PATTERN を最低いくつ求めるか。
+
+    **プロンプトと検算で同じ値を使うこと。** 別々に読むと、「3件以上」と
+    書いておきながら 2 件で通る（またはその逆で、書いていない条件で落ちる）
+    状態になります。落ちるとその段はやり直しで、費用も倍かかります。
+    """
+    crossing = cfg.hypotheses_config().get("crossing") or {}
+    return int(crossing.get("min_cross_layer_patterns", 0))
+
+
+def _bullets(items: Any) -> str:
+    return "\n".join(f"- {item}" for item in (items or [])) or "（設定されていません）"
+
+
+def _factor_frame(frame: Mapping[str, Any]) -> str:
+    """歯科経営の定性要因を、プロンプトに差し込める形にする。
+
+    **統計には載らないが開業の成否を分けるもの**の一覧です。データから
+    出てくるものではないので、枠として与えます。ここを渡さないと、
+    research_questions は「この地域はどんな街か」に寄ります。
+
+    設定に置いているのは、これが業界知識だからです（統計と違い、扱う人が
+    入れ替えるもの）。config/hypotheses.yaml を参照。
+    """
+    lines: list[str] = []
+    for factor in frame.get("factors") or []:
+        lines.append(f"### {factor.get('name')}")
+        lines.append("")
+        lines.append(str(factor.get("question") or "").strip())
+        lines.append("")
+        proxies = factor.get("proxies") or []
+        if proxies:
+            lines.append("手元にある代理指標（弱いものも含みます。**強い根拠として"
+                         "使わないでください**）:")
+            for proxy in proxies:
+                lines.append(f"- `{proxy.get('key')}` … {proxy.get('why')}")
+        else:
+            lines.append("手元に代理指標はありません。**この要因について、"
+                         "統計からは何も言えません。**")
+        lines.append("")
+        research = factor.get("research") or []
+        if research:
+            lines.append("外部で調べる価値があること:")
+            lines += [f"- {item}" for item in research]
+            lines.append("")
+    return "\n".join(lines).strip() or "（設定されていません）"
+
+
 def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     """射影済みの入力から STEP1 の出力を作る。
 
@@ -42,8 +91,13 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     limits = cfg.analysis_config().get("limits") or {}
     settings = llm.step_settings(STEP_NUMBER)
 
-    system = cfg.prompt_text(settings["prompt"]).replace(
-        "{max_patterns}", str(limits.get("max_patterns", 5)))
+    frame = cfg.hypotheses_config()
+    system = (cfg.prompt_text(settings["prompt"])
+              .replace("{max_patterns}", str(limits.get("max_patterns", 5)))
+              .replace("{min_cross_layer_patterns}", str(min_cross_layer()))
+              .replace("{crossing_examples}", _bullets(
+                  (frame.get("crossing") or {}).get("examples")))
+              .replace("{qualitative_factors}", _factor_frame(frame)))
 
     user = (
         "以下が基礎商圏データです。この中にある事実だけを使ってください。\n\n"
@@ -57,8 +111,11 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
         raise StepFailed("構造化出力を受け取れませんでした")
 
     # スキーマは形しか保証しません。参照が解決するかはこちらで確かめます。
-    allowed = {m["key"] for m in payload.get("measures") or []}
-    problems = verify_step1(output, allowed)
+    # 層は指標から引きます。モデルの自己申告にすると、形だけ整った出力が
+    # 通ります（「人口 × 競合」と書きながら人口の指標を2つ引く、など）。
+    layer_of = citable_keys(payload)
+    problems = verify_step1(output, set(layer_of), layer_of,
+                            min_cross_layer=min_cross_layer())
     if problems:
         raise StepFailed(
             "参照が解決しませんでした: "
