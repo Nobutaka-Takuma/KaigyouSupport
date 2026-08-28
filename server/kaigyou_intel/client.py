@@ -112,6 +112,10 @@ def step_settings(step_number: int) -> dict[str, Any]:
         # Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は
         # 「調べる」「書き写す」の 2 回に分かれます。
         "prompt_structure": step.get("prompt_structure"),
+        # STEP1 の 1 回目。**その場所に何があるのか**を検索する呼び出しで
+        # 使うプロンプト。統計を読む前に立地類型が決まらないと、同じ
+        # 「昼間人口5万人」をオフィス街としても大学のそばとしても読めます。
+        "prompt_surroundings": step.get("prompt_surroundings"),
         "prompt_version": step.get("prompt_version", f"step{step_number}-v0"),
         "web_search": bool(step.get("web_search")),
         "model": step.get("model") or model.get("id") or "claude-opus-5",
@@ -121,6 +125,10 @@ def step_settings(step_number: int) -> dict[str, Any]:
         # 補った文だけです（そして出典の検算で落ちます）。
         "effort_structure": (step.get("effort_structure") or step.get("effort")
                              or model.get("effort") or "high"),
+        # 周辺施設スキャン用。検索が律速する呼び出しなので、待っている間の
+        # 思考を増やしても待ち時間が伸びるだけです（STEP2 と同じ理由）。
+        "effort_scan": (step.get("effort_scan") or step.get("effort")
+                        or model.get("effort") or "high"),
         "max_tokens": int(step.get("max_tokens") or model.get("max_tokens") or 16000),
     }
 

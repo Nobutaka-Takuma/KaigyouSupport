@@ -83,6 +83,18 @@ limits:
   # 標榜診療科目にはインプラントが無く、届出には自由記載欄しかないためです。
   clinics_to_research: 6
 
+  # STEP1 の周辺施設スキャンに使う検索回数。**0 でスキャンを止められます。**
+  #
+  # 止める口を残しているのは、これが唯一の「毎回必ず走る検索」だからです。
+  # レート制限に当たったときや、外部に出られない環境で試すときに、設定
+  # 1 行で切れないと段ごと落ちます。
+  #
+  # 2 回にしているのは、ここで欲しいのが**全体像**だからです。個々の施設を
+  # 詰めるのは STEP2 の仕事で、あちらは PATTERN ごとに分かれて同時に走ります。
+  # ここで丁寧に潰すと、そのぶんそのまま実行時間が伸びます（検索は 1 回の
+  # 呼び出しの中で直列に回り、増えていく文脈を毎回読み直すため）。
+  surroundings_searches: 2
+
 # 要件 §9 の情報源優先順位。API 側で強制します（プロンプトでのお願いは
 # 守られないことがあるので、守らせられるものは仕組みで守らせます）。
 search:
@@ -185,15 +197,34 @@ report:
 
 steps:
   1:
-    name: 商圏特徴抽出
+    name: 周辺施設スキャンと商圏特徴抽出
+    # 2 回に分かれます。1 回目（prompt_surroundings）で**その場所に何が
+    # あるのか**を検索し、2 回目（prompt）で基礎データと合わせて FACT と
+    # PATTERN を作ります。
+    #
+    # なぜ検索を先に置くか。500m メッシュの統計は「そこに何人いるか」を
+    # 教えますが、**「そこが何なのか」は教えません。** 大学のキャンパスも
+    # ショッピングモールも総合病院も、統計の上では同じ「人がいる区画」です。
+    # 同じ昼間人口5万人でも、商業施設のテナントなら商圏は徒歩圏ではなく
+    # 施設の集客圏になり、半径1km の数字を別の意味に読み直すことになります。
+    # 順番が逆では、この読み直しが起きたときには仮説が出来上がっています。
+    prompt_surroundings: step1_surroundings.md
     prompt: step1_features.md
-    prompt_version: step1-v1.8
+    prompt_version: step1-v1.9
     # 既に算出済みの順位とパーセンタイルから FACT を選び、食い違いを見つける
     # 段です。深く考えるより、たくさん見て取りこぼさないほうが効きます。
     # effort: high では思考だけで 10,094 トークン出ていました。
     effort: medium
-    # 要件 §6：Web検索禁止。ここで外部情報が混ざると、FACT と
-    # EXTERNAL FACT の区別が最初の段階で壊れます。
+    # 1 回目は検索が律速するので、待っている間の思考は増やしても待ち時間が
+    # 伸びるだけです（STEP2 と同じ理由）。
+    effort_scan: low
+    # 要件 §6：Web検索禁止。**これは 2 回目（FACT と PATTERN を作る呼び出し）
+    # の設定です。** 1 回目のスキャンは web_search=True を明示して呼びます。
+    #
+    # 禁止の理由は「FACT と EXTERNAL FACT の区別が最初の段階で壊れる」こと
+    # でした。その区別は保っています。FACT が引けるのは measures と citable
+    # のキーだけで、verify_step1 が機械的に検算します。スキャンの結果は
+    # surroundings という別の欄に、出典 URL 付きで入ります。
     web_search: false
   2:
     name: 外部コンテクスト調査
@@ -203,7 +234,7 @@ steps:
     # 事実が増えて、出典の照合が合わなくなります。
     prompt: step2_research.md
     prompt_structure: step2_structure.md
-    prompt_version: step2-v1.5
+    prompt_version: step2-v1.6
     # 検索が律速する段で、待っている間の思考は増やしても意味がありません。
     effort: medium
     # 2 回目は**書き写すだけ**です。ここで考えさせると、調べていないことを
@@ -213,7 +244,7 @@ steps:
   3:
     name: 需要形成・患者分析と経営判断
     prompt: step3_demand.md
-    prompt_version: step3-v1.4
+    prompt_version: step3-v1.5
     # ここが判断の段です。**深く考えるだけの価値があるのはここと STEP4 だけ**
     # なので、下げません。
     effort: high
@@ -224,7 +255,7 @@ steps:
     # 起こし直します。書き直しであって、書き足しではありません。
     name: 顧客提出用レポート
     prompt: step4_client_report.md
-    prompt_version: step4-v1.3
+    prompt_version: step4-v1.4
     effort: high
     # 要件 §16：新しい外部事実を追加しない。
     web_search: false

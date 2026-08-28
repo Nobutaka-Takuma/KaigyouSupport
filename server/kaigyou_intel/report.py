@@ -32,12 +32,17 @@ _SOURCE_LABEL = {
 
 def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
                 sources: Sequence[Mapping[str, Any]] = (),
-                judgement: Mapping[str, Any] | None = None) -> str:
+                judgement: Mapping[str, Any] | None = None,
+                surroundings: Mapping[str, Any] | None = None) -> str:
     """レポート 1 本ぶんの Markdown。
 
     ``judgement`` は STEP3 の出力（``decision`` と ``actions``）です。散文は
     最終段が書きますが、開業方針は**欄のまま**載せます。散文に溶かすと
     「誰と競争しないか」が抜けても気づけません。表なら空欄が見えます。
+
+    ``surroundings`` は STEP1 の周辺施設スキャンです。同じく欄のまま載せます。
+    立地類型と施設名は、統計の数字をどう読むかを決める前提なので、本文の
+    散文に溶けて消えると、読み手はその前提を確かめられません。
     """
     location = dataset.get("location") or {}
     query = dataset.get("query") or {}
@@ -61,6 +66,7 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
               else _working_body(output))
 
     lines += _legend_block(output)
+    lines += _surroundings_block(surroundings)
     lines += _figures_block(dataset)
     lines += _sources_block(sources)
     lines += _provenance_block(dataset)
@@ -76,6 +82,65 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
 #
 # LLM を通さないので、桁の取り違えも書き落としも起きません。トークンも
 # 使いません。
+
+#: 立地類型ごとの、読み手への注意書き。**類型が変わると商圏の意味が変わります。**
+#: いちばん危ないのは商業施設で、半径何 m の統計をそのまま商圏として読むと
+#: 大きく外します。
+_SETTING_NOTE = {
+    "商業施設内・隣接":
+        "**この候補地の商圏は、半径で測った円ではありません。** 商業施設の"
+        "テナントとして開業する場合、来院するのは施設に来た人です。付録の"
+        "「商圏の基礎数値」は徒歩圏の居住者を数えたもので、施設の集客圏とは"
+        "別物です。施設の来館者数・商圏設定は運営会社の資料でしか分かりません。",
+    "オフィス街":
+        "昼と夜で人が入れ替わります。付録の居住者の数字は夜の姿で、"
+        "平日昼に来られる人の数ではありません。",
+    "郊外ロードサイド":
+        "来院手段はほぼ自動車です。付録の利用交通手段（通勤・通学）が"
+        "その代理になりますが、**来院手段そのものではありません。**",
+    "不明":
+        "立地類型を確定できませんでした。**現地で確かめてください。**"
+        "以下の数字は、どの類型でも同じように読めるものではありません。",
+}
+
+
+def _surroundings_block(surroundings: Mapping[str, Any] | None) -> list[str]:
+    """候補地の周りに何があるか。**統計の前に来る話です。**
+
+    500m メッシュの統計は「そこに何人いるか」を教えますが、「そこが何なのか」
+    は教えません。大学のキャンパスもショッピングモールも総合病院も、統計の
+    上では同じ「人がいる区画」です。ここは外部情報でしか埋まりません。
+
+    節ごと出さない場合があります（スキャンが動かなかったとき）。**「周辺に
+    施設は無い」ではありません**ので、空の表を出して埋めた顔をさせません。
+    """
+    if not surroundings:
+        return []
+    setting = str(surroundings.get("setting") or "").strip()
+    facilities = surroundings.get("facilities") or []
+    if not setting and not facilities:
+        return []
+
+    lines = ["## 候補地の周辺（外部情報）", ""]
+    if setting:
+        reason = str(surroundings.get("setting_reason") or "").strip()
+        lines += [f"**立地類型：{setting}**" + (f" — {reason}" if reason else ""), ""]
+        note = _SETTING_NOTE.get(setting)
+        if note:
+            lines += [note, ""]
+
+    if facilities:
+        lines += _table(
+            ["施設", "種類", "位置", "規模", "歯科医院にとって何が変わるか"],
+            [[f.get("name") or "-", f.get("category") or "-",
+              f.get("where") or "-", f.get("scale") or "—",
+              f.get("why_it_matters") or "-"] for f in facilities])
+        lines += ["出典は「出典（外部情報）」にあります。**規模の「—」は"
+                  "0 ではなく、確認できなかったという意味です。**", ""]
+    if str(surroundings.get("note") or "").strip():
+        lines += [str(surroundings["note"]).strip(), ""]
+    return lines
+
 
 def _basis_note(dataset: Mapping[str, Any]) -> list[str]:
     """「人数」の数え方が3通りあることを、表の並びの中で1回だけ言う。
@@ -809,6 +874,12 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
                     "AND step_number = 3 AND status = 'completed'", (job_id,))
         step3 = cur.fetchone()
         judgement = (step3 or {}).get("output_json") or None
+        # 周辺施設は STEP1 が最初に調べています。立地類型は数字の読み方を
+        # 決める前提なので、欄のまま載せます。
+        cur.execute("SELECT output_json FROM analysis_steps WHERE job_id = %s "
+                    "AND step_number = 1 AND status = 'completed'", (job_id,))
+        step1 = cur.fetchone()
+        surroundings = ((step1 or {}).get("output_json") or {}).get("surroundings")
 
     named = dict(dataset)
     if row and row["location_name"]:
@@ -816,7 +887,7 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
                              "name": row["location_name"]}
 
     with conn.cursor() as cur:
-        markdown = to_markdown(output, named, sources, judgement)
+        markdown = to_markdown(output, named, sources, judgement, surroundings)
         cur.execute(
             """
             INSERT INTO analysis_reports (job_id, report_json, report_markdown,

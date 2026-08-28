@@ -444,6 +444,11 @@ def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
     clinics = (inside.get("items") or [])[: int(limits.get("clinics_to_research", 6))]
     return {
         "location": dataset.get("location") or {},
+        # STEP1 が最初に調べた「その場所に何があるか」。**再調査させないため
+        # に渡します。** 無いと、PATTERN の背景を調べるついでにキャンパスや
+        # モールを調べ直し、限られた検索回数をそこで使います。ここでの用は
+        # 「もう分かっていること」を示すことで、深掘りは PATTERN 側の仕事です。
+        "surroundings": step1.get("surroundings"),
         "patterns": [
             {"id": p.get("id"), "title": p.get("title"),
              "evidence_summary": p.get("evidence_summary") or p.get("title"),
@@ -491,7 +496,11 @@ def for_step3(step1: Mapping[str, Any], step2: Mapping[str, Any],
         "cost": _cost_summary(dataset),
         "regulation": dataset.get("regulation"),
         "scores": dataset.get("scores"),
-        "step1": {"facts": step1.get("facts"), "patterns": step1.get("patterns")},
+        "step1": {"facts": step1.get("facts"), "patterns": step1.get("patterns"),
+                  # 立地類型は判断の前提です。商業施設のテナントなら、商圏は
+                  # 徒歩圏ではなく施設の集客圏で、同じ半径1km の数字を別の
+                  # 意味に読むことになります。
+                  "surroundings": step1.get("surroundings")},
         "step2": {"external_facts": step2.get("external_facts"),
                   "hypotheses": step2.get("hypotheses"),
                   "unanswered": step2.get("unanswered")},
@@ -516,7 +525,8 @@ def for_step4(step1: Mapping[str, Any], step2: Mapping[str, Any],
         "location": dataset.get("location"),
         "query": dataset.get("query"),
         "step1": {"facts": step1.get("facts"), "patterns": step1.get("patterns"),
-                  "not_determinable": step1.get("not_determinable")},
+                  "not_determinable": step1.get("not_determinable"),
+                  "surroundings": step1.get("surroundings")},
         "step2": {"external_facts": step2.get("external_facts"),
                   "hypotheses": step2.get("hypotheses"),
                   "unanswered": step2.get("unanswered")},

@@ -536,8 +536,17 @@ def test_the_step1_schema_does_not_ask_for_benchmarks():
     パーセンタイルは /api/dataset が算出済みで、FACT は measure_key で参照
     します。スキーマに benchmarks を戻すと、LLM が数字を作り始めます。
     """
-    assert set(Step1Output.model_fields) == {"facts", "patterns", "not_determinable"}
+    assert set(Step1Output.model_fields) == {
+        "facts", "patterns", "not_determinable", "surroundings"}
     assert "measure_key" in Fact.model_fields
+    # surroundings は外部情報の置き場所で、FACT の材料ではありません。
+    # 数字を伴う欄（percentile / rank / benchmark）を足さないこと。
+    from kaigyou_intel.schemas import NearbyFacility
+
+    assert set(NearbyFacility.model_fields) == {
+        "name", "category", "where", "scale", "why_it_matters", "source_url"}
+    assert NearbyFacility.model_fields["scale"].annotation == (str | None), \
+        "規模は文字列。数値欄にすると、統計の数字と同じ確かさに見えます"
 
 
 # ------------------------------------------------------------------ Job
@@ -666,12 +675,21 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     """
     from kaigyou_intel.steps import step1_features
 
-    captured: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
 
     def fake_ask(*, step_number, system, user, schema=None, tools=None,
                  web_search=None, effort=None, max_uses=None):
-        captured.update(step_number=step_number, system=system, user=user,
-                        schema=schema, tools=tools)
+        calls.append({"step_number": step_number, "system": system, "user": user,
+                      "schema": schema, "tools": tools, "web_search": web_search,
+                      "effort": effort, "max_uses": max_uses})
+        if schema is None:   # 1 回目：周辺施設スキャン
+            return llm.Result(
+                parsed=None,
+                text="〇〇モール（約120店舗）に隣接。徒歩5分に〇〇大学。",
+                sources=[{"url": "https://example.go.jp/mall",
+                          "title": "商業施設の概要"}],
+                usage=llm.Usage(input_tokens=300, output_tokens=100),
+                model="claude-opus-5")
         return llm.Result(parsed=_crossing_output(), text="",
                           usage=llm.Usage(input_tokens=1000, output_tokens=200),
                           model="claude-opus-5")
@@ -679,23 +697,193 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     monkeypatch.setattr(llm, "ask", fake_ask)
     output, usage, sources = step1_features.run(step1_features.build_input(dataset))
 
-    assert captured["step_number"] == 1
-    assert captured["tools"] is None, "STEP1 に道具を渡してはいけない（Web検索禁止）"
-    assert captured["schema"] is Step1Output
+    scan, main = calls
+    assert [c["step_number"] for c in calls] == [1, 1]
+    # 1 回目は検索する呼び出し。**先に場所を調べてから統計を読みます。**
+    assert scan["web_search"] is True
+    assert scan["schema"] is None, "検索と構造化出力は同じ呼び出しで併用しない"
+    assert scan["max_uses"] == cfg.analysis_config()["limits"]["surroundings_searches"]
+    assert "{max_searches}" not in scan["system"]
+    # 統計は渡しません。渡すと、検索せずに手元の数字を言い換えたものが
+    # 「周辺にはこういう施設がある」として返ってきます。
+    assert "measures" not in scan["user"]
+
+    # 2 回目は要件 §6 のまま。道具を渡さず、構造化出力で受けます。
+    assert main["tools"] is None, "STEP1 の本体に道具を渡してはいけない"
+    assert main["schema"] is Step1Output
+    # スキャンの結果と、取得した URL の一覧が届いていること。
+    assert "〇〇モール" in main["user"]
+    assert "https://example.go.jp/mall" in main["user"]
     # プロンプトに上限が埋め込まれていること。
     limit = cfg.analysis_config()["limits"]["max_patterns"]
-    assert f"最大 {limit} 個" in captured["system"]
-    assert "{max_patterns}" not in captured["system"]
+    assert f"最大 {limit} 個" in main["system"]
+    assert "{max_patterns}" not in main["system"]
     # 定性要因の枠と、層の掛け合わせの指示が入っていること。
-    assert "デンタルIQ" in captured["system"]
-    assert "{qualitative_factors}" not in captured["system"]
-    assert "{crossing_examples}" not in captured["system"]
-    assert usage.input_tokens == 1000
+    assert "デンタルIQ" in main["system"]
+    assert "{qualitative_factors}" not in main["system"]
+    assert "{crossing_examples}" not in main["system"]
+    # 使用量は 2 回ぶんの合計。片方だけだと費用が半分に見えます。
+    assert usage.input_tokens == 1300
+    assert usage.output_tokens == 300
     assert output["facts"][0]["measure_key"] == "elderly_share"
     # measures に無いキーも FACT の根拠として引けること。診療時間は
     # measures ではなく citable にあります。
     assert output["facts"][1]["measure_key"] == "clinic_hours.sunday"
+    # スキャンで取得した URL が出典として返ること。
+    assert [s["url"] for s in sources] == ["https://example.go.jp/mall"]
+
+
+def _scan_result(url: str = "https://example.go.jp/mall"):
+    return llm.Result(parsed=None,
+                      text="〇〇モール（約120店舗）に隣接。",
+                      sources=[{"url": url, "title": "商業施設の概要"}],
+                      usage=llm.Usage(input_tokens=300, output_tokens=100),
+                      model="m")
+
+
+def _with_surroundings(url: str = "https://example.go.jp/mall"):
+    from kaigyou_intel.schemas import NearbyFacility, Surroundings
+
+    output = _crossing_output()
+    output.surroundings = Surroundings(
+        setting="商業施設内・隣接",
+        setting_reason="〇〇モールに隣接する区画です。",
+        facilities=[NearbyFacility(
+            name="〇〇モール", category="大型商業施設", where="商圏内",
+            scale="約120店舗",
+            why_it_matters="商圏が徒歩圏ではなく施設の集客圏になります。",
+            source_url=url)])
+    return output
+
+
+def _stub_step1(monkeypatch, scan, main):
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None, effort=None, max_uses=None):
+        if schema is None:
+            if isinstance(scan, Exception):
+                raise scan
+            return scan
+        return main
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+
+
+def test_step1_keeps_going_when_the_surroundings_scan_fails(dataset, monkeypatch):
+    """スキャンは付随物です。**落ちても段ごと捨てません。**
+
+    FACT 十数件と PATTERN の生成をやり直すと、時間も費用も倍かかります
+    （実測で 1 回 $1 前後）。落ちたことは not_determinable に残します。
+    """
+    from kaigyou_intel.steps import step1_features
+
+    _stub_step1(monkeypatch, RuntimeError("rate limited"),
+                llm.Result(parsed=_with_surroundings(), usage=llm.Usage(), model="m"))
+    output, _usage, sources = step1_features.run(step1_features.build_input(dataset))
+
+    assert output["facts"], "スキャンが落ちても本題は出ること"
+    # 検索が動いていないのに施設が並んでいる＝モデルの記憶です。落とします。
+    assert output["surroundings"] is None
+    assert any("スキャンは完了していません" in x
+               for x in output["not_determinable"]), \
+        "黙って消すと「周辺に施設は無い」と読まれます"
     assert sources == []
+
+
+def test_step1_drops_a_facility_whose_url_was_never_retrieved(dataset, monkeypatch):
+    """モデルは実在しそうな URL を書けます。取得した集合に無ければ出典ではない。
+
+    ただし**段は落としません**（STEP2 の外部事実と同じ扱い）。落としたことは
+    note に残します。
+    """
+    from kaigyou_intel.steps import step1_features
+
+    _stub_step1(monkeypatch, _scan_result(),
+                llm.Result(parsed=_with_surroundings("https://invented.example.com/x"),
+                           usage=llm.Usage(), model="m"))
+    output, _usage, sources = step1_features.run(step1_features.build_input(dataset))
+
+    assert output["surroundings"]["facilities"] == []
+    assert "〇〇モール" in output["surroundings"]["note"]
+    assert "出典を確かめられなかった" in output["surroundings"]["note"]
+    # 引用されなかった URL も記録には残ります。ただし印は付きません。
+    assert [s["pattern_id"] for s in sources] == [None]
+
+
+def test_step1_marks_the_urls_a_facility_actually_cited(dataset, monkeypatch):
+    """出典一覧に載るのは印の付いたものだけ。付けないと、本文が施設名を
+    書いているのに出典がどこにも出ません。"""
+    from kaigyou_intel.steps import step1_features
+
+    _stub_step1(monkeypatch, _scan_result(),
+                llm.Result(parsed=_with_surroundings(), usage=llm.Usage(), model="m"))
+    output, _usage, sources = step1_features.run(step1_features.build_input(dataset))
+
+    assert output["surroundings"]["setting"] == "商業施設内・隣接"
+    assert [s["pattern_id"] for s in sources] == ["周辺施設"]
+
+
+def test_the_surroundings_scan_can_be_switched_off(dataset, monkeypatch):
+    """唯一の「毎回必ず走る検索」なので、設定 1 行で切れること。
+
+    レート制限に当たったときや、外部に出られない環境で試すときに、切る口が
+    無いと段ごと落ちます。
+    """
+    from kaigyou_intel.steps import step1_features
+
+    assert step1_features.surroundings_searches({"surroundings_searches": 0}) == 0
+    scan = step1_features.scan_surroundings({}, {"surroundings_searches": 0})
+    assert not scan.usable
+    assert "0" in (scan.error or "")
+
+
+def test_the_surroundings_scan_is_not_given_the_statistics(dataset):
+    """統計を渡すと、検索せずに手元の数字を言い換えたものが「周辺にはこういう
+    施設がある」として返ってきます（STEP2 で実際にそうなりました）。
+
+    駅名は渡します。緯度経度だけでは検索の取っかかりがありません。
+    """
+    from kaigyou_intel.steps import step1_features
+
+    payload = step1_features.build_input(dataset)
+    asked = step1_features.scan_input(payload)
+    assert set(asked) == {"prefecture", "municipality", "address", "lat", "lng",
+                          "radius_m", "nearest_station", "stations_in_radius"}
+    assert "measures" not in asked and "demand" not in asked
+
+
+def test_the_surroundings_reach_every_later_step(dataset):
+    """立地類型は数字の読み方を決める前提です。**後段に届かないと意味が
+    ありません。** STEP2 に届かなければ同じ施設を調べ直し、STEP3 に届かなければ
+    商業施設の商圏を徒歩圏として判断します。
+    """
+    from kaigyou_intel.projection import for_step2, for_step3, for_step4
+
+    step1 = _with_surroundings().model_dump()
+    limits = cfg.analysis_config()["limits"]
+    assert for_step2(step1, dataset, limits)["surroundings"]["setting"] \
+        == "商業施設内・隣接"
+    step2 = {"external_facts": [], "hypotheses": [], "unanswered": []}
+    assert for_step3(step1, step2, dataset)["step1"]["surroundings"]
+    assert for_step4(step1, step2, {}, dataset)["step1"]["surroundings"]
+
+
+def test_the_report_shows_the_setting_and_what_it_changes():
+    """商業施設のテナントで、半径1km の人口をそのまま商圏として読むのが
+    いちばん大きな読み違いです。表の隣で1回言います。"""
+    from kaigyou_intel.report import _surroundings_block
+
+    text = "\n".join(_surroundings_block(_with_surroundings().model_dump()["surroundings"]))
+    assert "商業施設内・隣接" in text
+    assert "半径で測った円ではありません" in text
+    assert "〇〇モール" in text and "約120店舗" in text
+    # 規模が空のときに 0 に見えないこと。
+    blank = _with_surroundings().model_dump()["surroundings"]
+    blank["facilities"][0]["scale"] = None
+    assert "0 ではなく" in "\n".join(_surroundings_block(blank))
+    # スキャンが動かなかったときは節ごと出しません。空の表は「周辺に施設が
+    # 無い」に見えます。
+    assert _surroundings_block(None) == []
+    assert _surroundings_block({"setting": "", "facilities": []}) == []
 
 
 def test_step1_refuses_an_output_whose_references_do_not_resolve(dataset, monkeypatch):

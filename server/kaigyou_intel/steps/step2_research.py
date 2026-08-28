@@ -86,18 +86,24 @@ class _Finding:
 
 
 def _research_one(pattern: Mapping[str, Any], location: Mapping[str, Any],
+                  surroundings: Mapping[str, Any] | None,
                   system: str, max_uses: int) -> _Finding:
     """PATTERN 1 つを調べる。**失敗しても例外を上げません。**
 
     4 本のうち 1 本が落ちただけで、通った 3 本ぶんの検索と時間を捨てるのは
     割に合いません。落ちたことは呼び出し側が unanswered に書き残します。
+
+    ``surroundings`` は STEP1 が最初に調べた「その場所に何があるか」です。
+    **再調査させないために渡します。** 無いと、各担当がめいめいにキャンパスや
+    モールを調べ直し、限られた検索回数をそこで使い切ります。
     """
     pattern_id = str(pattern.get("id") or "P000")
     asked = ("以下が STEP1 で見つかった商圏の特徴のうち、**あなたが調べる 1 つ**です。"
              "この PATTERN の research_questions にだけ答えてください。"
              "他の PATTERN は別の担当が調べています。\n\n"
              "```json\n"
-             + json.dumps({"location": location, "pattern": pattern},
+             + json.dumps({"location": location, "surroundings": surroundings,
+                           "pattern": pattern},
                           ensure_ascii=False, indent=1)
              + "\n```")
     try:
@@ -145,7 +151,8 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     skipped = [str(p["id"]) for p in patterns[keep:]]
     patterns = patterns[:keep]
 
-    findings = _research_all(patterns, location, research_prompt, per_pattern)
+    findings = _research_all(patterns, location, payload.get("surroundings"),
+                             research_prompt, per_pattern)
 
     retrieved = [s for finding in findings for s in finding.sources]
     text = "\n\n".join(f"## {f.pattern_id}\n\n{f.text}"
@@ -222,7 +229,8 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
 
 
 def _research_all(patterns: Sequence[Mapping[str, Any]],
-                  location: Mapping[str, Any], system: str,
+                  location: Mapping[str, Any],
+                  surroundings: Mapping[str, Any] | None, system: str,
                   per_pattern: int) -> list[_Finding]:
     """PATTERN ごとの調査を同時に走らせる。
 
@@ -235,9 +243,11 @@ def _research_all(patterns: Sequence[Mapping[str, Any]],
     limit = max(1, int((cfg.analysis_config().get("limits") or {})
                        .get("parallel_research", 4)))
     if limit == 1 or len(patterns) == 1:
-        return [_research_one(p, location, system, per_pattern) for p in patterns]
+        return [_research_one(p, location, surroundings, system, per_pattern)
+                for p in patterns]
     with ThreadPoolExecutor(max_workers=min(limit, len(patterns))) as pool:
-        futures = [pool.submit(_research_one, p, location, system, per_pattern)
+        futures = [pool.submit(_research_one, p, location, surroundings, system,
+                               per_pattern)
                    for p in patterns]
         return [f.result() for f in futures]
 

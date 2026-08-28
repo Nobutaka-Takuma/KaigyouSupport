@@ -48,6 +48,55 @@ class Pattern(BaseModel):
         description="この特徴の背景を外部情報で調べるための質問", min_length=1)
 
 
+#: 周辺施設の種類。**候補地の性格を決めるもの**だけを並べます。コンビニも
+#: 飲食店もどこにでもあるので、あっても判断は動きません。
+FacilityCategory = Literal[
+    "大学・専門学校", "大型商業施設", "病院・介護施設", "事業所・工場",
+    "学校（小中高）", "官公庁・公共施設", "住宅・再開発", "その他",
+]
+
+#: 候補地の立地類型。**これが決まらないと商圏の読み方が決まりません。**
+#: 商業施設内のテナントなら、商圏は徒歩圏ではなく施設の集客圏です。同じ
+#: 半径1km のデータを、まるで違う意味に読むことになります。
+LocationSetting = Literal[
+    "住宅地の路面", "駅前", "商業施設内・隣接", "オフィス街",
+    "郊外ロードサイド", "不明",
+]
+
+
+class NearbyFacility(BaseModel):
+    """候補地の周りにある、判断を動かす施設 1 件。"""
+
+    name: str = Field(
+        description="固有名詞。「大型商業施設」のような一般名詞は書かない")
+    category: FacilityCategory
+    where: str = Field(description="候補地から見た位置。「商圏内」「約1.2km北」など")
+    scale: str | None = Field(
+        default=None,
+        description="学生数・店舗数・病床数・従業員数など。分からなければ null")
+    why_it_matters: str = Field(
+        description="この施設があることで歯科医院の何が変わるか。"
+                    "何も変わらないなら挙げないこと")
+    source_url: str = Field(description="今回の検索で取得した URL から選ぶ")
+
+
+class Surroundings(BaseModel):
+    """候補地の周辺施設と立地類型。**統計の前に、まず何がある場所なのか。**
+
+    500m メッシュの統計は「そこに何人いるか」を教えますが、「そこが何なのか」
+    は教えません。大学のキャンパスも、ショッピングモールも、総合病院も、
+    メッシュ統計の上では同じ「人がいる区画」です。ここだけは外部情報でしか
+    分かりません。
+    """
+
+    setting: LocationSetting
+    setting_reason: str = Field(description="なぜその類型と判断したか。1〜2文")
+    facilities: list[NearbyFacility] = Field(default_factory=list)
+    note: str = Field(
+        default="",
+        description="調べたが確認できなかったこと。無ければ空文字")
+
+
 class Step1Output(BaseModel):
     """STEP1（商圏特徴抽出）の出力。
 
@@ -62,6 +111,11 @@ class Step1Output(BaseModel):
     not_determinable: list[str] = Field(
         default_factory=list,
         description="基礎データからは判断できなかった論点")
+    #: 周辺施設スキャンの結果。**これは外部情報なので FACT ではありません。**
+    #: FACT は measures と citable のキーしか引けないという規則は変えません。
+    #: ここが効くのは PATTERN の見立てと research_questions で、つまり
+    #: 「何を調べに行くか」のほうです。
+    surroundings: Surroundings | None = None
 
 
 class TraceProblem(BaseModel):
@@ -232,6 +286,37 @@ def normalize_url(url: str) -> str:
         trimmed = trimmed[4:]
     host, _, rest = trimmed.partition("/")
     return host.lower() + ("/" + rest if rest else "")
+
+
+def drop_unverifiable_facilities(output: Step1Output,
+                                retrieved_urls: set[str]) -> list[str]:
+    """周辺施設のうち、出典を確かめられなかったものを落とす。
+
+    **段ごと落としません。** 施設スキャンは STEP1 の本題（FACT と PATTERN）の
+    付随物で、その 1 件のために FACT 十数件と PATTERN の生成を捨てるのは
+    割に合いません（STEP2 で同じ判断をしています）。
+
+    落としたことは ``surroundings.note`` に書き残します。黙って消すと、
+    次に読む人には「その施設は無かった」と読めてしまいます。
+    """
+    if output.surroundings is None:
+        return []
+    known = {normalize_url(u) for u in retrieved_urls if u}
+    kept, dropped = [], []
+    for facility in output.surroundings.facilities:
+        if normalize_url(facility.source_url) in known:
+            kept.append(facility)
+        else:
+            dropped.append(facility.name)
+    if not dropped:
+        return []
+    output.surroundings.facilities = kept
+    note = output.surroundings.note.strip()
+    output.surroundings.note = (note + " " if note else "") + (
+        f"周辺施設 {len(dropped)}件（{'、'.join(dropped)}）は、引用された URL が"
+        "今回の検索結果に含まれていなかったため除外しました。"
+        "実在しないという意味ではなく、出典を確かめられなかったという意味です。")
+    return dropped
 
 
 def verify_step2(output: Step2Output, allowed_pattern_ids: set[str],
