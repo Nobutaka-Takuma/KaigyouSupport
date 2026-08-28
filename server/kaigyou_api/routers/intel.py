@@ -304,7 +304,7 @@ def download_report(job_id: str,
     """Markdown をそのまま返します。
 
     ブラウザ側で Blob を組み立てるより、サーバが Content-Disposition を付けて
-    返すほうが確実です（保存先の名前も揃います）。
+    返すほうが確実です。**名前を決める場所が 1 か所になります。**
     """
     _require_tables(conn)
     job = jobs.get_job(conn, job_id)
@@ -317,7 +317,10 @@ def download_report(job_id: str,
     markdown = report_module.markdown_for(conn, job_id)
     if markdown is None:
         raise HTTPException(404, detail="レポートはまだありません。")
-    name = report_module._file_name(job_id, job)
+    # 名前はサーバが決めます。地図の画面もこの口を通るので、どこから
+    # 保存しても同じ名前になります（以前はブラウザ側で Blob を組み立てて
+    # いて、そちらだけ「商圏分析レポート.md」で固定でした）。
+    name = report_module.file_name_for(conn, job_id)
     return Response(
         content=markdown.encode("utf-8"),
         media_type="text/markdown; charset=utf-8",

@@ -920,8 +920,15 @@ def write_file(conn: psycopg.Connection, job_id: str,
     手に入らないのでは、「レポートを作る道具」として不完全です。DB の中に
     あることと、手元にファイルがあることは違います。
 
+    名前は ``file_name_for`` が決めます。画面から保存したときと同じ名前に
+    するためで、そちらと違う名前をここで作ると、同じ文書が別の名前で
+    手元に 2 つ残ります。
+
     同じジョブを何度やり直しても同じ名前に上書きします。日付ごとに増やすと、
-    どれが最新か分からなくなります。
+    どれが最新か分からなくなります。**同じ地点を別々のジョブで分析して表題も
+    同じになった場合、後のほうが前のファイルを置き換えます。** どちらも DB に
+    残っていて画面から取り直せるので、名前に id を足して読めなくするより、
+    こちらを採りました。
 
     **書けなければ黙って諦めます。** ホスティングされた関数のファイル
     システムは読み取り専用です（実測：Vercel で
@@ -939,35 +946,73 @@ def write_file(conn: psycopg.Connection, job_id: str,
     settings = (cfg.analysis_config().get("report") or {})
     target = Path(directory or settings.get("output_dir") or DEFAULT_OUTPUT_DIR)
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT location_name, latitude, longitude, radius_m, created_at "
-                    "FROM analysis_jobs WHERE id = %s", (job_id,))
-        job = cur.fetchone()
     try:
         target.mkdir(parents=True, exist_ok=True)
-        path = target / _file_name(job_id, job)
+        path = target / file_name_for(conn, job_id)
         path.write_text(markdown, encoding="utf-8")
     except OSError:
         return None
     return path
 
 
-def _file_name(job_id: str, job: Mapping[str, Any] | None) -> str:
-    """人が見て分かる名前に。地点名が無ければ座標で。
+#: ファイル名の長さ。Windows のパス上限（260 文字）に対して、深いフォルダに
+#: 置いても収まる程度に切ります。表題がこれより長いことは滅多にありません
+#: （実測：「商圏分析レポート：亀有駅前（葛飾区）候補地の開業診断」で 29 文字）。
+_NAME_LIMIT = 80
 
-    ファイル名に使えない文字は落とします（Windows で `/` や `:` が入ると
-    保存できません）。
+#: Windows がファイル名に使えない文字。全角の「：」「？」は使えるので
+#: 落としません——表題の「商圏分析レポート：…」がそのまま名前になります。
+_UNUSABLE = '\\/:*?"<>|'
+
+
+def file_name_for(conn: psycopg.Connection, job_id: str) -> str:
+    """このジョブのレポートのファイル名。**入口がどこでも同じ名前にします。**
+
+    以前は 2 通りありました。マイレポートからの保存は
+    ``商圏分析_35.76542_139.85036_20260828_ff4ce176.md``、地図の画面からの
+    保存は ``商圏分析レポート.md``（ブラウザ側で Blob を組み立てていて、
+    名前が固定でした）。同じ文書が別の名前で 2 つ手元に残ります。
+
+    名前は**画面に出ている表題**にします。一覧では
+    「商圏分析レポート：亀有駅前（葛飾区）候補地の開業診断」と見えていて、
+    保存したファイルが座標と16進数では、あとから探せません。
     """
-    if not job:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT j.location_name, j.latitude, j.longitude,
+                   (r.report_json ->> 'title') AS title
+            FROM analysis_jobs j
+            LEFT JOIN analysis_reports r ON r.job_id = j.id
+            WHERE j.id = %s
+        """, (job_id,))
+        row = cur.fetchone()
+    return file_name(job_id, row)
+
+
+def file_name(job_id: str, row: Mapping[str, Any] | None) -> str:
+    """表題からファイル名を作る。無ければ地点名、それも無ければ座標。
+
+    表題は最終段が付けたもので、一覧に出ているのと同じ文字列です。まだ
+    レポートが無いジョブでは空なので、同じ形（「商圏分析レポート：」＋
+    地点）に落とします。名前の形が入口によって変わらないようにするためです。
+    """
+    if not row:
         return f"{job_id[:8]}.md"
-    name = (job.get("location_name") or "").strip()
+    name = str(row.get("title") or "").strip()
     if not name:
-        name = f"{job['latitude']:.5f}_{job['longitude']:.5f}"
-    for bad in '\\/:*?"<>|\n\t':
+        where = str(row.get("location_name") or "").strip()
+        if not where and row.get("latitude") is not None:
+            where = f"{row['latitude']:.5f},{row['longitude']:.5f}"
+        name = f"商圏分析レポート：{where}" if where else ""
+
+    # 改行とタブは 1 文字に潰します。置換すると「A__B」のように増えるので。
+    name = " ".join(name.split())
+    for bad in _UNUSABLE:
         name = name.replace(bad, "_")
-    when = job.get("created_at")
-    stamp = f"{when:%Y%m%d}" if hasattr(when, "year") else ""
-    return "_".join(x for x in ("商圏分析", name[:40], stamp, job_id[:8]) if x) + ".md"
+    # Windows は末尾の「.」と空白を黙って落とします。落ちた結果が既存の
+    # ファイルと同じ名前になることがあるので、こちらで削っておきます。
+    name = name[:_NAME_LIMIT].strip(" .")
+    return (name or job_id[:8]) + ".md"
 
 
 def markdown_for(conn: psycopg.Connection, job_id: str) -> str | None:

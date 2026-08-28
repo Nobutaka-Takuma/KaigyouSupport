@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { api } from "../lib/api";
 import type {
   AnalysisReport, AnalysisSource, ClientReportJson, Evidenced, ReportBlock,
   ReportJson,
@@ -47,11 +48,13 @@ function byPriority(a: AnalysisSource, b: AnalysisSource) {
   return rank(a) - rank(b) || (a.url ?? "").localeCompare(b.url ?? "");
 }
 
-export function AnalysisReportView({ report }: { report: AnalysisReport }) {
+export function AnalysisReportView(
+  { report, jobId }: { report: AnalysisReport; jobId: string },
+) {
   if (isClientReport(report.report_json)) {
-    return <ClientReportView report={report} json={report.report_json} />;
+    return <ClientReportView report={report} json={report.report_json} jobId={jobId} />;
   }
-  return <WorkingReportView report={report} json={report.report_json} />;
+  return <WorkingReportView report={report} json={report.report_json} jobId={jobId} />;
 }
 
 /** 顧客提出用の形で保存されたレポートか。段の構成を変える前の古い
@@ -68,7 +71,8 @@ function isClientReport(json: ClientReportJson | ReportJson): json is ClientRepo
  * そこを通るので、読みやすさのために消すわけにいきません。
  */
 function ClientReportView(
-  { report, json }: { report: AnalysisReport; json: ClientReportJson },
+  { report, json, jobId }:
+    { report: AnalysisReport; json: ClientReportJson; jobId: string },
 ) {
   const [open, setOpen] = useState<"report" | "support" | "sources">("report");
   const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
@@ -98,7 +102,7 @@ function ClientReportView(
           </button>
         ))}
         {report.report_markdown && (
-          <button className="report__download" onClick={() => download(report)}>
+          <button className="report__download" onClick={() => { void download(jobId); }}>
             Markdownで保存
           </button>
         )}
@@ -211,7 +215,8 @@ function SourceList(
 }
 
 function WorkingReportView(
-  { report, json }: { report: AnalysisReport; json: ReportJson },
+  { report, json, jobId }:
+    { report: AnalysisReport; json: ReportJson; jobId: string },
 ) {
   const [open, setOpen] = useState<"decision" | "body" | "sources">("decision");
   const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
@@ -234,7 +239,7 @@ function WorkingReportView(
           </button>
         ))}
         {report.report_markdown && (
-          <button className="report__download" onClick={() => download(report)}>
+          <button className="report__download" onClick={() => { void download(jobId); }}>
             Markdownで保存
           </button>
         )}
@@ -347,14 +352,14 @@ function shorten(text: string, limit = 80) {
   return head.length > limit ? `${head.slice(0, limit - 1)}…` : head;
 }
 
-function download(report: AnalysisReport) {
-  const blob = new Blob([report.report_markdown ?? ""], {
-    type: "text/markdown;charset=utf-8",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "商圏分析レポート.md";
-  link.click();
-  URL.revokeObjectURL(url);
+/**
+ * サーバの ``/report.md`` を通して保存します。
+ *
+ * ここで Blob を組み立てていたころは、名前が「商圏分析レポート.md」で
+ * 固定でした。マイレポートからの保存はサーバが名前を付けるので、**同じ
+ * 文書が入口によって別の名前で手元に残ります。** 名前を決める場所は
+ * 1 か所にします。
+ */
+async function download(jobId: string) {
+  await api.analysis.download(jobId);
 }

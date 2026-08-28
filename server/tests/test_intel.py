@@ -2457,12 +2457,70 @@ def test_a_file_name_survives_windows(conn, dataset, tmp_path):
                              dataset=to_jsonable(dataset), base_hash="x",
                              location_name='A/B:C*D?"E<F>G|H')
     try:
-        report.save(conn, job_id, _report_output().model_dump(), to_jsonable(dataset))
+        report.save(conn, job_id,
+                    _report_output(title='X/Y:Z*?"<>|').model_dump(),
+                    to_jsonable(dataset))
         path = report.write_file(conn, job_id, directory=str(tmp_path))
         assert path is not None and path.exists()
         assert not set(path.name) & set('\\/:*?"<>|')
     finally:
         _drop_job(job_id)
+
+
+def test_the_saved_file_is_named_after_the_report_title(conn, dataset, tmp_path):
+    """**入口が違っても同じ名前にします。**
+
+    以前は 2 通りありました。マイレポートからの保存は
+    ``商圏分析_35.76542_139.85036_20260828_ff4ce176.md``、地図の画面からの
+    保存は ``商圏分析レポート.md``（ブラウザ側で Blob を組み立てていて名前が
+    固定）。同じ文書が別の名前で 2 つ手元に残ります。
+
+    一覧に出ている表題と揃えるのは、あとから探せるようにするためです。
+    座標と16進数のファイルは、フォルダの中で見分けが付きません。
+    """
+    from kaigyou_intel import jobs, report
+
+    title = "商圏分析レポート：亀有駅前（葛飾区）候補地の開業診断"
+    job_id = jobs.create_job(conn, lat=35.76542, lng=139.85036, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        report.save(conn, job_id, _report_output(title=title).model_dump(),
+                    to_jsonable(dataset))
+        # 画面（/report.md）と、手元に書き出すファイル。同じ関数を通ります。
+        assert report.file_name_for(conn, job_id) == f"{title}.md"
+        path = report.write_file(conn, job_id, directory=str(tmp_path))
+        assert path is not None and path.name == f"{title}.md"
+        # 全角の「：」は Windows でも使えます。落とすと表題が変わります。
+        assert "：" in path.name
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_report_without_a_title_still_gets_the_same_shape_of_name(conn, dataset):
+    """表題が無いのは、最終段まで走っていないジョブです。**形は変えません。**
+
+    入口によって名前の形が変わるのを直したので、ここで別の形に落とすと
+    同じことが起きます。
+    """
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.76542, lng=139.85036, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             location_name="亀有駅前")
+    try:
+        assert report.file_name_for(conn, job_id) == "商圏分析レポート：亀有駅前.md"
+    finally:
+        _drop_job(job_id)
+
+    # 地点名も無ければ座標。空の名前にはしません。
+    assert report.file_name("abcd1234", {
+        "title": None, "location_name": None,
+        "latitude": 35.76542, "longitude": 139.85036,
+    }) == "商圏分析レポート：35.76542,139.85036.md"
+    # 消せる文字しか無かったときの逃げ道。名前が ".md" だけになりません。
+    assert report.file_name("abcd1234", {"title": " . ", "location_name": None,
+                                         "latitude": None}) == "abcd1234.md"
+    assert report.file_name("abcd1234", None) == "abcd1234.md"
 
 
 def test_the_report_carries_the_numbers_it_did_not_quote(dataset):

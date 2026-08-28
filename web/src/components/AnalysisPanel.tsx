@@ -325,7 +325,7 @@ export function AnalysisPanel({
         </>
       )}
 
-      {report && <AnalysisReportView report={report} />}
+      {report && jobId && <AnalysisReportView report={report} jobId={jobId} />}
     </section>
   );
 }
