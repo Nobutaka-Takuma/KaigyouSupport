@@ -1091,6 +1091,92 @@ def test_the_levers_in_the_config_and_the_schema_agree():
     assert list(get_args(DecisionLever)) == configured
 
 
+def test_a_report_that_never_says_what_to_build_is_refused():
+    """**商圏の説明で終わらせないための最低線です。**
+
+    実測：沼津駅前のレポートは、通勤者と前期高齢者という需要の読み分けまでは
+    到達していましたが、ユニットを何台置くのか・床面積はいくら要るのか・
+    衛生士は何人要るのかには触れていませんでした。それは商圏の話ではなく
+    医院の話なので、商圏データだけを見ていると永久に出てきません。
+    """
+    from kaigyou_intel.schemas import SupportItem, verify_step4
+    from kaigyou_intel.steps.step4_report import required_categories
+
+    needed = required_categories()
+    assert needed, "設定が空だと、この検査は効きません"
+
+    only_staff = _report_output(support_needed=[SupportItem(
+        item="平日夜間まで回せる人員体制",
+        why="勤務者を主に据えると、受診は勤務前後に寄ります。",
+        evidence=["M001"], category="人員")])
+    problems = verify_step4(only_staff, _REPORT_IDS, _REPORT_NUMBERS, needed)
+    assert any("物件" in p.problem for p in problems)
+    assert any("設備" in p.problem for p in problems)
+    # 埋まっている分類は指摘しない。
+    assert not any("「人員」について" in p.problem for p in problems)
+
+
+def test_a_report_that_covers_the_dental_requirements_passes():
+    from kaigyou_intel.schemas import SupportItem, verify_step4
+    from kaigyou_intel.steps.step4_report import required_categories
+
+    complete = _report_output(support_needed=[
+        SupportItem(item="ユニット4台を置ける診療室",
+                    why="かかりつけ中心ならリコール枠が要ります。",
+                    evidence=["M001"], category="設備"),
+        SupportItem(item="1階かエレベーターのある物件",
+                    why="65歳以上の比率が高く、階段は来院の障壁になります。",
+                    evidence=["F001"], category="物件"),
+        SupportItem(item="夜間まで回せる歯科衛生士の確保",
+                    why="日曜・夜間を軸にするなら、そこで働く人が前提です。",
+                    evidence=["M001"], category="人員"),
+    ])
+    assert verify_step4(complete, _REPORT_IDS, _REPORT_NUMBERS,
+                        required_categories()) == []
+
+
+def test_the_dental_checklist_reaches_both_the_judgement_and_the_report():
+    """判断する段と書く段の両方に同じ枠を渡します。
+
+    片方だけに書くと、STEP3 が決めていないことを STEP4 が書こうとして、
+    そこで新しい判断が生まれます。最終段は書き直す段であって、判断し直す
+    段ではありません。
+    """
+    from kaigyou_intel.steps.step1_features import requirement_frame
+
+    frame = cfg.hypotheses_config()
+    ids = [r["id"] for r in frame["requirements"]]
+    assert {"chairs", "floor_area", "parking", "hygienists"} <= set(ids)
+
+    text = requirement_frame(frame)
+    assert "ユニット" in text and "歯科衛生士" in text and "駐車場" in text
+    # 分類は support_needed の語と一致していること。一致しないと、埋めても
+    # 検査が「空だ」と言い続けます。
+    from typing import get_args
+
+    from kaigyou_intel.schemas import SupportItem
+
+    allowed = set(get_args(SupportItem.model_fields["category"].annotation))
+    assert {r["category"] for r in frame["requirements"]} <= allowed
+    assert set(frame["required_support_categories"]) <= allowed
+
+    for name in ("step3_demand.md", "step4_client_report.md"):
+        assert "{dental_requirements}" in cfg.prompt_text(name), name
+
+
+def test_the_checklist_says_what_the_data_cannot_settle():
+    """無いものを無いと書かせる。**書かずに省くのがいちばん悪い。**
+
+    省くと、調べたうえで不要と判断した、と読まれます。来院手段も駐車場の
+    相場も取り込んでいません。
+    """
+    frame = cfg.hypotheses_config()
+    parking = next(r for r in frame["requirements"] if r["id"] == "parking")
+    assert "手元にありません" in parking["note"]
+    chairs = next(r for r in frame["requirements"] if r["id"] == "chairs")
+    assert "断定しないこと" in chairs["note"]
+
+
 def test_the_qualitative_factors_are_a_frame_not_an_answer():
     """統計にも外部資料にも無いことを、事実として書かせない。
 
@@ -1408,15 +1494,40 @@ def test_step1_is_told_which_questions_have_public_answers():
     assert "自由診療比率" in text
 
 
-def test_the_request_carries_a_cache_breakpoint():
-    """STEP2 は 1 回の呼び出しの中で検索ループが回り、文脈を読み直します。
+def test_the_cache_breakpoint_sits_on_the_part_that_does_not_change():
+    """**キャッシュは区切りより前が毎回同じでないと、一度も読まれません。**
 
-    実測 307,754 トークン。変わらない前置きを読み直さずに済めばそのぶん安い。
-    効いたかどうかは usage.cache_read_input_tokens で確かめます。
+    以前はトップレベルに `cache_control` を置いていました（自動キャッシュ）。
+    自動キャッシュは区切りを「最後のキャッシュ可能なブロック」に置きますが、
+    このアプリではそれが地点ごとに中身の違う user メッセージです。区切りより
+    前のハッシュが毎回変わるので、**毎回書き込んで一度も読まない**という、
+    いちばん損な形になっていました。
+
+    システムプロンプトは同じ段・同じプロンプト版なら 1 バイトも変わりません。
     """
     body = llm.build_request(2, "s", "u")
-    assert body["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in body, "自動キャッシュは可変ブロックに当たる"
+    assert body["system"] == [
+        {"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}]
+    # user 側には置きません。ここは地点ごとに変わります。
+    assert body["messages"] == [{"role": "user", "content": "u"}]
     json.dumps(body)
+
+
+def test_the_cache_lifetime_can_be_lengthened_without_a_code_change(monkeypatch):
+    """5分は**応答の開始から**数えます。レポート1本が12分かかるなら、次の
+    地点を分析するころには消えています。
+
+    何地点か続けて見るなら 1h が当たりますが、書き込みの単価が 1.25 倍から
+    2 倍に上がるので、当たらなければ損です。既定は 5 分のまま。
+    """
+    monkeypatch.setenv(llm.CACHE_TTL_ENV, "1h")
+    body = llm.build_request(2, "s", "u")
+    assert body["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    monkeypatch.setenv(llm.CACHE_TTL_ENV, "")
+    assert llm.build_request(2, "s", "u")["system"][0]["cache_control"] == {
+        "type": "ephemeral"}
 
 
 def test_cache_tokens_are_recorded_and_priced(conn, dataset):

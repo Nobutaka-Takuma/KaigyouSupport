@@ -58,9 +58,25 @@ def known_ids(payload: Mapping[str, Any]) -> set[str]:
             if isinstance(item, Mapping) and item.get("id")}
 
 
+def required_categories(frame: Mapping[str, Any] | None = None) -> list[str]:
+    """support_needed に必ず含めるべき分類。
+
+    商圏の説明で終わらせないための最低線です。これが空のレポートは、
+    「どこで開くか」は語っていても「何を建てるか」を語っていません。
+    """
+    frame = cfg.hypotheses_config() if frame is None else frame
+    return [str(c) for c in (frame.get("required_support_categories") or [])]
+
+
 def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     settings = llm.step_settings(STEP_NUMBER)
-    system = cfg.prompt_text(settings["prompt"])
+    from kaigyou_intel.steps.step1_features import requirement_frame
+
+    frame = cfg.hypotheses_config()
+    system = (cfg.prompt_text(settings["prompt"])
+              .replace("{dental_requirements}", requirement_frame(frame))
+              .replace("{required_support_categories}",
+                       " / ".join(required_categories(frame))))
 
     user = ("以下がこれまでの分析結果です。これを、開業を検討している歯科医師に"
             "手渡せるレポートに書き直してください。\n\n"
@@ -72,7 +88,8 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     if output is None:
         raise StepFailed("構造化出力を受け取れませんでした")
 
-    problems = verify_step4(output, known_ids(payload), allowed_numbers(payload))
+    problems = verify_step4(output, known_ids(payload), allowed_numbers(payload),
+                            required_categories(frame))
     if problems:
         raise StepFailed(
             "レポートを保存しませんでした: "

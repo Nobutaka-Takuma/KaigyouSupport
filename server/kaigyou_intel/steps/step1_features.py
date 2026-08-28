@@ -45,6 +45,32 @@ def _bullets(items: Any) -> str:
     return "\n".join(f"- {item}" for item in (items or [])) or "（設定されていません）"
 
 
+def requirement_frame(frame: Mapping[str, Any]) -> str:
+    """歯科医院として必ず答えることを、プロンプトに差し込める形にする。
+
+    ``_factor_frame``（外部で調べる論点）とは役割が違います。こちらは
+    **調べなくても答えるべきこと**で、歯科という業態に固有です。
+
+    実測：沼津駅前のレポートは、通勤者と前期高齢者という需要の読み分けまでは
+    到達していましたが、ユニットを何台置くのか・駐車場は要るのか・衛生士は
+    何人要るのかには触れていませんでした。それは商圏の話ではなく医院の話
+    なので、商圏データだけを見ていると永久に出てきません。
+    """
+    lines: list[str] = []
+    for item in frame.get("requirements") or []:
+        lines.append(f"### [{item.get('category')}] {item.get('question', '').strip()}")
+        lines.append("")
+        decided = item.get("decided_by") or []
+        if decided:
+            lines.append("これを左右するもの:")
+            lines += [f"- {x}" for x in decided]
+        if item.get("note"):
+            lines.append("")
+            lines.append(str(item["note"]).strip())
+        lines.append("")
+    return "\n".join(lines).strip() or "（設定されていません）"
+
+
 def _factor_frame(frame: Mapping[str, Any]) -> str:
     """歯科経営の定性要因を、プロンプトに差し込める形にする。
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Literal, Mapping
+from typing import Literal, Mapping, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -586,7 +586,8 @@ class Step4Output(BaseModel):
 
 
 def verify_step4(output: Step4Output, known_ids: set[str],
-                 known_numbers: set[str]) -> list[TraceProblem]:
+                 known_numbers: set[str],
+                 required_categories: Sequence[str] = ()) -> list[TraceProblem]:
     """書き直しであって、書き足しではないこと。
 
     散文にすると、数字はいくらでも滑らかに増やせます。「約5万人」「およそ3倍」
@@ -610,6 +611,20 @@ def verify_step4(output: Step4Output, known_ids: set[str],
             problems.append(TraceProblem(
                 where=where,
                 problem=f"前の段に無い数値です: {number}"))
+
+    # 歯科医院として必ず答えること。**商圏の説明で終わらせないための最低線**
+    # です。実測：沼津駅前のレポートは需要の読み分けまでは到達していましたが、
+    # ユニット何台・床面積・衛生士何人には触れていませんでした。それは商圏の
+    # 話ではなく医院の話なので、商圏データだけを見ていると出てきません。
+    covered = {item.category for item in output.support_needed}
+    for category in required_categories:
+        if category not in covered:
+            problems.append(TraceProblem(
+                where="support_needed",
+                problem=(f"「{category}」について何も書かれていません。"
+                         "この商圏で開業するなら何が要るのかを、歯科医院として"
+                         "答えてください（ユニット台数・床面積と階数・駐車場・"
+                         "歯科衛生士の確保など）")))
 
     # judgement_note は「これは予測ではない」と書くための欄です。ここまで
     # 検査に含めると、書いてほしい一文で落ちます。

@@ -156,6 +156,22 @@ def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any]) -> di
     return tool
 
 
+#: キャッシュの保持時間。既定の 5 分か、`1h`。
+#:
+#: 5 分は**応答の開始から**数えます。レポート 1 本が 12 分かかるなら、次の
+#: 地点を分析するころには 5 分のキャッシュは消えています。何地点か続けて
+#: 見るなら 1h のほうが当たりますが、書き込みの単価が 1.25 倍から 2 倍に
+#: 上がるので、当たらなければ損です。既定は 5 分のままにしてあります。
+CACHE_TTL_ENV = "KAIGYOU_CACHE_TTL"
+
+
+def _cache_control() -> dict[str, Any]:
+    ttl = (os.getenv(CACHE_TTL_ENV) or "").strip()
+    if ttl == "1h":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
 def build_request(step_number: int, system: str, user: str, *,
                   tools: Sequence[Mapping[str, Any]] | None = None,
                   web_search: bool | None = None,
@@ -179,14 +195,26 @@ def build_request(step_number: int, system: str, user: str, *,
         # effort はここ。スキーマは output_format に渡し、SDK が
         # output_config へマージします（型のまま入れてはいけません）。
         "output_config": {"effort": effort or settings["effort"]},
-        "system": system,
+        # **区切りはシステムプロンプトの末尾に置きます。**
+        #
+        # 以前はトップレベルに `cache_control` を置いていました（自動キャッシュ）。
+        # 自動キャッシュは区切りを「最後のキャッシュ可能なブロック」に置きますが、
+        # このアプリではそれが **地点ごとに中身の違う user メッセージ**です。
+        # 区切りより前のハッシュが毎回変わるので、**毎回書き込んで一度も読まない**
+        # という、いちばん損な形になっていました（公式ドキュメントの
+        # "Common mistake: Breakpoint on content that changes every request"）。
+        #
+        # システムプロンプトは同じ段・同じプロンプト版なら 1 バイトも変わりません。
+        # ここに置けば、やり直し（max_attempts で最大3回）と、続けて何地点か
+        # 分析したときに読み出しが効きます。
+        #
+        # **これは費用の話であって、速度の話ではありません。** キャッシュは
+        # 出力の生成時間を 1 秒も縮めません（公式：「Prompt caching has no effect
+        # on output token generation」）。このアプリの所要時間は思考と JSON の
+        # 生成で決まるので、レポート 1 本の時間はこれでは変わりません。
+        "system": [{"type": "text", "text": system,
+                    "cache_control": _cache_control()}],
         "messages": [{"role": "user", "content": user}],
-        # 直前までの安定した部分をキャッシュ対象にします。STEP2 はサーバ側の
-        # 検索ループが 1 回の呼び出しの中で回り、増えていく文脈を毎回読み直すので
-        # （実測 307,754 トークン）、変わらない前置き（system + 最初の user）を
-        # 読み直さずに済めばそのぶん安くなります。効いたかどうかは
-        # usage.cache_read_input_tokens に出るので、次の実行で確かめます。
-        "cache_control": {"type": "ephemeral"},
     }
 
     declared = list(tools or [])
