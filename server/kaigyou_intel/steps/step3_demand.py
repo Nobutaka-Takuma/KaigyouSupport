@@ -22,6 +22,7 @@ import json
 from typing import Any, Mapping
 
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.projection import for_step3
 from kaigyou_intel.schemas import Step3Output, verify_step3
@@ -38,14 +39,16 @@ def build_input(step1_output: Mapping[str, Any], step2_output: Mapping[str, Any]
     return for_step3(step1_output, step2_output, dataset)
 
 
-def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
+def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
+        ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     settings = llm.step_settings(STEP_NUMBER)
     # 歯科医院として必ず答えることの一覧。商圏データだけを見ていると、
     # 「ユニット何台・床面積・衛生士何人」は永久に出てきません。
     from kaigyou_intel.steps.step1_features import requirement_frame
 
-    system = cfg.prompt_text(settings["prompt"]).replace(
-        "{dental_requirements}", requirement_frame(cfg.hypotheses_config()))
+    system = cfg.prompt_text(settings["prompt"], category).replace(
+        "{dental_requirements}",
+        requirement_frame(cfg.hypotheses_config(category)))
 
     user = ("以下が基礎データと、これまでのステップの結論です。"
             "この中にある事実だけを使ってください。\n\n"

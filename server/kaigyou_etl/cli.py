@@ -277,9 +277,10 @@ def cmd_load_local(args: argparse.Namespace) -> int:
     # load-local は成功と表示するので、気づけるのは画面を見たときです。
     # 歯科しか入っていない環境では、今までどおり 1 業態です。
     categories = _loaded_categories(prefecture)
-    names = list(cfg.scoring_config().get("profiles") or {})
     summary: dict[str, Any] = {}
     for category in categories:
+        # プロファイルも業態ごとです（config/<業態>/scoring.yaml）。
+        names = list(cfg.scoring_config(category).get("profiles") or {})
         label = "" if category == DEFAULT_CATEGORY else f"（{category}）"
         print(f"\nスコア基準を再計算しています{label}（数分かかります）...")
         with connect() as conn:
@@ -323,7 +324,8 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
     from kaigyou_intel import jobs
     from kaigyou_intel.projection import base_data_hash, to_jsonable
 
-    scoring = cfg.scoring_config()
+    category = _category(args)
+    scoring = cfg.scoring_config(category)
     profile = args.profile or scoring.get("active_profile")
     model = ScoringModel(scoring, profile)
 
@@ -331,7 +333,6 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
         prefecture_code = default_prefecture(conn, prefecture_at(conn, args.lat, args.lng))
         mesh_size_m = resolve_mesh_size(conn, None, prefecture_code)
         print(f"基礎データを作成しています（{prefecture_code} / メッシュ {mesh_size_m}m）...")
-        category = getattr(args, "category", None) or DEFAULT_CATEGORY
         dataset = to_jsonable(build_dataset(
             conn, args.lat, args.lng, args.radius,
             prefecture_code=prefecture_code, mesh_size_m=mesh_size_m,
@@ -932,7 +933,7 @@ def cmd_refresh_stats(args: argparse.Namespace) -> int:
 def cmd_compute_scores(args: argparse.Namespace) -> int:
     from kaigyou_etl.scores import compute_mesh_scores
 
-    names = (list(cfg.scoring_config().get("profiles") or {})
+    names = (list(cfg.scoring_config(_category(args)).get("profiles") or {})
              if getattr(args, "all_profiles", False) else None)
     with connect() as conn:
         summary = compute_mesh_scores(conn, profile=args.profile, profiles=names,

@@ -223,7 +223,7 @@ class ExternalFact(BaseModel):
         description="high=一次資料に明記 / medium=公的資料からの読み取り / low=それ以外")
 
 
-#: 仮説が正しかったときに動きうるもの。**config/hypotheses.yaml の
+#: 仮説が正しかったときに動きうるもの。**config/<業態>/hypotheses.yaml の
 #: screening.levers と同じ並びにしてください。** 片方だけ足すと、設定に
 #: 書いてあるのにスキーマが受け付けない選択肢ができます。
 #:

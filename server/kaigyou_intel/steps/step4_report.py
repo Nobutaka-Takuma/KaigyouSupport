@@ -22,6 +22,7 @@ import json
 from typing import Any, Mapping
 
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.projection import allowed_numbers, for_step4
 from kaigyou_intel.schemas import Step4Output, verify_step4
@@ -68,12 +69,13 @@ def required_categories(frame: Mapping[str, Any] | None = None) -> list[str]:
     return [str(c) for c in (frame.get("required_support_categories") or [])]
 
 
-def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
+def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
+        ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     settings = llm.step_settings(STEP_NUMBER)
     from kaigyou_intel.steps.step1_features import requirement_frame
 
-    frame = cfg.hypotheses_config()
-    system = (cfg.prompt_text(settings["prompt"])
+    frame = cfg.hypotheses_config(category)
+    system = (cfg.prompt_text(settings["prompt"], category)
               .replace("{dental_requirements}", requirement_frame(frame))
               .replace("{required_support_categories}",
                        " / ".join(required_categories(frame))))

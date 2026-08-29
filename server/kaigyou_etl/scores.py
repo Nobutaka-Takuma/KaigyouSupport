@@ -71,7 +71,7 @@ def refresh_stats(conn: psycopg.Connection, *, radii: list[int] | None = None,
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to compute statistics from")
-    config = cfg.scoring_config()
+    config = cfg.scoring_config(facility_category)
     model = ScoringModel(config)
     radii = radii or sorted(set(model.radii + [model.mesh_scoring_radius_m]))
     # 科目で絞った比率は、全科目の比率とは別の分布を持ちます。どの科目が要るかは
@@ -186,7 +186,7 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to score")
-    config = cfg.scoring_config()
+    config = cfg.scoring_config(facility_category)
     models = ([ScoringModel(config, name) for name in profiles] if profiles
               else [ScoringModel(config, profile)])
     radius = radius_m or models[0].mesh_scoring_radius_m

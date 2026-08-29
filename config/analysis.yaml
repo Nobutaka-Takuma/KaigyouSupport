@@ -74,7 +74,7 @@ limits:
   # 遅い1本**になります。
   parallel_research: 4
   max_clinics_in_projection: 20
-  # 層を跨いだ PATTERN の下限は config/hypotheses.yaml の crossing にあります。
+  # 層を跨いだ PATTERN の下限は config/<業態>/hypotheses.yaml の crossing にあります。
   # 仮説の枠組み（層・定性要因・So What? のふるい）は 1 か所にまとめてあり、
   # こことあちらに分けて置くと、片方だけ直したときに食い違います。
   #

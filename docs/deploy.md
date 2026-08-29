@@ -214,7 +214,7 @@ $env:DATABASE_URL = 'postgresql://postgres.<プロジェクトID>:<パスワー�
 `migrate` は未適用のものだけを流します。何度実行しても安全です。
 `load-local` は最後に**設定済みの全プロファイル**のスコアを計算します。
 
-スコアだけ計算し直したいとき（`config/scoring.yaml` の重みを変えた場合など）は:
+スコアだけ計算し直したいとき（`config/<業態>/scoring.yaml` の重みを変えた場合など）は:
 
 ```powershell
 .\.venv\Scripts\kaigyou-etl refresh-stats

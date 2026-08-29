@@ -101,10 +101,11 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
              prefecture_code: str, catchment: str = DEFAULT_CATCHMENT) -> dict[str, Any]:
     metrics = analyze_point(conn, lat, lng, radius_m, category, mesh_size_m, catchment)
     # 科目で絞った件数と比率。どの科目が要るかはプロファイルの設定が決めます。
-    augment_specialty_metrics(metrics, competition_specialties(cfg.scoring_config()))
+    augment_specialty_metrics(
+        metrics, competition_specialties(cfg.scoring_config(category)))
     scope, distributions = resolve_distributions(
-        conn, mesh_size_m, radius_m, prefecture_code, cfg.scoring_config(),
-        category)
+        conn, mesh_size_m, radius_m, prefecture_code,
+        cfg.scoring_config(category), category)
     scores = model.score(metrics, distributions)
 
     # Every configured profile, from the same metrics. The catchment sweep is
@@ -112,9 +113,9 @@ def _analyze(conn: psycopg.Connection, lat: float, lng: float, radius_m: int,
     # and one number on its own says nothing about whether cost changes the
     # answer. Two do.
     other_profiles = []
-    for name in (cfg.scoring_config().get("profiles") or {}):
+    for name in (cfg.scoring_config(category).get("profiles") or {}):
         alt = model if name == model.profile_name else ScoringModel(
-            cfg.scoring_config(), name)
+            cfg.scoring_config(category), name)
         result = scores if name == model.profile_name else alt.score(metrics, distributions)
         specialty = (alt.profile.get("competition") or {}).get("specialty")
         other_profiles.append({

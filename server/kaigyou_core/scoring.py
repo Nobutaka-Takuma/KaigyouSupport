@@ -1,6 +1,6 @@
 """The provisional scoring model.
 
-Everything numeric here comes from ``config/scoring.yaml``; this module only
+Everything numeric here comes from ``config/<業態>/scoring.yaml``; this module only
 implements the arithmetic. No weight, threshold or cap is written into the
 code, and no attempt is made to predict revenue, patient counts or the odds of
 a practice succeeding -- the scores are relative summaries of public statistics
@@ -195,7 +195,7 @@ def _weighted(parts: Mapping[str, float | None], weights: Mapping[str, float],
 
 
 class ScoringModel:
-    """A single named profile from ``config/scoring.yaml``."""
+    """A single named profile from ``config/<業態>/scoring.yaml``."""
 
     def __init__(self, config: Mapping[str, Any], profile: str | None = None):
         self.config = config

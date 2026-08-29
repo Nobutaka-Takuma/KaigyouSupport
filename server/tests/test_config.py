@@ -92,3 +92,74 @@ def test_an_edited_file_is_re_read_without_a_restart(tmp_path, monkeypatch):
                     encoding="utf-8")
     os.utime(path, (time.time() + 1, time.time() + 1))
     assert cfg.scoring_config()["active_profile"] == "other"
+
+
+# --------------------------------------------- 設定を業態ごとに読み分けること
+#
+# 医科への拡張の 4 段目。業態の知識は共通化できないので、置き場所を分けて
+# 読み分けます。詳細は docs/refactoring-multi-specialty.md。
+
+def test_the_business_knowledge_lives_under_its_own_folder():
+    """重み・複合指標・KSF・プロンプトは業態ごと。**フォルダ名は業態そのもの。**
+
+    対応表（dental_clinic -> dental のような）を持つと、業態を足すたびに
+    そこを直す必要が出て、忘れると設定が黙って読まれません。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_core.analysis import DEFAULT_CATEGORY
+
+    assert cfg.business_dir().name == DEFAULT_CATEGORY
+    for name in ("scoring.yaml", "insights.yaml", "hypotheses.yaml"):
+        assert (cfg.business_dir() / name).is_file(), f"{name} が業態フォルダにない"
+    assert (cfg.business_dir() / "prompts" / "step1_features.md").is_file()
+
+
+def test_the_shared_files_are_not_split_by_business_type():
+    """**データの出どころと段の構成は業態で変わりません。**
+
+    分けると同じ国勢調査の定義を業態の数だけ複製することになり、片方だけ
+    直したときに「同じ商圏なのに業態で人口が違う」が起きます。
+    """
+    from kaigyou_core import config as cfg
+
+    assert (cfg.config_dir() / "sources.yaml").is_file()
+    assert (cfg.config_dir() / "analysis.yaml").is_file()
+    assert not (cfg.business_dir() / "sources.yaml").exists()
+    assert not (cfg.business_dir() / "analysis.yaml").exists()
+
+
+def test_a_business_type_without_a_folder_falls_back(tmp_path, monkeypatch):
+    """設定を移していない環境を、この変更でその場で壊さないこと。
+
+    **移行のための落とし先です。** 業態のフォルダがあればそちらが勝ちます。
+    """
+    from kaigyou_core import config as cfg
+
+    (tmp_path / "scoring.yaml").write_text("active_profile: shared\n", encoding="utf-8")
+    monkeypatch.setenv("KAIGYOU_CONFIG_DIR", str(tmp_path))
+    assert cfg.scoring_config()["active_profile"] == "shared", \
+        "業態フォルダが無ければ config/ 直下を読むこと"
+
+    business = tmp_path / "dental_clinic"
+    business.mkdir()
+    (business / "scoring.yaml").write_text("active_profile: dental\n", encoding="utf-8")
+    assert cfg.scoring_config()["active_profile"] == "dental", \
+        "業態フォルダがあればそちらが勝つこと"
+    assert cfg.scoring_config("clinic")["active_profile"] == "shared", \
+        "別業態は、その業態のフォルダが無ければ共通に落ちる"
+
+
+def test_every_step_reads_the_prompts_of_the_job_business_type():
+    """医科のジョブが歯科のプロンプトで書かれないこと。
+
+    **しかも成功と表示されます。** レポートを読むまで気づけません。
+    渡し忘れを型で捕まえられないので、引数の名前で見張ります。
+    """
+    import inspect
+
+    from kaigyou_intel.worker import RUNNERS
+
+    for number, runner in RUNNERS.items():
+        params = list(inspect.signature(runner).parameters)
+        assert len(params) >= 2, f"STEP{number} が業態を受け取っていません"
+        assert params[1] == "category", f"STEP{number}: {params}"

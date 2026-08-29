@@ -53,14 +53,14 @@ def test_every_step_is_configured_with_its_prompt():
         assert step["prompt_version"], f"step{number} に prompt_version がありません"
         if number not in RUNNERS:
             continue
-        assert (cfg.config_dir() / "prompts" / step["prompt"]).is_file(), (
+        assert (cfg.business_dir() / "prompts" / step["prompt"]).is_file(), (
             f"step{number} のプロンプトが見つかりません: {step['prompt']}")
 
 
 def test_the_searching_step_has_a_second_prompt_for_writing_it_down():
     """Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は 2 本必要。"""
     step = cfg.analysis_config()["steps"][2]
-    assert (cfg.config_dir() / "prompts" / step["prompt_structure"]).is_file()
+    assert (cfg.business_dir() / "prompts" / step["prompt_structure"]).is_file()
     assert llm.step_settings(2)["prompt_structure"] == step["prompt_structure"]
 
 
@@ -1853,7 +1853,7 @@ def test_a_failed_job_is_not_picked_up_again_on_its_own(conn, dataset, monkeypat
         _drop_job(job_id)
 
 
-def _boom(_payload):
+def _boom(_payload, _category=None):
     raise RuntimeError("模擬的な失敗")
 
 
@@ -3190,7 +3190,8 @@ def test_one_tick_runs_one_step_and_puts_the_job_back(conn, dataset, monkeypatch
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
     monkeypatch.setattr(worker, "RUNNERS", {
-        n: (lambda _p, n=n: ({"n": n}, llm.Usage(), [])) for n in jobs.STEP_NAMES})
+        n: (lambda _p, _c=None, n=n: ({"n": n}, llm.Usage(), []))
+        for n in jobs.STEP_NAMES})
     monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
     try:
         # claim_job は「いちばん古い queued」を拾うので、順番を当てにせず
@@ -3351,7 +3352,7 @@ def test_a_model_slip_is_retried_instead_of_stopping(conn, dataset, monkeypatch)
                              dataset=to_jsonable(dataset), base_hash="x")
     calls = {"n": 0}
 
-    def flaky(_payload):
+    def flaky(_payload, _category=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("参照が解決しませんでした: 検索結果に無い URL です")
@@ -3385,7 +3386,7 @@ def test_a_failure_that_will_never_pass_is_not_retried(conn, dataset, monkeypatc
                              dataset=to_jsonable(dataset), base_hash="x")
     calls = {"n": 0}
 
-    def broke(_payload):
+    def broke(_payload, _category=None):
         calls["n"] += 1
         raise RuntimeError("Your credit balance is too low to access the Anthropic API")
 
@@ -3408,7 +3409,7 @@ def test_retries_stop_at_the_limit(conn, dataset, monkeypatch):
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
 
-    def always(_payload):
+    def always(_payload, _category=None):
         raise RuntimeError("構造化出力を受け取れませんでした")
 
     monkeypatch.setattr(worker, "RUNNERS", {1: always})
@@ -3504,7 +3505,7 @@ def test_a_retry_is_told_why_the_last_one_failed(conn, dataset, monkeypatch):
                              dataset=to_jsonable(dataset), base_hash="x")
     seen: list[dict] = []
 
-    def fussy(payload):
+    def fussy(payload, _category=None):
         seen.append(dict(payload))
         raise RuntimeError("構造化出力を受け取れませんでした")
 
@@ -3604,7 +3605,9 @@ def test_one_call_runs_as_many_steps_as_the_time_allows(conn, dataset, monkeypat
                              dataset=to_jsonable(dataset), base_hash="x")
     monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
     monkeypatch.setattr(worker, "RUNNERS", {
-        n: (lambda _p: ({"ok": True}, llm.Usage(input_tokens=10, output_tokens=5), [])) for n in sorted(jobs.STEP_NAMES)})
+        n: (lambda _p, _c=None: ({"ok": True},
+                                 llm.Usage(input_tokens=10, output_tokens=5), []))
+        for n in sorted(jobs.STEP_NAMES)})
     monkeypatch.setattr(worker.report, "save", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(worker, "time_budget", lambda: (800.0, 420.0))
     # tick は「いちばん古い queued」を拾います。他のテストが残した Job を
@@ -3628,7 +3631,9 @@ def test_a_call_stops_before_it_would_be_killed(conn, dataset, monkeypatch):
                              dataset=to_jsonable(dataset), base_hash="x")
     monkeypatch.setattr(worker, "build_input", lambda conn, job, number: {})
     monkeypatch.setattr(worker, "RUNNERS", {
-        n: (lambda _p: ({"ok": True}, llm.Usage(input_tokens=10, output_tokens=5), [])) for n in sorted(jobs.STEP_NAMES)})
+        n: (lambda _p, _c=None: ({"ok": True},
+                                 llm.Usage(input_tokens=10, output_tokens=5), []))
+        for n in sorted(jobs.STEP_NAMES)})
     # 残り時間が最初から足りない設定。1 段だけ進んで手を引くこと。
     monkeypatch.setattr(worker, "time_budget", lambda: (100.0, 420.0))
     monkeypatch.setattr(jobs, "claim_job", lambda _conn: job_id)

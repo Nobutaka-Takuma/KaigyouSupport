@@ -296,6 +296,8 @@ def growth_years() -> dict[str, int]:
     """
     from kaigyou_core import config as cfg
 
+    # 成長を見る期間は業態で変わりません（データ全体の設定）。歯科の
+    # scoring.yaml から読みますが、どの業態でも同じ値を書きます。
     horizon = (cfg.scoring_config().get("growth_horizon") or {})
     return {"from_year": int(horizon.get("from_year", 2020)),
             "to_year": int(horizon.get("to_year", 2050))}

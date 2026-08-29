@@ -58,9 +58,13 @@ def _check_config(report: Report) -> bool:
     report.add("リポジトリの場所", OK, str(root))
 
     ok = True
+    # 実際に読んだファイルの位置を出します。業態ごとのフォルダに置いたか、
+    # まだ config/ 直下にあるかは、ここを見れば分かります。
     for label, loader, filename in (
-        ("データソース定義", cfg.sources_config, "config/sources.yaml"),
-        ("スコアリング設定", cfg.scoring_config, "config/scoring.yaml"),
+        ("データソース定義", cfg.sources_config,
+         str(cfg.config_dir() / "sources.yaml")),
+        ("スコアリング設定", cfg.scoring_config,
+         str(cfg.business_file("scoring.yaml"))),
     ):
         try:
             data = loader()
@@ -91,7 +95,7 @@ def _check_scoring_model(report: Report) -> None:
             ScoringModel(scoring, name)
     except Exception as exc:  # noqa: BLE001
         report.add("スコアリングモデル", FAIL, f"{type(exc).__name__}: {exc}",
-                   "config/scoring.yaml の内容を確認してください。")
+                   "config/<業態>/scoring.yaml の内容を確認してください。")
         return
     if not names:
         report.add("スコアリングモデル", FAIL, "profiles が1つも定義されていません")

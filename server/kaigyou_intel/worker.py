@@ -29,7 +29,10 @@ from kaigyou_intel.steps import (
 #: どれも受け取るのは**射影済みの入力**です。ステップ自身に作らせていた頃は、
 #: worker が記録用に 1 回、ステップが実行用にもう 1 回作っていて、
 #: 「記録した入力と実際に渡した入力が同じ」という保証がありませんでした。
-RUNNERS: dict[int, Callable[[Any], Any]] = {
+#: 受け取るのは (射影済みの入力, 業態) です。業態はジョブの business_type で、
+#: プロンプトと KSF の枠をどの業態のものから読むかを決めます。渡さないと、
+#: 医科のジョブが歯科のプロンプトで書かれます——**しかも成功と表示されます。**
+RUNNERS: dict[int, Callable[[Any, str], Any]] = {
     1: step1_features.run,
     2: step2_research.run,
     3: step3_demand.run,
@@ -39,6 +42,17 @@ RUNNERS: dict[int, Callable[[Any], Any]] = {
 
 class StepNotImplemented(RuntimeError):
     pass
+
+
+def _business_type(job: Mapping[str, Any]) -> str:
+    """このジョブがどの業態のものか。**設定を読み分ける鍵です。**
+
+    ジョブは業態を持って作られています（``analysis_jobs.business_type``）。
+    古いジョブや、まだ列が空のものは既定（歯科）に落とします。
+    """
+    from kaigyou_core.analysis import DEFAULT_CATEGORY
+
+    return str(job.get("business_type") or DEFAULT_CATEGORY)
 
 
 def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, Any]:
@@ -84,7 +98,7 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     # 例外はここでは握りません。やり直す価値があるかを判定してから記録します
     # （_handle_failure）。ここで failed と書いてしまうと、やり直せる失敗まで
     # 人がボタンを押しに行くことになります。
-    output, usage, sources = runner(payload)
+    output, usage, sources = runner(payload, _business_type(job))
 
     jobs.finish_step(conn, job_id, number, output, {
         "input_tokens": usage.input_tokens,

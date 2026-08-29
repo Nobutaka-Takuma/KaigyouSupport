@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.projection import citable_keys, for_step1
 from kaigyou_intel.schemas import (
@@ -54,14 +55,14 @@ def build_input(dataset: Mapping[str, Any]) -> dict[str, Any]:
     return for_step1(dataset, cfg.analysis_config().get("projection") or {})
 
 
-def min_cross_layer() -> int:
+def min_cross_layer(category: str = DEFAULT_CATEGORY) -> int:
     """層を跨いだ PATTERN を最低いくつ求めるか。
 
     **プロンプトと検算で同じ値を使うこと。** 別々に読むと、「3件以上」と
     書いておきながら 2 件で通る（またはその逆で、書いていない条件で落ちる）
     状態になります。落ちるとその段はやり直しで、費用も倍かかります。
     """
-    crossing = cfg.hypotheses_config().get("crossing") or {}
+    crossing = cfg.hypotheses_config(category).get("crossing") or {}
     return int(crossing.get("min_cross_layer_patterns", 0))
 
 
@@ -104,7 +105,7 @@ def _factor_frame(frame: Mapping[str, Any],
     research_questions は「この地域はどんな街か」に寄ります。
 
     設定に置いているのは、これが業界知識だからです（統計と違い、扱う人が
-    入れ替えるもの）。config/hypotheses.yaml を参照。
+    入れ替えるもの）。config/<業態>/hypotheses.yaml を参照。
 
     ``available`` を渡すと、**その地点で実際に引ける代理指標だけ**を並べます。
     これは飾りではありません。設定に書いた代理指標が、その地点では取れて
@@ -237,7 +238,8 @@ def _nearest_address(payload: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def scan_surroundings(payload: Mapping[str, Any],
-                      limits: Mapping[str, Any]) -> _Scan:
+                      limits: Mapping[str, Any],
+                      category: str = DEFAULT_CATEGORY) -> _Scan:
     """その場所に何があるのかを調べる。**例外を上げません。**
 
     ここが落ちても FACT と PATTERN は作れます。付随物のために段ごと
@@ -251,7 +253,7 @@ def scan_surroundings(payload: Mapping[str, Any],
     if not name:
         return _Scan(error="config/analysis.yaml の steps.1 に prompt_surroundings がありません")
 
-    system = cfg.prompt_text(name).replace("{max_searches}", str(budget))
+    system = cfg.prompt_text(name, category).replace("{max_searches}", str(budget))
     user = ("以下が開業候補地です。ここに何があるのかを調べてください。\n\n"
             "```json\n"
             + json.dumps(scan_input(payload), ensure_ascii=False, indent=1)
@@ -305,7 +307,8 @@ def _scan_block(scan: _Scan) -> str:
             + catalogue)
 
 
-def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
+def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
+        ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     """射影済みの入力から STEP1 の出力を作る。
 
     入力は ``build_input`` が作ったものを受け取ります。ここで作り直さないのは、
@@ -321,12 +324,12 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     limits = cfg.analysis_config().get("limits") or {}
     settings = llm.step_settings(STEP_NUMBER)
 
-    scan = scan_surroundings(payload, limits)
+    scan = scan_surroundings(payload, limits, category)
 
-    frame = cfg.hypotheses_config()
-    system = (cfg.prompt_text(settings["prompt"])
+    frame = cfg.hypotheses_config(category)
+    system = (cfg.prompt_text(settings["prompt"], category)
               .replace("{max_patterns}", str(limits.get("max_patterns", 5)))
-              .replace("{min_cross_layer_patterns}", str(min_cross_layer()))
+              .replace("{min_cross_layer_patterns}", str(min_cross_layer(category)))
               .replace("{crossing_examples}", _bullets(
                   (frame.get("crossing") or {}).get("examples")))
               .replace("{qualitative_factors}",
@@ -362,7 +365,7 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     # 通ります（「人口 × 競合」と書きながら人口の指標を2つ引く、など）。
     layer_of = citable_keys(payload)
     problems = verify_step1(output, set(layer_of), layer_of,
-                            min_cross_layer=min_cross_layer())
+                            min_cross_layer=min_cross_layer(category))
     if problems:
         raise StepFailed(
             "参照が解決しませんでした: "

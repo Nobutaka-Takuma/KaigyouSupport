@@ -211,7 +211,7 @@ DEFINITIONS: dict[str, dict[str, str]] = {
         "description": (
             "同一都道府県内のメッシュ分布に対する相対スコア。暫定モデルであり、"
             "実績データによる較正は行っていない。都道府県をまたぐ比較はできない。"),
-        "source": "config/scoring.yaml の重みによる算出",
+        "source": "config/<業態>/scoring.yaml の重みによる算出",
     },
 }
 
@@ -1404,7 +1404,7 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     """Everything this database knows about one point, in one document."""
     from kaigyou_core import config as cfg
 
-    scoring_config = scoring_config or cfg.scoring_config()
+    scoring_config = scoring_config or cfg.scoring_config(category)
     model = ScoringModel(scoring_config, profile)
 
     # The point decides its own prefecture, as everywhere else: scoring a
@@ -1490,7 +1490,7 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     # 比較はメッシュ分布に対して行うので、分布が作られた半径で測ります。2km の
     # 商圏を 1km で測ったメッシュと比べると、同じ名前の別の量を比べることに
     # なります。どの半径で比べたかは measurement_basis に出します。
-    insights_config = cfg.insights_config()
+    insights_config = cfg.insights_config(category)
     measures, benchmark_notes, primary_benchmark = build_measures(
         conn, comparison_metrics,
         profile=model.profile_name, radius_m=comparison_radius,
@@ -1676,7 +1676,7 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 "note", "地価公示が未取得のため、コストの情報はありません。"),
             "rent_estimate": rent_estimate(
                 _round(metrics.get("land_price_yen_per_sqm")),
-                cfg.insights_config().get("rent_estimate") or {}),
+                insights_config.get("rent_estimate") or {}),
         },
         # 用途地域・容積率・建蔽率。The constraint the rest of the figures sit
         # inside, and the only section here that is about what may be built.
@@ -1725,7 +1725,7 @@ def rent_estimate(land_price_yen_per_sqm: float | None,
 
         月額賃料（円/坪） = 地価（円/m²） × 3.305785 × 想定利回り ÷ 12
 
-    利回りの幅は設定に置きます（config/insights.yaml）。ここを 1 つの数字に
+    利回りの幅は設定に置きます（config/<業態>/insights.yaml）。ここを 1 つの数字に
     決め打ちすると、出てきた数字が一人歩きします。幅で出すのは、幅があることが
     この換算の実態だからです。
 
@@ -1758,5 +1758,5 @@ def rent_estimate(land_price_yen_per_sqm: float | None,
             f"（{low:.0%}〜{high:.0%}）であり、地域や物件種別で変わります。"
             "**地価の高い商業地ほど実際の利回りは低くなる傾向があるため、"
             "都心の一等地ではこの換算は高めに出ます。**"
-            "config/insights.yaml の rent_estimate.yield_range で調整してください。"),
+            "config/<業態>/insights.yaml の rent_estimate.yield_range で調整してください。"),
     }

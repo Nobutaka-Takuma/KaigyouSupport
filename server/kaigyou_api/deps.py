@@ -7,6 +7,7 @@ import psycopg
 from fastapi import HTTPException, Query
 
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_core.db import connect
 from kaigyou_core.scoring import ScoringModel
 
@@ -29,9 +30,17 @@ def get_conn() -> Iterator[psycopg.Connection]:
         yield conn
 
 
-def get_model(profile: str | None = Query(None, description="scoring profile name")) -> ScoringModel:
+def get_model(profile: str | None = Query(None, description="scoring profile name"),
+              category: str = Query(DEFAULT_CATEGORY),
+              ) -> ScoringModel:
+    """採点モデル。**重みは業態ごとです**（config/<業態>/scoring.yaml）。
+
+    業態を見ないと、医科の地点を歯科の重み（小児歯科寄り・矯正寄り…）で
+    採点することになります。省略時は歯科なので、既存の呼び出しは今までどおり
+    です。
+    """
     try:
-        return ScoringModel(cfg.scoring_config(), profile)
+        return ScoringModel(cfg.scoring_config(category), profile)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

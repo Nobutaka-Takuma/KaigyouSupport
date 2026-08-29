@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from kaigyou_core import config as cfg
+from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.projection import for_step2
 from kaigyou_intel.schemas import Step2Output, normalize_url, verify_step2
@@ -52,8 +53,8 @@ def build_input(step1_output: Mapping[str, Any],
     return for_step2(step1_output, dataset, limits)
 
 
-def _prompts(limits: Mapping[str, Any],
-             available: Any = None) -> tuple[str, str]:
+def _prompts(limits: Mapping[str, Any], available: Any = None,
+             category: str = DEFAULT_CATEGORY) -> tuple[str, str]:
     settings = llm.step_settings(STEP_NUMBER)
     if not settings.get("prompt_structure"):
         raise StepFailed("config/analysis.yaml の steps.2 に prompt_structure がありません")
@@ -62,12 +63,12 @@ def _prompts(limits: Mapping[str, Any],
     # 書くと、STEP1 が立てた問いを STEP2 が別の枠で読むことになります。
     from kaigyou_intel.steps.step1_features import _factor_frame
 
-    research = cfg.prompt_text(settings["prompt"]) \
+    research = cfg.prompt_text(settings["prompt"], category) \
         .replace("{searches_per_pattern}", str(limits.get("searches_per_pattern", 3))) \
         .replace("{max_searches_total}", str(total)) \
         .replace("{qualitative_factors}",
-                 _factor_frame(cfg.hypotheses_config(), available))
-    return research, cfg.prompt_text(settings["prompt_structure"])
+                 _factor_frame(cfg.hypotheses_config(category), available))
+    return research, cfg.prompt_text(settings["prompt_structure"], category)
 
 
 @dataclass
@@ -119,7 +120,8 @@ def _research_one(pattern: Mapping[str, Any], location: Mapping[str, Any],
         search_errors=[str(s["error"]) for s in result.sources if s.get("error")])
 
 
-def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
+def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
+        ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
     """PATTERN を調べて、外部事実と仮説を返す。
 
     **PATTERN ごとに呼び出しを分けて、同時に走らせます。** 1 本にまとめると、
@@ -136,7 +138,7 @@ def run(payload: Mapping[str, Any]) -> tuple[dict[str, Any], llm.Usage, list[dic
     """
     limits = cfg.analysis_config().get("limits") or {}
     research_prompt, structure_prompt = _prompts(
-        limits, payload.get("available_keys"))
+        limits, payload.get("available_keys"), category)
 
     patterns = [p for p in (payload.get("patterns") or []) if p.get("id")]
     if not patterns:
