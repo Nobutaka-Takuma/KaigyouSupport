@@ -74,6 +74,24 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _spec_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """この 1 回だけ設定を差し替えるもの。
+
+    設定ファイルを書き換えて戻し忘れると、次の取り込みが黙って別の設定で
+    走ります。1 回きりの指定は 1 回きりで終わるほうが安全です。
+    """
+    raw = getattr(args, "bbox", None)
+    if not raw:
+        return {}
+    parts = [p.strip() for p in str(raw).replace(" ", ",").split(",") if p.strip()]
+    if len(parts) != 4:
+        raise SystemExit(
+            "error: --bbox は 4 つの数値です: "
+            "--bbox 138.94,35.50,139.92,35.90"
+            "（min_lng,min_lat,max_lng,max_lat）")
+    return {"bbox": [float(v) for v in parts]}
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from kaigyou_etl.pipeline import run_source
 
@@ -81,6 +99,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.source,
         input_path=Path(args.input) if args.input else None,
         offline=args.offline,
+        spec_overrides=_spec_overrides(args),
         # Both meanings, because --prefecture answers both questions: which
         # rows to keep from a nationwide file, and which prefecture a
         # single-prefecture file is *of* (the e-Stat mesh tables say so only in
@@ -1106,6 +1125,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline",
                    help="prior-period file, for sources that derive a change rate "
                         "from two rounds (e.g. the 2015 census against 2020)")
+    p.add_argument("--bbox", default=None, metavar="LNG0,LAT0,LNG1,LAT1",
+                   help="切り取る範囲をこの 1 回だけ指定する"
+                        "（街路ネットワーク用。省略時は取り込む県の"
+                        "市区町村境界から作ります）")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("run-all", help="run every configured source")

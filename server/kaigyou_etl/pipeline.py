@@ -63,13 +63,18 @@ def run_source(source_id: str, *, input_path: Path | None = None,
                offline: bool = False,
                prefecture_filter: str | None = None,
                prefecture_code: str | None = None,
-               baseline_path: Path | None = None) -> RunResult:
-    """Execute the full pipeline for one configured source."""
+               baseline_path: Path | None = None,
+               spec_overrides: Mapping[str, Any] | None = None) -> RunResult:
+    """Execute the full pipeline for one configured source.
+
+    ``spec_overrides`` はこの 1 回だけ設定を差し替えます。設定ファイルを
+    書き換えて戻し忘れると、次の取り込みが黙って別の設定で走ります。
+    """
     sources = cfg.sources_config()
     specs = sources.get("sources") or {}
     if source_id not in specs:
         raise KeyError(f"unknown source {source_id!r}; configured: {sorted(specs)}")
-    spec = specs[source_id]
+    spec = dict(specs[source_id]) | dict(spec_overrides or {})
     defaults = sources.get("defaults") or {}
 
     ctx = AdapterContext(

@@ -776,3 +776,41 @@ def test_two_prefectures_are_not_reported_as_a_broken_network():
     source = inspect.getsource(osm_walk_network.build_topology)
     assert "expected_component_share" in source
     assert "DISTINCT prefecture_code" in source, "県の数で割っていません"
+
+
+def test_a_prefecture_with_far_islands_is_reported_before_the_slow_step(capsys, tmp_path):
+    """**東京都の行政区域には小笠原村が入り、南鳥島（東経154度）まで伸びます。**
+
+    その箱は関東の抽出ファイルを丸ごと飲み込むので 1 本も削れず、交差点の
+    分割が 37 万本ではなく 150 万本に対して走ります。止めはしません（北海道
+    のように本当に広い県があります）。**遅い処理の前に見せて、Ctrl-C
+    できるようにする**のが目的です。
+    """
+    islands = build("osm_walk_network", tmp_path,
+                    {"bbox": [136.07, 20.42, 153.99, 35.90]})
+    islands.bbox()
+    out = capsys.readouterr().out
+    assert "範囲が広すぎます" in out
+    assert "小笠原" in out, "何が起きているのかを名指しすること"
+    assert "--bbox" in out, "次に何をすればよいかを言うこと"
+
+    mainland = build("osm_walk_network", tmp_path,
+                     {"bbox": [138.94, 35.50, 139.92, 35.90]})
+    mainland.bbox()
+    quiet = capsys.readouterr().out
+    assert "切り取る範囲" in quiet, "範囲は常に見せる（遅い処理の前に）"
+    assert "範囲が広すぎます" not in quiet
+
+
+def test_the_clip_can_be_given_for_one_run_only(tmp_path):
+    """設定ファイルを書き換えて戻し忘れると、次の取り込みが黙って別の設定で
+    走ります。1 回きりの指定は 1 回きりで終わること。"""
+    import argparse
+
+    from kaigyou_etl.cli import _spec_overrides
+
+    ns = argparse.Namespace(bbox="138.94,35.50,139.92,35.90")
+    assert _spec_overrides(ns) == {"bbox": [138.94, 35.5, 139.92, 35.9]}
+    assert _spec_overrides(argparse.Namespace(bbox=None)) == {}
+    with pytest.raises(SystemExit):
+        _spec_overrides(argparse.Namespace(bbox="138.94,35.50"))

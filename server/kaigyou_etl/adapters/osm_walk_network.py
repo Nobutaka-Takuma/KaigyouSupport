@@ -94,6 +94,7 @@ class OSMWalkNetworkAdapter(SourceAdapter):
         raw = self.spec.get("bbox")
         if raw:
             self._bbox_cache = tuple(float(v) for v in raw)
+            self._announce(self._bbox_cache, "指定")
             return self._bbox_cache  # type: ignore[return-value]
 
         margin = float(self.spec.get("bbox_margin_m") or 3000.0)
@@ -125,7 +126,33 @@ class OSMWalkNetworkAdapter(SourceAdapter):
                 "交差点の分割に何十分もかかったうえ、使わない道路が経路探索を"
                 "重くします。**")
         self._bbox_cache = box
+        self._announce(box, f"都道府県 {self.ctx.prefecture_code} の境界から")
         return box
+
+    #: この幅を超える箱は、たいてい離島が入っています。**東京都の N03 には
+    #: 小笠原村が含まれ、南鳥島（東経 154 度）まで伸びます。** その箱は関東の
+    #: 抽出ファイルを丸ごと飲み込むので、1 本も削れません。削れないと、交差点の
+    #: 分割が 37 万本ではなく 150 万本に対して走ります。
+    #:
+    #: 止めはしません。北海道のように、本当に広い県があります。**遅い処理の
+    #: 前に見せて、Ctrl-C できるようにするのが目的です。**
+    _WIDE_SPAN_DEG = 3.0
+
+    def _announce(self, box: tuple[float, float, float, float] | None,
+                  origin: str) -> None:
+        if not box:
+            return
+        width, height = box[2] - box[0], box[3] - box[1]
+        print(f"  切り取る範囲（{origin}）: "
+              f"{box[0]:.3f},{box[1]:.3f} 〜 {box[2]:.3f},{box[3]:.3f}"
+              f"（幅 {width:.2f}° × 高さ {height:.2f}°）")
+        if max(width, height) > self._WIDE_SPAN_DEG:
+            print("  **注意: 範囲が広すぎます。** 離島まで含まれている可能性が"
+                  "あります（東京都の行政区域には小笠原村＝南鳥島が入ります）。"
+                  "この箱では抽出ファイルがほとんど削れず、交差点の分割に"
+                  "何十分も余計にかかります。"
+                  "止めて --bbox で本土の範囲を指定することを勧めます。"
+                  "例: --bbox 138.94,35.50,139.92,35.90")
 
     def _prefecture_bbox(self, conn: psycopg.Connection, margin_m: float,
                          ) -> tuple[float, float, float, float] | None:
