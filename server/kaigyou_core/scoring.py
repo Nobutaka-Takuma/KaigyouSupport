@@ -584,3 +584,17 @@ def scope_key(mesh_size_m: int, radius_m: int, prefecture_code: str,
     """
     return (f"mesh:{mesh_size_m}:r{radius_m}:pref{prefecture_code}"
             f":cat{facility_category}:{reference}")
+
+
+def legacy_scope_key(mesh_size_m: int, radius_m: int, prefecture_code: str,
+                     reference: str = DEFAULT_NORMALIZATION_REFERENCE) -> str:
+    """業態を入れる前（マイグレーション 030 より前）の鍵。
+
+    **移行のためだけにあります。** コードは push で即デプロイされますが、
+    マイグレーションは手で当てます。その間、新しい鍵を探しても見つからず、
+    需要と競合が「データ不足」になります（実際に静岡で起きました）。
+
+    書かれた当時はどれも歯科なので、既定の業態のときだけ読みに行きます。
+    030 を当てれば古い鍵は書き換わり、ここは二度と当たりません。
+    """
+    return f"mesh:{mesh_size_m}:r{radius_m}:pref{prefecture_code}:{reference}"

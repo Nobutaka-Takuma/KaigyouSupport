@@ -15,6 +15,7 @@ from kaigyou_core.db import table_exists
 from kaigyou_core.scoring import (
     DEFAULT_FACILITY_CATEGORY,
     Distribution,
+    legacy_scope_key,
     ScoringModel,
     augment_specialty_metrics,
     competition_specialties,
@@ -462,6 +463,20 @@ def resolve_distributions(conn: psycopg.Connection, mesh_size_m: int, radius_m: 
         distributions = load_distributions(conn, scope)
         if distributions:
             return scope, distributions
+
+    # **マイグレーション 030 を当てる前の鍵。** コードは push で即デプロイ
+    # されますが、マイグレーションは手で当てます。その窓で新しい鍵しか探さ
+    # ないと、目盛りは DB にあるのに「未計算」と答えます（実際に静岡で
+    # 起きました：需要と競合が「データ不足」、ランキングは 500）。
+    #
+    # 書かれた当時はどれも歯科なので、既定の業態のときだけ読みに行きます。
+    if facility_category == DEFAULT_CATEGORY:
+        for reference in (preferred, "all", "with_clinics"):
+            scope = legacy_scope_key(mesh_size_m, radius_m, prefecture_code,
+                                     reference)
+            distributions = load_distributions(conn, scope)
+            if distributions:
+                return scope, distributions
     return scope_key(mesh_size_m, radius_m, prefecture_code, preferred,
                      facility_category), {}
 

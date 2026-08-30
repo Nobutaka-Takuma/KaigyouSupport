@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn, get_model
 from kaigyou_core import config as cfg
+from kaigyou_core.db import column_exists
 from kaigyou_core import provenance
 from kaigyou_core.analysis import (
     DEFAULT_CATCHMENT,
@@ -414,11 +415,18 @@ def rankings(
     prefecture_code = default_prefecture(conn, prefecture_code)
     # **業態で絞ります。** 絞らないと、内科を入れたあとに歯科のランキングを
     # 引くと全業態が混ざった順位が返ります。
-    where = ["ms.profile = %s", "ms.radius_m = %s", "ms.facility_category = %s",
-             "ms.overall_score IS NOT NULL",
+    #
+    # ただし列が無い環境では絞りません。コードは push で即デプロイされますが、
+    # マイグレーションは手で当てます。その窓で存在しない列を SELECT すると、
+    # ランキングが 500 になります（実際に静岡で起きました）。書かれた当時は
+    # どれも歯科なので、絞らないことが正しい答えになります。
+    where = ["ms.profile = %s", "ms.radius_m = %s", "ms.overall_score IS NOT NULL",
              "COALESCE(ms.population, 0) >= %s", "pm.prefecture_code = %s"]
-    params: list[Any] = [model.profile_name, radius_m, category,
+    params: list[Any] = [model.profile_name, radius_m,
                          min_population, prefecture_code]
+    if column_exists(conn, "mesh_scores", "facility_category"):
+        where.insert(2, "ms.facility_category = %s")
+        params.insert(2, category)
     if area:
         where.append("ms.area_label ILIKE %s")
         params.append(f"%{area}%")

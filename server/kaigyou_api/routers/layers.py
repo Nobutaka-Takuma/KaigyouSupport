@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, Query
 from kaigyou_api.deps import feature_collection, get_conn, parse_bbox
 from kaigyou_core import provenance
 from kaigyou_core.analysis import DEFAULT_CATEGORY
-from kaigyou_core.db import table_exists
+from kaigyou_core.db import column_exists, table_exists
 
 router = APIRouter()
 
@@ -289,16 +289,21 @@ def meshes(
     if profile:
         # 業態も結合条件に入れます。入れないと、内科を入れたあとに歯科の
         # ヒートマップを引くと、メッシュごとにどちらかの点が当たります。
+        #
+        # 列が無い環境では入れません。デプロイとマイグレーションの間の窓で、
+        # 存在しない列を参照すると地図全体が 500 になります。
+        scoped = column_exists(conn, "mesh_scores", "facility_category")
         join += """
             LEFT JOIN mesh_scores ms
                    ON ms.mesh_id = m.id AND ms.profile = %s
-                  AND ms.facility_category = %s
+        """ + ("AND ms.facility_category = %s\n" if scoped else "") + """
                   AND (%s::int IS NULL OR ms.radius_m = %s)
         """
         select += (", ms.overall_score, ms.demand_score, ms.competition_score,"
                    " ms.growth_score, ms.accessibility_score, ms.facility_count,"
                    " ms.population_per_facility, ms.area_label")
-        params = [profile, category, radius_m, radius_m] + params
+        params = ([profile] + ([category] if scoped else [])
+                  + [radius_m, radius_m] + params)
 
     params.append(limit)
     with conn.cursor() as cur:

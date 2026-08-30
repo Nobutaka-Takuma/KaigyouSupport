@@ -19,6 +19,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from kaigyou_core import config as cfg
+from kaigyou_core.db import column_exists
 from kaigyou_core.analysis import (
     DEFAULT_CATEGORY,
     has_official_boundaries,
@@ -183,6 +184,15 @@ def compute_mesh_scores(conn: psycopg.Connection, *, profile: str | None = None,
     configured profile, so every configured profile should have numbers.
     """
     _make_room(conn, progress)
+    # **書く側は、読む側と違って黙って続けません。** 読む側（API）は列が無い
+    # 環境でも答えを返しますが、ここで列が無いまま書くと業態が記録されない
+    # 行が入り、あとから区別できなくなります。
+    if not column_exists(conn, "mesh_scores", "facility_category"):
+        raise RuntimeError(
+            "mesh_scores に facility_category がありません。"
+            "先に `kaigyou-etl migrate` を実行してください"
+            "（マイグレーション 030）。業態を記録せずに採点すると、"
+            "歯科と医科の点が同じ行に混ざります。")
     mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
     if mesh_size_m is None:
         raise RuntimeError("no population mesh data loaded; nothing to score")

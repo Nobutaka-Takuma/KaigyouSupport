@@ -1087,3 +1087,71 @@ def test_every_command_that_scores_can_name_the_business_type():
             f"{command}: 省略時は今までどおり歯科であること"
         named = parser.parse_args([command] + extra + ["--category", "clinic"])
         assert cli._category(named) == "clinic", f"{command}: 上書きできること"
+
+
+# ------------------------------------------- コードがスキーマより先に出ること
+#
+# コードは push で即デプロイされますが、マイグレーションは手で当てます。
+# その順序は選べないので、**新しいコードは古いスキーマでも動く**必要があります。
+#
+# 実際に静岡で壊しました（030 をデプロイ、migrate は未実行）:
+#   - 需要と競合が「データ不足」        新しい鍵しか探さなかった
+#   - ランキングとヒートマップが 500     存在しない列を SELECT した
+#
+# docs/refactoring-multi-specialty.md の「移行の作法」を参照。
+
+def test_the_reader_still_finds_scales_written_before_the_migration():
+    """**移行前に書かれた鍵も読めること。**
+
+    030 は scope 文字列を書き換えますが、当てるのは人です。当たるまでの間、
+    新しい鍵しか探さないと、目盛りは DB にあるのに「未計算」と答えます。
+    """
+    from kaigyou_core.scoring import legacy_scope_key, scope_key
+
+    legacy = legacy_scope_key(500, 1000, "22", "with_clinics")
+    assert legacy == "mesh:500:r1000:pref22:with_clinics"
+    assert legacy != scope_key(500, 1000, "22", "with_clinics", "dental_clinic")
+    # 移行の SQL が作る形と、新しい鍵が一致すること（030 のテストと対）。
+    import re
+    assert re.sub(r"^(mesh:[0-9]+:r[0-9]+:pref[0-9]+):([a-z_]+)$",
+                  r"\1:catdental_clinic:\2", legacy) == scope_key(
+                      500, 1000, "22", "with_clinics", "dental_clinic")
+
+
+def test_no_reader_selects_a_column_that_a_migration_has_not_added_yet():
+    """**存在しない列を SELECT すると、その画面は 500 になります。**
+
+    列を足したマイグレーションが当たる前でも読める必要があるので、
+    `mesh_scores.facility_category` を参照する箇所は、その手前で
+    `column_exists` を見ていること。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    # 読む側のファイル。書く側（scores.py）は列が無ければ止まるのが正しい。
+    readers = [
+        root / "kaigyou_core" / "measures.py",
+        root / "kaigyou_api" / "routers" / "analysis.py",
+        root / "kaigyou_api" / "routers" / "layers.py",
+    ]
+    for path in readers:
+        text = path.read_text(encoding="utf-8")
+        if "ms.facility_category" not in text:
+            continue
+        assert "column_exists" in text and '"facility_category"' in text, (
+            f"{path.name}: facility_category を無条件に SELECT しています。"
+            "マイグレーションが当たる前は 500 になります")
+
+
+def test_the_writer_refuses_instead_of_writing_rows_without_a_business_type():
+    """読む側と書く側では、正しい振る舞いが逆です。
+
+    読む側は答えを返し続けます（当時はどれも歯科なので、絞らないのが正解）。
+    書く側は止まります。業態を記録しないまま書くと、あとから区別できません。
+    """
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "kaigyou_etl" / "scores.py"
+            ).read_text(encoding="utf-8")
+    assert "column_exists(conn, \"mesh_scores\", \"facility_category\")" in text
+    assert "migrate" in text, "止めるだけでなく、次に何をすればよいか言うこと"

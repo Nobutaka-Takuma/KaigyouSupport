@@ -419,6 +419,23 @@ class BenchmarkScope:
     not_discriminating_reason: str | None = None
 
 
+#: `mesh_scores.facility_category` があるか。**デプロイとマイグレーションの
+#: 間の窓のためです。** コードは push で即デプロイされますが、マイグレーションは
+#: 手で当てます。存在しない列を SELECT すると分析全体が 500 になります
+#: （実際に静岡で起きました）。列が無いときは業態で絞らずに読みます——当時は
+#: どれも歯科なので、絞らないことが正しい答えになります。
+def _scores_scoped_by_category(conn: psycopg.Connection) -> bool:
+    return column_exists(conn, "mesh_scores", "facility_category")
+
+
+def _category_filter(conn: psycopg.Connection, facility_category: str,
+                     ) -> tuple[str, tuple[Any, ...]]:
+    """業態で絞る WHERE 断片。列が無い環境では空を返します。"""
+    if _scores_scoped_by_category(conn):
+        return "ms.facility_category = %s AND ", (facility_category,)
+    return "", ()
+
+
 def viable_floor(conn: psycopg.Connection, *, profile: str, radius_m: int,
                  facility_category: str = DEFAULT_FACILITY_CATEGORY,
                  prefecture_code: str, percentile: float) -> float | None:
@@ -429,19 +446,19 @@ def viable_floor(conn: psycopg.Connection, *, profile: str, radius_m: int,
     診療所が成立している」の実測下限になります。恣意的な閾値を置かずに、
     無人メッシュと生活圏を分けられます。（東京では9,636人）
     """
+    category, params = _category_filter(conn, facility_category)
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT percentile_cont(%s) WITHIN GROUP (ORDER BY ms.population) AS floor,
                    count(*) AS n
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
-            WHERE ms.profile = %s AND ms.radius_m = %s
-              AND ms.facility_category = %s
-              AND pm.prefecture_code = %s AND ms.facility_count > 0
+            WHERE ms.profile = %s AND ms.radius_m = %s AND {category}
+                  pm.prefecture_code = %s AND ms.facility_count > 0
               AND ms.population IS NOT NULL
             """,
-            (percentile, profile, radius_m, facility_category, prefecture_code))
+            (percentile, profile, radius_m) + params + (prefecture_code,))
         row = cur.fetchone()
     if not row or not row["n"] or row["floor"] is None:
         return None
@@ -540,6 +557,7 @@ def measure_scope_shape(conn: psycopg.Connection, scope: BenchmarkScope, *,
     「極めて高い」という評価は付けません。評価が付かなければ、
     「本商圏の最大のエンジン」という文はそもそも書けません。
     """
+    category, params = _category_filter(conn, facility_category)
     with conn.cursor() as cur:
         cur.execute(
             f"""
@@ -547,11 +565,10 @@ def measure_scope_shape(conn: psycopg.Connection, scope: BenchmarkScope, *,
                    count(*) FILTER (WHERE ms.population < %s)::int AS below
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
-            WHERE ms.profile = %s AND ms.radius_m = %s
-              AND ms.facility_category = %s AND {scope.where}
+            WHERE ms.profile = %s AND ms.radius_m = %s AND {category}{scope.where}
             """,
-            (floor if floor is not None else -1.0, profile, radius_m,
-             facility_category) + scope.params)
+            (floor if floor is not None else -1.0, profile, radius_m)
+            + params + scope.params)
         row = cur.fetchone()
 
     scope.sample_count = int(row["n"] or 0)
@@ -771,16 +788,16 @@ def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str,
         parts.append(f"count(*) FILTER (WHERE {column} <= %s) AS {key}_below")
         params.append(values[key])
 
+    category, cat_params = _category_filter(conn, facility_category)
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT count(*)::int AS meshes, {', '.join(parts)}
             FROM mesh_scores ms
             JOIN population_mesh pm ON pm.id = ms.mesh_id
-            WHERE ms.profile = %s AND ms.radius_m = %s
-              AND ms.facility_category = %s AND {scope.where}
+            WHERE ms.profile = %s AND ms.radius_m = %s AND {category}{scope.where}
             """,
-            params + [profile, radius_m, facility_category] + list(scope.params))
+            params + [profile, radius_m] + list(cat_params) + list(scope.params))
         row = cur.fetchone()
 
     if not row or (row["meshes"] or 0) < MIN_BENCHMARK_SAMPLE:
