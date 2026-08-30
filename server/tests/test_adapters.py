@@ -715,3 +715,64 @@ def test_resident_profile_records_how_students_compare_with_adults(tmp_path):
     assert facts["students_university_peak_mesh"] == 669
     assert facts["students_per_adult_peak"] == round(669 / 4084, 3)
     assert facts["residence_duration_columns"]
+
+
+# ------------------------------------------------ 2 県目が 1 県目を消さないこと
+#
+# 取り込みは source_id で全置換していて、source_id に県は入っていません。
+# メッシュ統計で同じことが起き、012 で直したのと同じ形です。
+
+def test_a_second_prefecture_does_not_delete_the_first_road_network(tmp_path):
+    """**静岡を入れた時点で東京の道路網が消える、という状態でした。**
+
+    しかも取り込みは成功と表示します。列が無い環境では、書く側は止まるのが
+    正しい（読む側と逆。docs/refactoring-multi-specialty.md）。
+    """
+    import inspect
+
+    from kaigyou_etl.adapters.osm_walk_network import OSMWalkNetworkAdapter
+
+    source = inspect.getsource(OSMWalkNetworkAdapter.load)
+    assert "prefecture_code = %s" in source, \
+        "DELETE を県で絞っていません。2 県目が 1 県目を消します"
+    assert 'column_exists(conn, "walk_network", "prefecture_code")' in source, \
+        "列が無いまま書くと、絞れないまま全置換になります"
+    assert "migrate" in source, "止めるだけでなく、次に何をすればよいか言うこと"
+
+
+def test_the_clip_comes_from_the_prefecture_being_loaded(tmp_path):
+    """**東京23区の箱が書きっぱなしで、沼津はその外にありました。**
+
+    県ごとに手で書き換える設定は、いつか書き換え忘れます。書き換え忘れると
+    1 本も入らないまま「成功」と表示されます。
+    """
+    from kaigyou_etl.acquisition import AcquisitionError
+
+    # 設定に書いてあれば、その意図を尊重する。
+    explicit = build("osm_walk_network", tmp_path, {"bbox": [130.0, 33.0, 131.0, 34.0]})
+    assert explicit.bbox() == (130.0, 33.0, 131.0, 34.0)
+
+    # 書いていなければ県から作る。作れなければ**止まる**。切り取らずに地方
+    # 全体を入れると、交差点の分割に何十分もかかったうえ役に立ちません。
+    derived = build("osm_walk_network", tmp_path, {"bbox": None})
+    try:
+        box = derived.bbox()
+    except AcquisitionError as exc:
+        assert "市区町村境界" in str(exc) and "mlit_municipalities" in str(exc)
+    else:
+        assert box is not None and len(box) == 4
+
+
+def test_two_prefectures_are_not_reported_as_a_broken_network():
+    """東京と静岡の道は繋がっていません。**成分が 2 つあるのが正しい姿です。**
+
+    全体に対する割合で見ると、2 県目を入れた瞬間に「分断されています」と
+    警告が出ます。警告が当たり前になると、本物の分断を見落とします。
+    """
+    import inspect
+
+    from kaigyou_etl.adapters import osm_walk_network
+
+    source = inspect.getsource(osm_walk_network.build_topology)
+    assert "expected_component_share" in source
+    assert "DISTINCT prefecture_code" in source, "県の数で割っていません"

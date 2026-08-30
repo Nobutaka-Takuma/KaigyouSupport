@@ -24,7 +24,13 @@ from typing import Any, Iterable, Iterator
 
 import psycopg
 
-from kaigyou_etl.acquisition import ERROR_EMPTY, ERROR_SCHEMA, AcquisitionError
+from kaigyou_core.db import column_exists
+from kaigyou_etl.acquisition import (
+    ERROR_EMPTY,
+    ERROR_INPUT_MISSING,
+    ERROR_SCHEMA,
+    AcquisitionError,
+)
 from kaigyou_etl.adapters._util import read_shapefile
 from kaigyou_etl.adapters.base import SourceAdapter
 
@@ -61,14 +67,88 @@ class OSMWalkNetworkAdapter(SourceAdapter):
     def walkable_classes(self) -> set[str]:
         return {str(c).strip().lower() for c in (self.spec.get("walkable_classes") or [])}
 
-    def bbox(self) -> tuple[float, float, float, float] | None:
-        """Optional clip, as (min_lng, min_lat, max_lng, max_lat).
+    def bbox(self, conn: psycopg.Connection | None = None,
+             ) -> tuple[float, float, float, float] | None:
+        """切り取る範囲 (min_lng, min_lat, max_lng, max_lat)。
 
-        A Kanto extract is far larger than the prefecture being analysed, and
-        every edge outside it is dead weight in the routing graph.
+        地方の抽出ファイルは県よりずっと大きく、県の外の辺は経路探索の重しに
+        しかなりません。
+
+        優先順位は 2 つだけです。
+
+        1. 設定に ``bbox`` が書いてあれば、それを使う（手で指定した意図を尊重）
+        2. 書いていなければ、**取り込む県の市区町村境界から作る**
+
+        既定を 2 にしたのは、1 を既定にしていたからです。東京23区の箱が
+        書きっぱなしになっていて、静岡を入れると 1 本も残らないのに
+        「成功」と表示されました。県ごとに手で書き換える設定は、いつか
+        書き換え忘れます。
+
+        どちらも無いときは止めます。切り取らずに地方全体を入れると、交差点の
+        分割（いちばん遅い処理）が何十分も走ったうえで、使わない道路が
+        経路探索を重くします。
         """
-        box = self.spec.get("bbox")
-        return tuple(float(v) for v in box) if box else None  # type: ignore[return-value]
+        if getattr(self, "_bbox_cache", "unset") != "unset":
+            return self._bbox_cache  # type: ignore[return-value]
+
+        raw = self.spec.get("bbox")
+        if raw:
+            self._bbox_cache = tuple(float(v) for v in raw)
+            return self._bbox_cache  # type: ignore[return-value]
+
+        margin = float(self.spec.get("bbox_margin_m") or 3000.0)
+        try:
+            if conn is not None:
+                box = self._prefecture_bbox(conn, margin)
+            else:
+                # validate と transform は接続を持たずに呼ばれます。県の範囲は
+                # DB にしかないので、ここだけ自分で開きます。
+                from kaigyou_core.db import connect
+
+                with connect() as own:
+                    box = self._prefecture_bbox(own, margin)
+        except Exception as exc:  # noqa: BLE001 - 理由を言ってから止める
+            raise AcquisitionError(
+                ERROR_SCHEMA,
+                f"県の範囲を引けませんでした（{type(exc).__name__}: {exc}）。"
+                "config/sources.yaml の bbox に範囲を書くか、DB に接続できる"
+                "状態で実行してください。") from exc
+
+        if box is None:
+            raise AcquisitionError(
+                ERROR_INPUT_MISSING,
+                f"都道府県 {self.ctx.prefecture_code} の市区町村境界が入って"
+                "いないため、切り取る範囲を作れません。先に "
+                "`kaigyou-etl run mlit_municipalities --prefecture "
+                f"{self.ctx.prefecture_code}` を実行するか、config/sources.yaml "
+                "の bbox に範囲を書いてください。**範囲なしで地方全体を入れると、"
+                "交差点の分割に何十分もかかったうえ、使わない道路が経路探索を"
+                "重くします。**")
+        self._bbox_cache = box
+        return box
+
+    def _prefecture_bbox(self, conn: psycopg.Connection, margin_m: float,
+                         ) -> tuple[float, float, float, float] | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ST_XMin(e) AS x0, ST_YMin(e) AS y0,
+                       ST_XMax(e) AS x1, ST_YMax(e) AS y1
+                FROM (
+                    -- ST_Extent は box2d を返すので、いちど geometry に
+                    -- してから geography に渡します（box2d は直接キャスト
+                    -- できず、握りつぶすと黙って設定の箱に落ちます）。
+                    SELECT ST_Envelope(ST_Buffer(
+                        ST_SetSRID(ST_Extent(geom)::geometry, 4326)::geography,
+                        %s)::geometry) AS e
+                    FROM municipalities WHERE prefecture_code = %s
+                ) s
+                """, (margin_m, self.ctx.prefecture_code))
+            row = cur.fetchone()
+        if not row or row["x0"] is None:
+            return None
+        return (float(row["x0"]), float(row["y0"]),
+                float(row["x1"]), float(row["y1"]))
 
     def _rows(self, artifact: Path):
         fields, records = read_shapefile(
@@ -157,23 +237,41 @@ class OSMWalkNetworkAdapter(SourceAdapter):
                     "name": name,
                     "road_class": road_class,
                     "geom_wkt": _wkt(points),
+                    "prefecture_code": self.ctx.prefecture_code,
                     "source_date": source_date,
                 }
 
     def load(self, conn: psycopg.Connection, records: Iterable[dict[str, Any]]) -> int:
+        # **列が無いまま入れると、2 つ目の県が 1 つ目を消します。** 取り込みは
+        # source_id で全置換していて、source_id に県は入っていません。書く側は
+        # 止まるのが正しい（読む側と逆です。docs/refactoring-multi-specialty.md）。
+        if not column_exists(conn, "walk_network", "prefecture_code"):
+            raise AcquisitionError(
+                ERROR_SCHEMA,
+                "walk_network に prefecture_code がありません。先に "
+                "`kaigyou-etl migrate` を実行してください（マイグレーション 031）。"
+                "県を記録せずに取り込むと、2 つ目の県を入れた時点で 1 つ目の"
+                "道路網が消えます（しかも成功と表示されます）。")
+
         rows = [rec | {"source_id": self.source_id} for rec in records]
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM walk_network WHERE source_id = %s", (self.source_id,))
+            # **県で絞って置き換えます。** 絞らないと、静岡を入れた時点で
+            # 東京の道路網が消えます（メッシュ統計で同じことが起き、012 で
+            # 直したのと同じ形です）。
+            cur.execute("DELETE FROM walk_network "
+                        "WHERE source_id = %s AND prefecture_code = %s",
+                        (self.source_id, self.ctx.prefecture_code))
             count = self.insert_many(
                 cur,
                 """
                     INSERT INTO walk_network (
-                        source_id, osm_id, name, road_class, geom, cost_m, source_date
+                        source_id, osm_id, name, road_class, geom, cost_m,
+                        prefecture_code, source_date
                     ) VALUES (
                         %(source_id)s, %(osm_id)s, %(name)s, %(road_class)s,
                         ST_GeomFromText(%(geom_wkt)s, 4326),
                         ST_Length(ST_GeomFromText(%(geom_wkt)s, 4326)::geography),
-                        %(source_date)s
+                        %(prefecture_code)s, %(source_date)s
                     )
                 """,
                 rows,
@@ -190,8 +288,14 @@ class OSMWalkNetworkAdapter(SourceAdapter):
             print(f"  ノード {summary['nodes']:,} / 分割後エッジ "
                   f"{summary['noded_edges']:,} / 最大連結成分 "
                   f"{summary['largest_component_share']:.1%}")
-            if (summary.get("largest_component_share") or 0) < 0.8:
-                print("  警告: ネットワークが分断されています。"
+            # 県ごとに独立した網なので、閾値も県の数で割ります。割らないと、
+            # 2 県目を入れた瞬間に毎回この警告が出て、本物の分断が埋もれます。
+            floor = 0.8 * (summary.get("expected_component_share") or 1.0)
+            if (summary.get("largest_component_share") or 0) < floor:
+                print(f"  警告: ネットワークが分断されています"
+                      f"（最大成分 {summary['largest_component_share']:.1%}、"
+                      f"{summary.get('prefectures', 1)} 県なら "
+                      f"{floor:.1%} 以上が目安）。"
                       "topology_tolerance_deg の見直しが必要かもしれません。")
         return count
 
@@ -277,11 +381,27 @@ def build_topology(conn: psycopg.Connection, *, tolerance_deg: float = 0.00001,
         """)
         row = cur.fetchone()
         largest = row["n"] if row else 0
+
+        # **県が 2 つ入っていれば、成分も 2 つあるのが正しい姿です。**
+        # 東京と静岡の道は繋がっていません。全体に対する割合で見ると、
+        # 2 県目を入れた瞬間に「ネットワークが分断されています」と警告が
+        # 出ます。警告が当たり前になると、本物の分断を見落とします。
+        #
+        # 数えるのは、いちばん大きい成分が**入っている県の数**に対して
+        # 妥当かどうか。県が n 個なら、最大成分は全体の 1/n 前後で正常です。
+        cur.execute("SELECT count(DISTINCT prefecture_code) AS n FROM walk_network"
+                    if column_exists(conn, "walk_network", "prefecture_code")
+                    else "SELECT 1 AS n")
+        prefectures = max(1, int((cur.fetchone() or {}).get("n") or 1))
     conn.commit()
     return {
         "topology": "built",
         "noded_edges": edges,
         "nodes": nodes,
+        "prefectures": prefectures,
         "largest_component_nodes": largest,
         "largest_component_share": round(largest / nodes, 3) if nodes else None,
+        # 県が n 個なら、最大成分は 1/n 前後が正常です。これを下回るときだけ
+        # 分断を疑います。
+        "expected_component_share": round(1.0 / prefectures, 3),
     }

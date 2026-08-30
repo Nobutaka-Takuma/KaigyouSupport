@@ -659,16 +659,23 @@ sources:
       - secondary_link
       - primary
       - primary_link
-    # Clip to the area being analysed. A Kanto extract is several times larger
-    # than Tokyo, and every edge outside it slows every search.
-    # (min_lng, min_lat, max_lng, max_lat). Start narrow: noding a network is
-    # the slow step and it grows with the square of nothing helpful. Widen once
-    # a run has completed and the size is known.
-    #   23 wards        [139.56, 35.53, 139.92, 35.82]
-    #   Tokyo mainland  [138.90, 35.45, 139.95, 35.90]
-    # Outside the box there is no network, so `walk` falls back to a circle --
-    # which the analysis reports rather than hides.
-    bbox: [139.56, 35.53, 139.92, 35.82]
+    # 切り取る範囲。**通常は取り込む県の市区町村境界から自動で作ります。**
+    # 地方の抽出ファイルは県よりずっと大きく、県の外の辺は経路探索の重しに
+    # しかなりません。
+    #
+    # 県境をまたいで歩く人がいるので、県の外側に余白を足します。
+    bbox_margin_m: 3000
+    #
+    # 下の bbox は**落とし先**です。市区町村境界がまだ入っていない県で
+    # 取り込むとこれが使われ、箱の外の道路は 1 本も入りません（取り込みは
+    # そのことを警告します）。以前はこれが唯一の設定で、東京23区のまま
+    # 静岡を入れると 0 本になる、という状態でした。
+    # (min_lng, min_lat, max_lng, max_lat)
+    #   23区のみ        [139.56, 35.53, 139.92, 35.82]
+    #   東京本土        [138.90, 35.45, 139.95, 35.90]
+    # 箱の外にはネットワークが無いので、`walk` は円に落ちます——それは
+    # 分析が隠さずに報告します。
+    bbox: null
     # Endpoint-matching tolerance in degrees for pgr_createTopology.
     # 0.00001 deg is about 1.1 m at this latitude.
     topology_tolerance_deg: 0.00001
