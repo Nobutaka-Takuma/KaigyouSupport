@@ -1155,3 +1155,21 @@ def test_the_writer_refuses_instead_of_writing_rows_without_a_business_type():
             ).read_text(encoding="utf-8")
     assert "column_exists(conn, \"mesh_scores\", \"facility_category\")" in text
     assert "migrate" in text, "止めるだけでなく、次に何をすればよいか言うこと"
+
+
+def test_migrate_says_how_many_files_it_can_see():
+    """「applied: 026」だけでは、027 以降が当たっていないのか、**そもそも
+    ファイルが無いのか**が読めません。
+
+    実際にそれで詰まりました。手元のチェックアウトが古く、027 以降が存在
+    しなかったのですが、出力からはそう読めませんでした。当てた数ではなく、
+    **見えているファイルの数と最新の名前**を出せば、その場で分かります。
+    """
+    import inspect
+
+    from kaigyou_etl import cli
+
+    source = inspect.getsource(cli.cmd_migrate)
+    assert "migrations_dir" in source, "どこを見たかを出していません"
+    assert "len(files)" in source, "見えているファイルの数を出していません"
+    assert "最新" in source, "最新のファイル名を出していません"

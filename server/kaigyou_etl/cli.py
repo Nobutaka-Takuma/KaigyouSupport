@@ -42,14 +42,27 @@ def _json_default(obj: Any) -> str:
 
 # --------------------------------------------------------------------- commands
 def cmd_migrate(args: argparse.Namespace) -> int:
-    from kaigyou_etl.migrate import migrate
+    """マイグレーションを当てて、**手元に何があるか**まで出す。
 
+    「applied: 026」とだけ出ていたので、027 以降が当たっていないのか、
+    そもそもファイルが無いのかが読めませんでした。実際には手元のチェック
+    アウトが古く、027 以降が**存在しなかった**ケースです。当てた数だけを
+    出すと、そこが見えません。
+    """
+    from kaigyou_etl.migrate import migrate, migrations_dir
+
+    files = sorted(migrations_dir().glob("*.sql"))
     with connect() as conn:
         applied = migrate(conn, force=args.force)
     if applied:
         print("applied:", ", ".join(applied))
     else:
         print("schema already up to date")
+
+    newest = files[-1].name if files else "（なし）"
+    print(f"  {migrations_dir()} に {len(files)} 件（最新 {newest}）")
+    if files and applied and applied[-1] != newest:
+        print("  注意: 最新のファイルが当たっていません。")
     return EXIT_OK
 
 
