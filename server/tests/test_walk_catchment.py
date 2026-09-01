@@ -271,3 +271,48 @@ def test_the_repair_does_not_revert_a_later_migration():
         with conn.cursor() as cur:
             cur.execute("SELECT to_regproc('kg_walk_catchment') AS fn")
             assert cur.fetchone()["fn"] is not None, "and it still repaired what it is for"
+
+
+def test_the_buffer_is_the_same_width_in_every_direction(network):
+    """速くするために形を歪めていないこと。
+
+    ポリゴンは geography の ST_Buffer をやめ、3857 に投影してから膨らませて
+    います（4km 四方・40m 間隔の格子で実測 42.8 秒 -> 3.5 秒、頂点
+    6,320 -> 633）。それが徒歩圏で分析を始められなかった原因でした。
+
+    メルカトルは緯度が上がるほど引き伸ばされるので、1/cos(緯度) 倍した距離で
+    膨らませないと、地上では 40m のはずが緯度 35 度で 32.5m になります。
+    **縮尺の補正を落としても、地図を見て気づくことはできません**——商圏が
+    ひとまわり細くなるだけで、それらしく見えます。
+
+    4326 のまま度で膨らませるのがいちばん速いのですが、その場合は東西だけが
+    潰れます。だから南北と東西を別々に測ります。
+
+    測り方は、同じ地点を膨らませ幅 40m と 140m の 2 回。**経路探索の結果は
+    どちらも同じ**なので、外形の差はちょうど膨らませ幅の差 100m になります。
+    """
+    lat, lng = POINT
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH a AS (SELECT kg_walk_catchment(%s, %s, 500, 40)  AS g),
+                 b AS (SELECT kg_walk_catchment(%s, %s, 500, 140) AS g)
+            SELECT
+                ST_Distance(
+                    ST_SetSRID(ST_MakePoint(ST_XMax(a.g), ST_YMax(a.g)), 4326)::geography,
+                    ST_SetSRID(ST_MakePoint(ST_XMax(b.g), ST_YMax(a.g)), 4326)::geography
+                ) AS east_m,
+                ST_Distance(
+                    ST_SetSRID(ST_MakePoint(ST_XMax(a.g), ST_YMax(a.g)), 4326)::geography,
+                    ST_SetSRID(ST_MakePoint(ST_XMax(a.g), ST_YMax(b.g)), 4326)::geography
+                ) AS north_m
+            FROM a, b
+            """, (lat, lng, lat, lng))
+        row = cur.fetchone()
+
+    east, north = float(row["east_m"]), float(row["north_m"])
+    assert 95 < east < 105, f"東西の膨らませ幅が 100m ではありません: {east:.1f}m"
+    assert 95 < north < 105, f"南北の膨らませ幅が 100m ではありません: {north:.1f}m"
+    assert abs(east - north) < 3, (
+        f"東西 {east:.1f}m と南北 {north:.1f}m で幅が違います。"
+        "投影せずに度で膨らませると東西だけ cos(緯度) 倍に潰れます。")

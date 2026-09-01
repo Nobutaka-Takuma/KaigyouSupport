@@ -413,3 +413,29 @@ def test_the_export_panel_opens_where_the_button_is():
     assert actions < export < scores, (
         "the export panel must render between the button and the scores, "
         "not below the whole panel")
+
+
+def test_no_radius_is_measured_twice(client, monkeypatch):
+    """同じ半径を 2 回測らない。
+
+    円のときは 1 回 0.01 秒なので、重複していても誰も気づきませんでした。
+    徒歩圏では 1 回が実測で 1.8 秒（半径 2km、分割後 20,200 辺の格子）に
+    なり、しかも build_dataset はジョブ作成の **HTTP 応答の中で** 走ります。
+    半径 1000m は「半径ごとのループ」「metrics」「メッシュ比較」の 3 か所から
+    別々に呼ばれていて、徒歩圏で API がタイムアウトする一因でした。
+    """
+    from kaigyou_core import dataset as ds
+
+    seen: list[int] = []
+    real = ds.analyze_point
+
+    def counting(conn, lat, lng, radius_m, *args, **kwargs):
+        seen.append(radius_m)
+        return real(conn, lat, lng, radius_m, *args, **kwargs)
+
+    monkeypatch.setattr(ds, "analyze_point", counting)
+    with connect() as conn:
+        ds.build_dataset(conn, GINZA["lat"], GINZA["lng"], GINZA["radius"])
+
+    assert seen, "何も測っていない"
+    assert len(seen) == len(set(seen)), f"同じ半径を測り直しています: {sorted(seen)}"

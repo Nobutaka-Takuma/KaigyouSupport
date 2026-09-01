@@ -1419,10 +1419,14 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     pairs = competition_specialties(scoring_config)
 
     radii = sorted({*model.radii, radius_m})
+    #: 半径ごとの生の測定結果。**同じ半径を測り直さないために持ちます。**
+    #: 円のときは 1 回 0.01 秒なので重複は見えませんでしたが、徒歩圏では
+    #: 1 回 2 秒近くかかり、しかもここはジョブ作成の HTTP 応答の中です。
+    measured: dict[int, dict[str, Any]] = {}
     by_radius: dict[str, Any] = {}
     for r in radii:
-        m = analyze_point(conn, lat, lng, r, category, mesh_size_m or 1000, catchment,
-                          specialty)
+        m = measured[r] = analyze_point(
+            conn, lat, lng, r, category, mesh_size_m or 1000, catchment, specialty)
         by_radius[str(r)] = {
             "population": _round(m.get("population")),
             "age_0_14": _round(m.get("age_0_14")),
@@ -1441,8 +1445,8 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "clinics_with_specialty_data": m.get("facilities_with_specialty_data"),
         }
 
-    metrics = analyze_point(conn, lat, lng, radius_m, category,
-                            mesh_size_m or 1000, catchment, specialty)
+    # radius_m は必ず radii に入っているので、上のループがもう測っています。
+    metrics = measured[radius_m]
     augment_specialty_metrics(metrics, pairs)
 
     # The mesh distribution exists only at the radius the scoring ran at, so
@@ -1450,9 +1454,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     # against meshes measured at 1km would be a different quantity wearing the
     # same name.
     comparison_radius = model.mesh_scoring_radius_m
-    comparison_metrics = (metrics if comparison_radius == radius_m else
-                          analyze_point(conn, lat, lng, comparison_radius, category,
-                                        mesh_size_m or 1000, catchment, specialty))
+    comparison_metrics = measured.get(comparison_radius) or analyze_point(
+        conn, lat, lng, comparison_radius, category,
+        mesh_size_m or 1000, catchment, specialty)
     scope, distributions = resolve_distributions(
         conn, mesh_size_m or 1000, radius_m, prefecture_code, scoring_config,
         category)

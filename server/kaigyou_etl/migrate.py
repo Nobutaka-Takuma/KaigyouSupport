@@ -49,7 +49,7 @@ def migrate(conn: psycopg.Connection, *, force: bool = False) -> list[str]:
 #: re-applied on every migrate, because "already applied" and "actually did
 #: something" are different questions for them.
 _CONDITIONAL = ("009_walk_network.sql", "010_walk_network_noding.sql",
-                "011_catchment_mode.sql")
+                "011_catchment_mode.sql", "032_walk_catchment_speed.sql")
 
 
 def _ensure_optional_functions(conn: psycopg.Connection) -> None:

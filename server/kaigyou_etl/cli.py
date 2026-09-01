@@ -8,6 +8,7 @@
     kaigyou-etl generate-sample / drop-sample
     kaigyou-etl refresh-stats
     kaigyou-etl compute-scores [--profile NAME]
+    kaigyou-etl build-topology
     kaigyou-etl status [--json]
     kaigyou-etl doctor
 
@@ -977,6 +978,38 @@ def cmd_compute_scores(args: argparse.Namespace) -> int:
 
 
 
+def cmd_build_topology(args: argparse.Namespace) -> int:
+    """取り込み済みの道路網からグラフを作り直す。取り込みはやり直さない。
+
+    ``run osm_walk_network`` は取り込みの最後にこれを呼びます。それとは別に
+    ここからも呼べるようにしてあるのは、**グラフ作りだけが落ちたときに、
+    道路の取り込みからやり直すのが高くつくから**です。
+
+    取り込みは shapefile を 2 回読みます（走行可能な道を数えるときと、行に
+    変換するとき）。関東の抽出ファイルでは、この 2 回だけで数十分かかります。
+    辺はコミット済みなので、作り直すのはグラフだけで足ります。
+
+    グラフ作りは書き込みが多く（分割後の辺は元の 2〜3 倍になります）、落ちる
+    としたらたいていここです。容量や実行時間の上限に当たったあと、条件を
+    直してここだけを再実行できます。
+    """
+    from kaigyou_etl.adapters.osm_walk_network import build_topology
+
+    spec = (cfg.sources_config().get("sources") or {}).get("osm_walk_network") or {}
+    tolerance = float(args.tolerance if args.tolerance is not None
+                      else (spec.get("topology_tolerance_deg") or 0.00001))
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM walk_network")
+            edges = cur.fetchone()["n"]
+        if not edges:
+            print("walk_network が空です。先に `run osm_walk_network` で道路を"
+                  "取り込んでください。")
+            return EXIT_ERROR
+        summary = build_topology(conn, tolerance_deg=tolerance, progress=print)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
+    return EXIT_OK if summary.get("topology") == "built" else EXIT_PARTIAL
+
 def cmd_drop_prefecture(args: argparse.Namespace) -> int:
     """Remove everything loaded under one prefecture code.
 
@@ -1204,6 +1237,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prefecture", default="13")
     _add_category(p)
     p.set_defaults(func=cmd_compute_scores)
+
+    p = sub.add_parser(
+        "build-topology",
+        help="取り込み済みの道路網からグラフを作り直す（徒歩圏の経路探索用）")
+    p.add_argument("--tolerance", type=float, default=None,
+                   help="端点をつなぐ許容誤差（度）。既定は sources.yaml の値")
+    p.set_defaults(func=cmd_build_topology)
 
     p = sub.add_parser(
         "drop-prefecture",
