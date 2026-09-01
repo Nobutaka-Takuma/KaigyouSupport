@@ -859,6 +859,25 @@ export function MapPage() {
               市街地へ移動してください。
             </div>
           )}
+          {cityPlanningKind && zoneLegend.length > 0 && (
+            <div className="zonelegend">
+              <span className="zonelegend__title">
+                {cityPlanningKinds.find((k) => k.kind === cityPlanningKind)?.label
+                  ?? "都市計画"}
+              </span>
+              {zoneLegend.map((z) => (
+                <span key={z.key} className="zonelegend__item">
+                  <span className="zonelegend__swatch" style={{ background: z.color }} />
+                  {z.key}
+                </span>
+              ))}
+              <span className="zonelegend__note">
+                区域を押すと名称・容積率・建蔽率と、診療所を建てられるかの一次判定が出ます。
+                出典：国土数値情報 A55。建築の可否は規模・接道・条例で変わり、決めるのは
+                特定行政庁です。
+              </span>
+            </div>
+          )}
           <div className="map__legend">
             <span className="dot dot--clinic" /> 歯科医院
             <span className="dot dot--station" /> 駅
@@ -875,28 +894,6 @@ export function MapPage() {
           </div>
         </div>
 
-        {cityPlanningKind && zoneLegend.length > 0 && (
-          <div className="zonelegend">
-            <span className="zonelegend__title">
-              {cityPlanningKinds.find((k) => k.kind === cityPlanningKind)?.label
-                ?? "都市計画"}
-            </span>
-            {zoneLegend.map((z) => (
-              <span key={z.key} className="zonelegend__item">
-                <span
-                  className="zonelegend__swatch"
-                  style={{ background: z.color }}
-                />
-                {z.key}
-              </span>
-            ))}
-            <span className="zonelegend__note">
-              区域を押すと名称・容積率・建蔽率と、診療所を建てられるかの一次判定が出ます。
-              出典：国土数値情報 A55 都市計画決定情報。建築の可否は規模・接道・条例で変わり、
-              決めるのは特定行政庁です。
-            </span>
-          </div>
-        )}
 
         <aside className={sheetOpen ? "panel panel--open" : "panel"}>
           {analysis && (

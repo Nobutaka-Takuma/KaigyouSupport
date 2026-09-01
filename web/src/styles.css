@@ -995,25 +995,50 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   color: #6b7280;
 }
 
-/* 色そのものが凡例なので、地図の脇に出します。塗り分けだけ見せて
-   「この緑は何か」を答えないのは、地図を出していないのと同じです。 */
+/* 色そのものが凡例なので、地図の上に重ねます。
+   **.mapwrap の中に置くこと。** 外に出すと .mappage__body（flex）の3列目に
+   なり、地図が細い帯に潰れます。 */
 .zonelegend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem 0.75rem;
-  margin: 0.5rem 0 0;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--line, #e5e9ef);
+  gap: 0.25rem 0.7rem;
+  max-width: 260px;
+  /* 用途地域は12区分あるので、入りきらないぶんは畳んでスクロールさせます。
+     地図の半分を凡例で埋めるより、そのほうがましです。 */
+  max-height: 45%;
+  overflow-y: auto;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
-  font-size: 0.75rem;
+  background: rgba(255, 255, 255, 0.94);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 .zonelegend__title { width: 100%; font-weight: 600; color: #374151; }
 .zonelegend__item { display: flex; align-items: center; gap: 0.3rem; color: #4b5563; }
 .zonelegend__swatch {
-  width: 0.85rem;
-  height: 0.85rem;
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: none;
   border: 1px solid #9aa5b1;
   border-radius: 2px;
 }
-.zonelegend__note { width: 100%; color: #6b7280; font-size: 0.72rem; }
+.zonelegend__note { width: 100%; color: #6b7280; font-size: 10.5px; line-height: 1.45; }
+
+/* 狭い画面では凡例が地図を覆ってしまうので、幅と高さを抑えます。色を確かめる
+   には足り、地図は見えたままです。
+   **この媒体クエリは .zonelegend の基本規則より後ろに置くこと。** 前に置くと
+   あとから来る max-width: 260px が勝ち、狭い画面でも縮みません。 */
+@media (max-width: 900px) {
+  .zonelegend {
+    max-width: 46vw;
+    max-height: 32%;
+    font-size: 10.5px;
+    padding: 0.35rem 0.5rem;
+  }
+  .zonelegend__note { display: none; }
+}
