@@ -182,6 +182,20 @@ def insights_config(category: str | None = None) -> dict[str, Any]:
         return {}
 
 
+def city_planning_labels() -> dict[str, Any]:
+    """都市計画の区分の「一言でいうと何か」。**業態に依りません。**
+
+    用途地域の意味は診療所でも病院でも同じなので、業態フォルダの外にあります
+    （そこに建てられるかどうかは :func:`city_planning_config` のほう）。
+    地図の吹き出しとデータセットが同じ文を使うためで、片方だけ直すと画面と
+    レポートで別のことを言い出します。
+    """
+    try:
+        return load_yaml(config_dir() / "city_planning.yaml")
+    except ConfigNotFound:
+        return {}
+
+
 def city_planning_config(category: str | None = None) -> dict[str, Any]:
     """用途地域・区域区分と、そこにこの業態の施設を建てられるかの規則。
 

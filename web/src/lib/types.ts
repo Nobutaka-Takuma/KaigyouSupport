@@ -241,6 +241,38 @@ export interface GeoJSONResponse {
   truncated: boolean;
 }
 
+/** 地図に出せる都市計画の層。件数は API が数えたもの（0件の層は返らない）。 */
+export interface CityPlanningKind {
+  kind: string;
+  label: string;
+  features: number;
+}
+
+export interface CityPlanningKinds {
+  available: boolean;
+  kinds: CityPlanningKind[];
+}
+
+/**
+ * 都市計画の面 1 つ分。吹き出しに出す文は**サーバが組み立てたもの**を使う。
+ * 画面で文言を作ると、レポートと違うことを言い出す。
+ */
+export interface CityPlanningProperties {
+  zone_kind: string;
+  zone_kind_label: string | null;
+  zone_type: string | null;
+  zone_name: string | null;
+  far: number | null;
+  bcr: number | null;
+  municipality_name: string | null;
+  decided_on: string | null;
+  description: string | null;
+  /** その業態の施設を建てられるか。規則が無い区分では null（空欄）。 */
+  buildable: boolean | null;
+  buildable_note: string | null;
+  facility_label: string | null;
+}
+
 export interface CandidatePoint {
   id: string;
   lat: number;

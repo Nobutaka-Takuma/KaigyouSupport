@@ -561,3 +561,29 @@ def test_nothing_is_cited_when_the_city_plan_is_missing():
 
     cited = {c["key"] for c in for_step1({"regulation": {"city_plan": None}})["citable"]}
     assert not any(k.startswith("regulation.") for k in cited)
+
+
+def test_the_published_spelling_of_a_zone_still_finds_its_rule():
+    """**表記ゆれで規則が黙って外れないこと。**
+
+    静岡県の A55 は全角数字で「第１種低層住居専用地域」と書き、漢数字で
+    「第一種低層住居専用地域」と書く県もあります。素の辞書引きだと片方が
+    規則なしになり、しかも **「建てられます」と表示される**ので、間違いが
+    目に見えません。実際そうなっていて、静岡県では第１種低層住居専用地域の
+    規模制限が一度も出ていませんでした。
+    """
+    from kaigyou_core import city_planning as plan
+    from kaigyou_core.dataset import _buildability
+
+    assert plan.canonical("第１種低層住居専用地域") == "第一種低層住居専用地域"
+    assert plan.canonical("第一種低層住居専用地域") == "第一種低層住居専用地域"
+
+    rules = {
+        "facility_label": "診療所",
+        "zone_rules": {"第一種低層住居専用地域": {"buildable": True, "caution": "規模の制限"}},
+        "area_division_rules": {},
+    }
+    for spelling in ("第１種低層住居専用地域", "第一種低層住居専用地域"):
+        verdict = _buildability({spelling}, rules)
+        assert verdict["verdict"] == "permitted_with_conditions", spelling
+        assert verdict["cautions"][0]["caution"] == "規模の制限"

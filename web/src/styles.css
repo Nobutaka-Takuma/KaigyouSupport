@@ -978,3 +978,42 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .admin__table th { font-size: 0.78rem; color: #6b7280; white-space: nowrap; }
 .admin__table small { color: #6b7280; }
 .admin__table tr.is-out td { background: #fff7ed; }
+
+/* ---------------------------------------------------- 都市計画の吹き出しと凡例 */
+/* 吹き出しは名称・容積率・一言説明・可否の 4 段。判定は色で区別しますが、
+   色だけには頼りません（文が「建てられます／原則として建てられません」を
+   言い切っています）。 */
+.popup__figures { margin: 0.25rem 0 0; font-size: 0.82rem; color: #374151; }
+.popup__desc { margin: 0.35rem 0 0; font-size: 0.8rem; line-height: 1.5; }
+.popup__verdict { margin: 0.4rem 0 0; font-size: 0.82rem; font-weight: 600; }
+.popup__verdict.is-ok { color: #15803d; }
+.popup__verdict.is-no { color: #b91c1c; }
+.popup__note {
+  margin: 0.3rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #6b7280;
+}
+
+/* 色そのものが凡例なので、地図の脇に出します。塗り分けだけ見せて
+   「この緑は何か」を答えないのは、地図を出していないのと同じです。 */
+.zonelegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line, #e5e9ef);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.75rem;
+}
+.zonelegend__title { width: 100%; font-weight: 600; color: #374151; }
+.zonelegend__item { display: flex; align-items: center; gap: 0.3rem; color: #4b5563; }
+.zonelegend__swatch {
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 1px solid #9aa5b1;
+  border-radius: 2px;
+}
+.zonelegend__note { width: 100%; color: #6b7280; font-size: 0.72rem; }

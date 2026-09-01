@@ -13,6 +13,7 @@ import type {
   AnalysisReport,
   AnalysisStatus,
   CandidateAnalysis,
+  CityPlanningKinds,
   ClinicDetail,
   CompareResponse,
   DataStatus,
@@ -125,6 +126,17 @@ export const api = {
     year?: number;
     limit?: number;
   } = {}) => get<GeoJSONResponse>("/land-prices", params),
+
+  cityPlanningKinds: (params: { prefecture_code?: string } = {}) =>
+    get<CityPlanningKinds>("/city-planning/kinds", params),
+
+  cityPlanning: (params: {
+    kind: string;
+    bbox?: string;
+    prefecture_code?: string;
+    simplify_deg?: number;
+    limit?: number;
+  }) => get<GeoJSONResponse>("/city-planning", params),
 
   municipalities: (params: {
     prefecture_code?: string;

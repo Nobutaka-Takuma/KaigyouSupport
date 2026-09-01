@@ -181,3 +181,87 @@ def test_the_summary_names_what_was_not_loaded(loaded):
     「A55 を取り込んだ」と読んだ人はそれも入っていると思います。
     """
     assert "douro" in loaded["not_loaded"]
+
+
+# --------------------------------------------------------------- 地図レイヤー
+def _client():
+    from fastapi.testclient import TestClient
+    from kaigyou_api.main import app
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_the_map_only_offers_layers_that_have_something_in_them(loaded):
+    """**固定の一覧を画面に持たせない。**
+
+    都市計画を取り込んでいない県で「用途地域」と書いた選択肢を出すと、
+    選んでも何も出ない画面になります。件数を返すので 0 件の層は消せます。
+    """
+    body = _client().get("/api/city-planning/kinds",
+                         params={"prefecture_code": "22"}).json()
+    assert body["available"]
+    kinds = {k["kind"]: k for k in body["kinds"]}
+    assert "youto" in kinds and kinds["youto"]["features"] > 0
+    assert all(k["features"] > 0 for k in body["kinds"])
+    assert all(k["label"] for k in body["kinds"])
+
+
+def test_the_layer_returns_one_kind_at_a_time(loaded):
+    """層を混ぜて返さない。
+
+    用途地域・区域区分・誘導区域は同じ場所に重なって存在するので、まとめて
+    塗ると下の色が見えず、押してもどれを押したのか分かりません。
+    """
+    body = _client().get("/api/city-planning",
+                         params={"kind": "senbiki", "bbox": "138.79,35.07,138.84,35.12"}).json()
+    kinds = {f["properties"]["zone_kind"] for f in body["features"]}
+    assert kinds == {"senbiki"}
+
+
+def test_each_feature_carries_the_words_the_popup_needs(loaded):
+    """吹き出しの文はサーバが組み立てる。
+
+    画面で文言を作ると、地図とレポートが別のことを言い出します。区分の説明も
+    建築の可否も、データセットが使うのと同じ設定から来ます。
+    """
+    body = _client().get("/api/city-planning",
+                         params={"kind": "youto", "bbox": "138.79,35.08,138.83,35.11"}).json()
+    props = {f["properties"]["zone_type"]: f["properties"] for f in body["features"]}
+
+    commercial = props["商業地域"]
+    assert commercial["zone_key"] == "商業地域"
+    assert commercial["far"] == 400 and commercial["bcr"] == 80
+    assert "容積率が高く" in commercial["description"]
+    assert commercial["buildable"] is True
+    assert commercial["facility_label"] == "診療所"
+
+    industrial = props["工業専用地域"]
+    assert industrial["buildable"] is False
+    assert industrial["buildable_note"]
+    # **空欄は 0 ではありません。** 容積率 0% の土地はありません。
+    assert industrial["far"] is None
+
+    assert body["disclaimer"] and "特定行政庁" in body["disclaimer"]
+
+
+def test_the_colour_key_is_normalised_by_the_server(loaded):
+    """画面が色を引く鍵は、正規化済みのものだけ。
+
+    公表データは県によって「第１種」と「第一種」で揺れます。画面でもう一度
+    正規化すると、直したはずの表記ゆれが片側に残ります。
+    """
+    from kaigyou_core import city_planning as plan
+
+    body = _client().get("/api/city-planning",
+                         params={"kind": "youto", "bbox": "138.79,35.08,138.83,35.11"}).json()
+    for feature in body["features"]:
+        props = feature["properties"]
+        assert props["zone_key"] == plan.canonical(props["zone_type"])
+
+
+def test_no_verdict_is_offered_for_a_zone_with_no_rule(loaded):
+    """規則の無い区分に可否を書かない。**空欄のほうが安全です。**"""
+    body = _client().get("/api/city-planning",
+                         params={"kind": "senbiki", "bbox": "138.79,35.07,138.84,35.12",
+                                 "category": "__no_such_business__"}).json()
+    assert body["features"]
+    assert all(f["properties"]["buildable"] is None for f in body["features"])

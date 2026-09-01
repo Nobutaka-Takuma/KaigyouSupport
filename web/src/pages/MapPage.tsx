@@ -15,7 +15,10 @@ import { circlePolygon, EMPTY_FC } from "../lib/geo";
 import { MAX_CANDIDATES, useCandidates } from "../lib/candidates";
 import { lastCenter, usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
-import type { CandidateAnalysis, Meta, SpecialtyOption } from "../lib/types";
+import { ZONE_COLORS, ZONE_FALLBACK, zoneColorExpression }
+  from "../lib/cityPlanningColors";
+import type { CandidateAnalysis, CityPlanningKind, CityPlanningProperties, Meta, SpecialtyOption }
+  from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationOutlookTable,
          PopulationTable,
@@ -29,7 +32,9 @@ import { SpecialtyPanel, SpecialtyProfiles } from "../components/SpecialtyPanel"
 const FALLBACK_CENTER: [number, number] = [139.7671, 35.6812];
 
 /** Below these zooms a layer covers too much ground to be worth sending. */
-const MIN_ZOOM = { meshes: 10, clinics: 11, stations: 10 };
+// 都市計画は面が大きく、県全域だと数MBになります。市街地が画面に収まる
+// あたりから出します。
+const MIN_ZOOM = { meshes: 10, clinics: 11, stations: 10, cityPlanning: 11 };
 
 const EMPTY_RESPONSE = {
   type: "FeatureCollection" as const,
@@ -47,6 +52,51 @@ interface LayerState {
   clinics: boolean;
   stations: boolean;
   landPrices: boolean;
+}
+
+/**
+ * 吹き出しの中身。**名称と、一言でいうと何かと、建てられるかどうか。**
+ *
+ * 都市計画に沿って場所を選びたい人が知りたいのはこの 3 つで、告示番号や
+ * 決定年月日ではありません（それはデータセット側にあります）。
+ *
+ * 可否が `null` のときは何も書きません。規則の無い区分に「建てられます」と
+ * 書くほうが、空欄より危険です。
+ */
+function cityPlanningPopup(p: CityPlanningProperties): string {
+  const title = p.zone_name && p.zone_name !== p.zone_type
+    ? `${escapeHtml(p.zone_type ?? "")}（${escapeHtml(p.zone_name)}）`
+    : escapeHtml(p.zone_type ?? "");
+
+  const rows: string[] = [
+    `<strong>${title}</strong>`,
+    `<span class="popup__types">${escapeHtml(p.zone_kind_label ?? "")}` +
+      `${p.municipality_name ? ` ／ ${escapeHtml(p.municipality_name)}` : ""}</span>`,
+  ];
+
+  if (p.far != null || p.bcr != null) {
+    const far = p.far != null ? `容積率 ${p.far}%` : "";
+    const bcr = p.bcr != null ? `建蔽率 ${p.bcr}%` : "";
+    rows.push(`<div class="popup__figures">${escapeHtml([far, bcr].filter(Boolean).join(" ／ "))}</div>`);
+  }
+  if (p.description) {
+    rows.push(`<p class="popup__desc">${escapeHtml(p.description)}</p>`);
+  }
+  if (p.buildable !== null && p.facility_label) {
+    const verdict = p.buildable ? "建てられます" : "原則として建てられません";
+    rows.push(
+      `<p class="popup__verdict ${p.buildable ? "is-ok" : "is-no"}">` +
+        `${escapeHtml(p.facility_label)}：${verdict}</p>`,
+    );
+    if (p.buildable_note) {
+      rows.push(`<p class="popup__note">${escapeHtml(p.buildable_note)}</p>`);
+    }
+  }
+  rows.push(
+    '<p class="popup__note">国土数値情報 A55 の公表値による一次判定です。' +
+      "規模・接道・条例で変わり、決めるのは特定行政庁です。</p>",
+  );
+  return rows.join("");
 }
 
 export function MapPage() {
@@ -71,6 +121,21 @@ export function MapPage() {
    */
   const [specialty, setSpecialty] = useState("");
   const [specialtyOptions, setSpecialtyOptions] = useState<SpecialtyOption[]>([]);
+  /**
+   * 地図に出す都市計画の層。空文字は「出さない」。
+   *
+   * **層は 1 つだけ選ばせます。** 用途地域・区域区分・誘導区域は同じ場所に
+   * 重なって存在するので、まとめて塗ると下の色が見えず、押してもどれを
+   * 押したのか分かりません。
+   */
+  const [cityPlanningKind, setCityPlanningKind] = useState("");
+  const [cityPlanningKinds, setCityPlanningKinds] = useState<CityPlanningKind[]>([]);
+  /**
+   * いま画面に出ている区分と色。**凡例は固定表ではなく、描いたものから作ります。**
+   * 用途地域を出しているのに区域区分の凡例が並んでいたら、読んだ人は色を
+   * 取り違えます。
+   */
+  const [zoneLegend, setZoneLegend] = useState<{ key: string; color: string }[]>([]);
   const [layers, setLayers] = useState<LayerState>({
     // Off by default: it is reference information, and on over a whole city it
     // competes with the clinics the screen is actually about.
@@ -125,7 +190,7 @@ export function MapPage() {
 
     map.on("load", () => {
       for (const id of ["municipalities", "meshes", "clinics", "stations",
-                        "landPrices", "candidate"]) {
+                        "landPrices", "cityPlanning", "candidate"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC });
       }
 
@@ -137,6 +202,27 @@ export function MapPage() {
           "fill-color": "#cccccc",
           "fill-opacity": 0.55,
         },
+      });
+      // メッシュの上、点（駅・医院）より下。面を点で隠さないため。
+      // **不透明度は 0.45 まで。** これを上げると下地図の道路と地名が消え、
+      // 「この色の区域はどこか」は分かっても「そこがどこか」が分からなく
+      // なります。
+      map.addLayer({
+        id: "cityPlanning-fill",
+        type: "fill",
+        source: "cityPlanning",
+        layout: { visibility: "none" },
+        paint: {
+          "fill-color": zoneColorExpression() as never,
+          "fill-opacity": 0.45,
+        },
+      });
+      map.addLayer({
+        id: "cityPlanning-line",
+        type: "line",
+        source: "cityPlanning",
+        layout: { visibility: "none" },
+        paint: { "line-color": "#374151", "line-width": 0.8, "line-opacity": 0.55 },
       });
       map.addLayer({
         id: "municipalities-line",
@@ -218,6 +304,23 @@ export function MapPage() {
       map.on("click", (e) => {
         setPoint({ lat: e.lngLat.lat, lng: e.lngLat.lng });
       });
+
+      // --- 都市計画の面を押したときの吹き出し ---------------------------
+      // **文はサーバが組み立てたものを出します。** 区分の説明も建築の可否も
+      // データセットとレポートが使うのと同じ設定から来ているので、画面で
+      // 書き足すと、地図とレポートが別のことを言い出します。
+      map.on("mouseenter", "cityPlanning-fill",
+             () => (map.getCanvas().style.cursor = "pointer"));
+      map.on("mouseleave", "cityPlanning-fill",
+             () => (map.getCanvas().style.cursor = ""));
+      map.on("click", "cityPlanning-fill", (e) => {
+        const props = e.features?.[0]?.properties as CityPlanningProperties | undefined;
+        if (!props) return;
+        new maplibregl.Popup({ maxWidth: "300px" })
+          .setLngLat(e.lngLat)
+          .setHTML(cityPlanningPopup(props))
+          .addTo(map);
+      });
       map.on("mouseenter", "clinics-circle", () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", "clinics-circle", () => (map.getCanvas().style.cursor = ""));
       map.on("click", "clinics-circle", (e) => {
@@ -279,6 +382,7 @@ export function MapPage() {
   // viewport is well under one.
   const showLandPrices = layers.landPrices;
   const clinicSpecialty = specialty;
+  const planKind = cityPlanningKind;
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map) return;
@@ -290,7 +394,7 @@ export function MapPage() {
 
     const request = ++viewportRequest.current;
     try {
-      const [muni, mesh, clinics, stations, landPrices] = await Promise.all([
+      const [muni, mesh, clinics, stations, landPrices, cityPlanning] = await Promise.all([
         // Most of the boundary payload is Izu and Ogasawara coastline, a
         // thousand kilometres from anything the user is looking at. The bbox
         // already excludes it; the prefecture keeps a neighbouring one from
@@ -309,6 +413,15 @@ export function MapPage() {
         showLandPrices && zoom >= MIN_ZOOM.clinics
           ? api.landPrices({ bbox, limit: 2000 })
           : Promise.resolve(EMPTY_RESPONSE),
+        // 選ばれた層だけを取りに行きます。選ばれていなければ通信もしません。
+        planKind && zoom >= MIN_ZOOM.cityPlanning
+          ? api.cityPlanning({
+              kind: planKind, bbox, limit: 3000,
+              // 引きの画面ほど粗く。区域区分や誘導区域は市域ほどの大きさが
+              // あり、細かいまま送ると 1 面で数十KB になります。
+              simplify_deg: zoom >= 14 ? 0.00005 : zoom >= 12 ? 0.0001 : 0.0003,
+            })
+          : Promise.resolve(EMPTY_RESPONSE),
       ]);
       // A slow response for an older viewport must not overwrite a newer one.
       if (request !== viewportRequest.current) return;
@@ -326,6 +439,17 @@ export function MapPage() {
       (map.getSource("clinics") as maplibregl.GeoJSONSource)?.setData(clinics as never);
       (map.getSource("stations") as maplibregl.GeoJSONSource)?.setData(stations as never);
       (map.getSource("landPrices") as maplibregl.GeoJSONSource)?.setData(landPrices as never);
+      (map.getSource("cityPlanning") as maplibregl.GeoJSONSource)
+        ?.setData(cityPlanning as never);
+      const planFeatures =
+        (cityPlanning as { features?: { properties?: Record<string, unknown> }[] })
+          .features ?? [];
+      const seen = new Map<string, string>();
+      for (const f of planFeatures) {
+        const key = String(f.properties?.zone_key ?? f.properties?.zone_type ?? "");
+        if (key && !seen.has(key)) seen.set(key, ZONE_COLORS[key] ?? ZONE_FALLBACK);
+      }
+      setZoneLegend([...seen].map(([key, color]) => ({ key, color })));
       setZoomedOut(zoom < MIN_ZOOM.clinics);
       setLayerError(null);
     } catch (e) {
@@ -333,7 +457,7 @@ export function MapPage() {
         setLayerError(e instanceof Error ? e.message : String(e));
       }
     }
-  }, [profile, prefecture, showLandPrices, clinicSpecialty]);
+  }, [profile, prefecture, showLandPrices, clinicSpecialty, planKind]);
 
   useEffect(() => {
     if (!ready || !mapRef.current) return;
@@ -412,6 +536,41 @@ export function MapPage() {
       }
     }
   }, [ready, layers]);
+
+  // 都市計画は「どれを出すか」の選択なので、チェックボックスとは別に扱います。
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const map = mapRef.current;
+    const visible = cityPlanningKind ? "visible" : "none";
+    for (const id of ["cityPlanning-fill", "cityPlanning-line"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visible);
+    }
+  }, [ready, cityPlanningKind]);
+
+  // 選べる層は県ごとに違います。**固定の一覧を持ちません**——都市計画を
+  // 取り込んでいない県で「用途地域」と書いた選択肢を出すと、選んでも何も
+  // 出ない画面になります。
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .cityPlanningKinds({ prefecture_code: prefecture ?? undefined })
+      .then((res) => {
+        if (cancelled) return;
+        setCityPlanningKinds(res.available ? res.kinds : []);
+        // 取り込んでいない県へ切り替えたら、選択も落とします。選んだままだと
+        // 「用途地域を表示中」と見えるのに何も描かれません。
+        setCityPlanningKind((current) =>
+          current && res.available && res.kinds.some((k) => k.kind === current)
+            ? current
+            : "");
+      })
+      .catch(() => {
+        if (!cancelled) setCityPlanningKinds([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prefecture]);
 
   // -------------------------------------------------------- candidate marker
   useEffect(() => {
@@ -605,6 +764,23 @@ export function MapPage() {
           </select>
         </label>
 
+        {cityPlanningKinds.length > 0 && (
+          <label className="toolbar__foldable">
+            都市計画
+            <select
+              value={cityPlanningKind}
+              onChange={(e) => setCityPlanningKind(e.target.value)}
+            >
+              <option value="">表示しない</option>
+              {cityPlanningKinds.map((k) => (
+                <option key={k.kind} value={k.kind}>
+                  {k.label}（{k.features.toLocaleString("ja-JP")}件）
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
         <div className="toolbar__layers toolbar__foldable">
           {(
             [
@@ -677,6 +853,12 @@ export function MapPage() {
               広域表示のため歯科医院を省略しています。拡大すると表示されます。
             </div>
           )}
+          {cityPlanningKind && zoneLegend.length === 0 && !layerError && (
+            <div className="map__hint map__hint--zoom">
+              この範囲にはこの都市計画の区域がありません。拡大するか、
+              市街地へ移動してください。
+            </div>
+          )}
           <div className="map__legend">
             <span className="dot dot--clinic" /> 歯科医院
             <span className="dot dot--station" /> 駅
@@ -692,6 +874,29 @@ export function MapPage() {
               : "人口少→多"}
           </div>
         </div>
+
+        {cityPlanningKind && zoneLegend.length > 0 && (
+          <div className="zonelegend">
+            <span className="zonelegend__title">
+              {cityPlanningKinds.find((k) => k.kind === cityPlanningKind)?.label
+                ?? "都市計画"}
+            </span>
+            {zoneLegend.map((z) => (
+              <span key={z.key} className="zonelegend__item">
+                <span
+                  className="zonelegend__swatch"
+                  style={{ background: z.color }}
+                />
+                {z.key}
+              </span>
+            ))}
+            <span className="zonelegend__note">
+              区域を押すと名称・容積率・建蔽率と、診療所を建てられるかの一次判定が出ます。
+              出典：国土数値情報 A55 都市計画決定情報。建築の可否は規模・接道・条例で変わり、
+              決めるのは特定行政庁です。
+            </span>
+          </div>
+        )}
 
         <aside className={sheetOpen ? "panel panel--open" : "panel"}>
           {analysis && (

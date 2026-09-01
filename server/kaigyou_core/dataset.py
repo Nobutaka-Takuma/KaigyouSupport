@@ -1388,15 +1388,18 @@ def _buildability(zones: set[str], rules: Mapping[str, Any]) -> dict[str, Any]:
     建てられません。可否は and で畳み、理由は全部残します——「なぜ駄目か」が
     1 行しか無いと、読んだ人はもう一方の制約に気づかないままになります。
     """
-    zone_rules = rules.get("zone_rules") or {}
-    area_rules = rules.get("area_division_rules") or {}
+    from kaigyou_core import city_planning as plan
+
     default = rules.get("default") or {}
 
     blocking: list[dict[str, str]] = []
     cautions: list[dict[str, str]] = []
     matched = False
     for zone in sorted(zones):
-        rule = zone_rules.get(zone) or area_rules.get(zone)
+        # **表記ゆれをここで吸収します。** 静岡県の A55 は全角数字で
+        # 「第１種低層住居専用地域」、漢数字で書く県もあります。素の辞書引きだと
+        # 片方が黙って規則なしになり、しかも「建てられます」と表示されます。
+        rule = plan.rule_for(zone, rules=rules)
         if rule is None:
             continue
         matched = True

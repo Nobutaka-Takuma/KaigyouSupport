@@ -21,6 +21,8 @@ from fastapi import APIRouter, Depends, Query
 
 from kaigyou_api.deps import feature_collection, get_conn, parse_bbox
 from kaigyou_core import provenance
+from kaigyou_core import city_planning as plan
+from kaigyou_core import config as cfg
 from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_core.db import column_exists, table_exists
 
@@ -327,6 +329,156 @@ def meshes(
         provenance=provenance.for_tables(conn, ["population_mesh", "mesh_business"]),
         truncated=len(rows) >= limit,
     )
+
+
+#: 地図に出せる都市計画の層と、その並び。**表示順ではなく選択肢の順**です。
+#: 上ほど開業判断に効きます——建てられるかどうかが先で、公園はそのあと。
+CITY_PLANNING_KINDS: list[tuple[str, str]] = [
+    ("youto", "用途地域"),
+    ("senbiki", "区域区分（市街化区域・調整区域）"),
+    ("ritteki", "立地適正化計画（誘導区域）"),
+    ("bouka", "防火・準防火地域"),
+    ("chikukei", "地区計画"),
+    ("tochiku", "市街地開発事業"),
+    ("koudoti", "高度地区"),
+    ("koudori", "高度利用地区"),
+    ("tkbt", "特別用途地区"),
+    ("tokuteiyouto", "特定用途制限地域"),
+    ("fuuchichiku", "風致地区"),
+    ("kouen", "都市計画公園・緑地"),
+    ("tokei", "都市計画区域"),
+    ("jyuntoshi", "準都市計画区域"),
+]
+
+
+@router.get("/city-planning/kinds", summary="地図に出せる都市計画の層")
+def city_planning_kinds(
+    conn: psycopg.Connection = Depends(get_conn),
+    prefecture_code: str | None = Query(None),
+) -> dict[str, Any]:
+    """選べる層と、その県に何件入っているか。
+
+    **固定の一覧を画面に持たせません。** 都市計画を取り込んでいない県で
+    「用途地域」と書いた選択肢を出すと、選んでも何も出ない画面になります。
+    件数を返すので、0 件の層は画面から消せます。
+    """
+    if not table_exists(conn, "city_planning_zones"):
+        return {"available": False, "kinds": []}
+
+    where, params = ["true"], []
+    if prefecture_code:
+        where.append("prefecture_code = %s")
+        params.append(prefecture_code)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT zone_kind, count(*)::int AS features
+                FROM city_planning_zones WHERE {' AND '.join(where)}
+                GROUP BY zone_kind""", params)
+        counts = {r["zone_kind"]: r["features"] for r in cur.fetchall()}
+
+    return {
+        "available": bool(counts),
+        "kinds": [{"kind": kind, "label": label, "features": counts[kind]}
+                  for kind, label in CITY_PLANNING_KINDS if counts.get(kind)],
+    }
+
+
+@router.get("/city-planning", summary="都市計画決定情報レイヤー")
+def city_planning(
+    conn: psycopg.Connection = Depends(get_conn),
+    kind: str = Query("youto", description="層（youto / senbiki / ritteki ...）"),
+    bbox: str | None = Query(None, description="min_lng,min_lat,max_lng,max_lat"),
+    prefecture_code: str | None = Query(None),
+    category: str = Query(DEFAULT_CATEGORY),
+    simplify_deg: float = Query(0.0002, ge=0.0, le=0.05,
+                                description="表示用の単純化許容誤差（度）。既定の 0.0002 は約20m"),
+    limit: int = Query(3000, ge=1, le=20000),
+) -> dict[str, Any]:
+    """1 つの層を、画面に映っている範囲だけ。
+
+    **層を混ぜて返しません。** 用途地域と誘導区域と区域区分は同じ場所に
+    重なって存在するので、まとめて塗ると下の色が見えず、押しても
+    どれを押したのか分かりません。画面が層を 1 つ選び、それだけを返します。
+
+    吹き出しに出す文もここで組み立てます。区分の説明は業態に依らない
+    ``config/city_planning.yaml``、建てられるかどうかは業態ごとの
+    ``config/<業態>/city_planning.yaml`` から採ります。**画面で文言を作ると、
+    レポートと違うことを言い出します。**
+    """
+    if not table_exists(conn, "city_planning_zones"):
+        return feature_collection([], provenance={"sources": [],
+                                                  "contains_sample_data": False,
+                                                  "datasets_unavailable": []})
+
+    where, params = ["zone_kind = %s"], [kind]
+    if prefecture_code:
+        where.append("prefecture_code = %s")
+        params.append(prefecture_code)
+    box = parse_bbox(bbox)
+    if box:
+        where.append(f"geom && {_BBOX_SQL}")
+        params.extend(box)
+    params.insert(0, simplify_deg)
+    params.append(limit)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT zone_kind, zone_kind_label, zone_type, zone_name,
+                   far, bcr, municipality_name, decided_on,
+                   ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, %s),
+                                {COORD_DIGITS}) AS geojson
+            FROM city_planning_zones
+            WHERE {' AND '.join(where)}
+            -- 大きい面を先に。上限で切られたとき、消えるのが小さい面に
+            -- なるようにします（大きい面が消えると地図に穴が空きます）。
+            ORDER BY ST_Area(geom) DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    rules = cfg.city_planning_config(category)
+    facility = rules.get("facility_label")
+
+    for row in rows:
+        zone = row.get("zone_type") or ""
+        # 設定を引くのは必ず kaigyou_core.city_planning 経由。区分名の表記が
+        # 県によってゆれるので、素の辞書引きだと片方が黙って空になります。
+        # 画面が色を選ぶための鍵。**表記の正規化はサーバでだけ行います**——
+        # 画面でもう一度やると、直したはずの表記ゆれが片側に残ります。
+        row["zone_key"] = plan.canonical(zone)
+        row["description"] = plan.describe(zone)
+        rule = plan.rule_for(zone, rules=rules)
+        if rule is None and rules:
+            # 個別の規則が無い区分は default に落ちます。用途地域の大半
+            # （商業・近隣商業・住居系）はここに来ます——建てられるのが
+            # 普通なので、1 つずつ書いていません。データセット側の判定
+            # （_buildability）と同じ扱いです。
+            rule = rules.get("default") or None
+        if rule is None:
+            # 業態の規則そのものが無い環境。**可否を書きません。**
+            # 空欄のほうが、根拠なく「建てられます」と出すより安全です。
+            row["buildable"] = None
+            row["buildable_note"] = None
+        else:
+            row["buildable"] = bool(rule.get("buildable", True))
+            row["buildable_note"] = rule.get("note") or rule.get("caution")
+        row["facility_label"] = facility
+        # numeric は Decimal で来ます。文字列で出すと "400" と 400 を
+        # 比べる画面ができるので、数にして渡します。
+        for key in ("far", "bcr"):
+            row[key] = float(row[key]) if row[key] is not None else None
+        row["decided_on"] = row["decided_on"].isoformat() if row["decided_on"] else None
+
+    out = feature_collection(
+        _features(rows),
+        provenance=provenance.for_tables(conn, ["city_planning_zones"]),
+    )
+    out["truncated"] = len(rows) >= limit
+    out["disclaimer"] = rules.get("disclaimer")
+    return out
 
 
 @router.get("/municipalities", summary="市区町村境界")
