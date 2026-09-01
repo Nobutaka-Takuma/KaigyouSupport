@@ -14,6 +14,7 @@ import type {
   AnalysisStatus,
   CandidateAnalysis,
   CityPlanningKinds,
+  CityPlanningResponse,
   ClinicDetail,
   CompareResponse,
   DataStatus,
@@ -136,7 +137,7 @@ export const api = {
     prefecture_code?: string;
     simplify_deg?: number;
     limit?: number;
-  }) => get<GeoJSONResponse>("/city-planning", params),
+  }) => get<CityPlanningResponse>("/city-planning", params),
 
   municipalities: (params: {
     prefecture_code?: string;

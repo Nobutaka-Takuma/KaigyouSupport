@@ -6,6 +6,7 @@ PostGIS SQL, and hiding it behind an object mapper would only obscure it.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 from urllib.parse import urlsplit
@@ -147,21 +148,65 @@ def relax_statement_timeout(conn: psycopg.Connection,
         return False
 
 
+#: 接続の取得を何回まで試すか、その間隔（秒）。
+#:
+#: **同時に押し寄せたときだけの話です。** 地図は 1 回動かすたびに層の数だけ
+#: 並行に取りにいき（境界・メッシュ・医院・駅・地価・都市計画）、その裏で
+#: cron が毎分 worker を叩きます。worker の 1 回は最大 13 分走れるので、
+#: 前の回が終わらないうちに次が始まることがあります。関数 1 つが接続 1 つを
+#: 持つので、山のてっぺんで接続が取れないことが起こります。
+#:
+#: 取れなかった 1 回を諦めると、画面には「レイヤーが出ない」「分析が進まない」
+#: として出ます。**待てば取れるものを待たずに失敗させる理由がありません。**
+#: 待つのは接続を取るところだけで、問い合わせは再実行しません（同じ問い合わせを
+#: 二度流すのは、書き込みがあるときに壊れます）。
+_CONNECT_ATTEMPTS = 3
+_CONNECT_BACKOFF_S = (0.25, 0.75)
+
+#: 待てば直る見込みのある失敗。認証や権限の誤りは待っても直らないので、
+#: そちらは 1 回で諦めます——**間違ったパスワードで 3 回試すのは、
+#: 遅くなるだけで何も良くなりません。**
+_TRANSIENT = (
+    "too many clients",
+    "too many connections",
+    "connection reset",
+    "server closed the connection unexpectedly",
+    "connection timed out",
+    "timeout expired",
+    "could not connect to server",
+    "remaining connection slots",
+    "sorry, too many clients already",
+)
+
+
+def _is_transient(message: str) -> bool:
+    lowered = message.lower()
+    return any(word in lowered for word in _TRANSIENT)
+
+
 @contextmanager
 def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
     url = dsn()
-    try:
-        conn = psycopg.connect(
-            url,
-            row_factory=dict_row,
-            autocommit=autocommit,
-            prepare_threshold=None if is_pooled(url) else 5,
-        )
-    except psycopg.OperationalError as exc:
-        hint = connection_hint(url, str(exc))
-        if hint is None:
-            raise
-        raise psycopg.OperationalError(f"{exc}\n\nヒント: {hint}") from exc
+    conn = None
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            conn = psycopg.connect(
+                url,
+                row_factory=dict_row,
+                autocommit=autocommit,
+                prepare_threshold=None if is_pooled(url) else 5,
+            )
+            break
+        except psycopg.OperationalError as exc:
+            last = attempt == _CONNECT_ATTEMPTS - 1
+            if not last and _is_transient(str(exc)):
+                time.sleep(_CONNECT_BACKOFF_S[attempt])
+                continue
+            hint = connection_hint(url, str(exc))
+            if hint is None:
+                raise
+            raise psycopg.OperationalError(f"{exc}\n\nヒント: {hint}") from exc
+    assert conn is not None      # ループは接続を得るか送出するかのどちらか
     try:
         yield conn
     finally:

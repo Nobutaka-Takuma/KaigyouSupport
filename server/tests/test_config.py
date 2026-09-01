@@ -163,3 +163,28 @@ def test_every_step_reads_the_prompts_of_the_job_business_type():
         params = list(inspect.signature(runner).parameters)
         assert len(params) >= 2, f"STEP{number} が業態を受け取っていません"
         assert params[1] == "category", f"STEP{number}: {params}"
+
+
+def test_a_connection_storm_is_retried_but_a_wrong_password_is_not():
+    """**待てば取れるものを、待たずに失敗させない。**
+
+    地図は 1 回動かすたびに層の数だけ並行に接続を取りにいき、その裏で cron が
+    毎分 worker を叩きます（1 回は最大 13 分走れるので重なります）。山の
+    てっぺんで接続が取れないと、画面には「レイヤーが出ない」「分析が進まない」
+    として出ます。
+
+    ただし認証の誤りは待っても直りません。間違ったパスワードで 3 回試すのは
+    遅くなるだけなので、そちらは 1 回で諦めます。
+    """
+    from kaigyou_core.db import _is_transient
+
+    for message in ("FATAL: sorry, too many clients already",
+                    "connection reset by peer",
+                    "server closed the connection unexpectedly",
+                    "remaining connection slots are reserved"):
+        assert _is_transient(message), message
+
+    for message in ("password authentication failed for user \"postgres\"",
+                    "permission denied for table facilities",
+                    "database \"kaigyou\" does not exist"):
+        assert not _is_transient(message), message

@@ -383,6 +383,38 @@ def city_planning_kinds(
     }
 
 
+#: この層の座標の小数桁。**面のレイヤーなので 6 桁は要りません。**
+#: 6 桁は約 10cm で、市域ほどの大きさの区域を描くのに使う精度ではありません。
+CITY_PLANNING_DIGITS = 5
+
+#: 1 応答で返す図形の上限（バイト）。**件数ではなく容量で切ります。**
+#: Vercel の Serverless Function は応答が 4.5MB を超えると失敗します。件数の
+#: 上限だけでは守れません——同じ 3,000 件でも、区域区分の大きな面と用途地域の
+#: 小さな面では容量が桁で違います。「時折エラーが出る」のはこれです。
+CITY_PLANNING_BYTE_BUDGET = 3_000_000
+
+#: 画面の広さに応じた単純化の下限（度）。**画面が忘れても効かせます。**
+#: 引きの画面ほど粗くしないと、1 リクエストが数MBになります。
+#: (bbox の幅 or 高さ, 最低限の許容誤差)
+_SIMPLIFY_FLOOR: list[tuple[float, float]] = [
+    (0.5, 0.0005),    # 県ほどの広さ … 約 55m
+    (0.2, 0.0002),    # 市域ほど     … 約 22m
+    (0.0, 0.00005),   # 市街地       … 約  5m
+]
+
+
+def _simplify_floor(box: tuple[float, float, float, float] | None,
+                    asked: float) -> float:
+    """指定と、広さから決まる下限の、粗いほう。"""
+    if not box:
+        return asked
+    span = max(box[2] - box[0], box[3] - box[1])
+    for threshold, floor in _SIMPLIFY_FLOOR:
+        if span >= threshold:
+            return max(asked, floor)
+    return asked
+
+
 @router.get("/city-planning", summary="都市計画決定情報レイヤー")
 def city_planning(
     conn: psycopg.Connection = Depends(get_conn),
@@ -400,15 +432,20 @@ def city_planning(
     重なって存在するので、まとめて塗ると下の色が見えず、押しても
     どれを押したのか分かりません。画面が層を 1 つ選び、それだけを返します。
 
-    吹き出しに出す文もここで組み立てます。区分の説明は業態に依らない
+    説明文は ``zones`` に**区分ごとに 1 回だけ**入れます。1 件ずつの
+    ``properties`` に付けると、同じ文が何千回も繰り返されます——実測で、
+    静岡県全域の用途地域 2,946 件が 3.5MB になり、そのうち 2.5MB が
+    繰り返された説明文でした。**Vercel の応答は 4.5MB で切れる**ので、
+    ここは容量の問題であって見た目の問題ではありません。
+
+    説明の出どころは 2 つ。区分の意味は業態に依らない
     ``config/city_planning.yaml``、建てられるかどうかは業態ごとの
-    ``config/<業態>/city_planning.yaml`` から採ります。**画面で文言を作ると、
+    ``config/<業態>/city_planning.yaml`` です。**画面で文言を作ると、
     レポートと違うことを言い出します。**
     """
     if not table_exists(conn, "city_planning_zones"):
-        return feature_collection([], provenance={"sources": [],
-                                                  "contains_sample_data": False,
-                                                  "datasets_unavailable": []})
+        return feature_collection([], zones={}, provenance={
+            "sources": [], "contains_sample_data": False, "datasets_unavailable": []})
 
     where, params = ["zone_kind = %s"], [kind]
     if prefecture_code:
@@ -418,16 +455,15 @@ def city_planning(
     if box:
         where.append(f"geom && {_BBOX_SQL}")
         params.extend(box)
-    params.insert(0, simplify_deg)
+    params.insert(0, _simplify_floor(box, simplify_deg))
     params.append(limit)
 
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT zone_kind, zone_kind_label, zone_type, zone_name,
-                   far, bcr, municipality_name, decided_on,
+            SELECT zone_type, zone_name, far, bcr, municipality_name, decided_on,
                    ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, %s),
-                                {COORD_DIGITS}) AS geojson
+                                {CITY_PLANNING_DIGITS}) AS geojson
             FROM city_planning_zones
             WHERE {' AND '.join(where)}
             -- 大きい面を先に。上限で切られたとき、消えるのが小さい面に
@@ -439,44 +475,56 @@ def city_planning(
         )
         rows = cur.fetchall()
 
-    rules = cfg.city_planning_config(category)
-    facility = rules.get("facility_label")
-
+    # **容量で切ります。** 大きい面から並んでいるので、落ちるのは小さい面です。
+    # 落としたことは truncated で伝えます（黙って穴を空けない）。
+    budget = 0
+    kept = []
     for row in rows:
-        zone = row.get("zone_type") or ""
-        # 設定を引くのは必ず kaigyou_core.city_planning 経由。区分名の表記が
-        # 県によってゆれるので、素の辞書引きだと片方が黙って空になります。
-        # 画面が色を選ぶための鍵。**表記の正規化はサーバでだけ行います**——
-        # 画面でもう一度やると、直したはずの表記ゆれが片側に残ります。
-        row["zone_key"] = plan.canonical(zone)
-        row["description"] = plan.describe(zone)
-        rule = plan.rule_for(zone, rules=rules)
+        budget += len(row["geojson"])
+        if budget > CITY_PLANNING_BYTE_BUDGET and kept:
+            break
+        kept.append(row)
+    truncated = len(kept) < len(rows) or len(rows) >= limit
+    rows = kept
+
+    rules = cfg.city_planning_config(category)
+
+    #: 区分ごとの説明。**1 件ずつではなく 1 回だけ。** 画面は zone_key で引きます。
+    zones: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        raw = row.get("zone_type") or ""
+        # 表記の正規化はサーバでだけ行います——画面でもう一度やると、
+        # 直したはずの表記ゆれが片側に残ります。
+        key = plan.canonical(raw)
+        row["zone_key"] = key
+        row["far"] = float(row["far"]) if row["far"] is not None else None
+        row["bcr"] = float(row["bcr"]) if row["bcr"] is not None else None
+        row["decided_on"] = row["decided_on"].isoformat() if row["decided_on"] else None
+        if key in zones:
+            continue
+        rule = plan.rule_for(raw, rules=rules)
         if rule is None and rules:
             # 個別の規則が無い区分は default に落ちます。用途地域の大半
             # （商業・近隣商業・住居系）はここに来ます——建てられるのが
             # 普通なので、1 つずつ書いていません。データセット側の判定
             # （_buildability）と同じ扱いです。
             rule = rules.get("default") or None
-        if rule is None:
-            # 業態の規則そのものが無い環境。**可否を書きません。**
-            # 空欄のほうが、根拠なく「建てられます」と出すより安全です。
-            row["buildable"] = None
-            row["buildable_note"] = None
-        else:
-            row["buildable"] = bool(rule.get("buildable", True))
-            row["buildable_note"] = rule.get("note") or rule.get("caution")
-        row["facility_label"] = facility
-        # numeric は Decimal で来ます。文字列で出すと "400" と 400 を
-        # 比べる画面ができるので、数にして渡します。
-        for key in ("far", "bcr"):
-            row[key] = float(row[key]) if row[key] is not None else None
-        row["decided_on"] = row["decided_on"].isoformat() if row["decided_on"] else None
+        zones[key] = {
+            "label": raw,
+            "description": plan.describe(raw),
+            # 業態の規則そのものが無い環境では可否を書きません。空欄のほうが、
+            # 根拠なく「建てられます」と出すより安全です。
+            "buildable": bool(rule.get("buildable", True)) if rule else None,
+            "note": (rule.get("note") or rule.get("caution")) if rule else None,
+        }
 
     out = feature_collection(
         _features(rows),
+        zones=zones,
+        facility_label=rules.get("facility_label"),
         provenance=provenance.for_tables(conn, ["city_planning_zones"]),
     )
-    out["truncated"] = len(rows) >= limit
+    out["truncated"] = truncated
     out["disclaimer"] = rules.get("disclaimer")
     return out
 

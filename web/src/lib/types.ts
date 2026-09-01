@@ -254,23 +254,35 @@ export interface CityPlanningKinds {
 }
 
 /**
- * 都市計画の面 1 つ分。吹き出しに出す文は**サーバが組み立てたもの**を使う。
- * 画面で文言を作ると、レポートと違うことを言い出す。
+ * 都市計画の面 1 つ分。
+ *
+ * **説明文はここに入っていません。** 区分ごとに 1 回だけ `zones` に入ります
+ * ——1 件ずつ付けると同じ文が何千回も繰り返され、静岡県全域で 3.5MB のうち
+ * 2.5MB がその繰り返しでした（Vercel の応答上限は 4.5MB）。
  */
 export interface CityPlanningProperties {
-  zone_kind: string;
-  zone_kind_label: string | null;
+  zone_key: string;
   zone_type: string | null;
   zone_name: string | null;
   far: number | null;
   bcr: number | null;
   municipality_name: string | null;
   decided_on: string | null;
+}
+
+/** 区分ごとの説明。zone_key で引く。 */
+export interface CityPlanningZone {
+  label: string;
   description: string | null;
   /** その業態の施設を建てられるか。規則が無い区分では null（空欄）。 */
   buildable: boolean | null;
-  buildable_note: string | null;
+  note: string | null;
+}
+
+export interface CityPlanningResponse extends GeoJSONResponse {
+  zones: Record<string, CityPlanningZone>;
   facility_label: string | null;
+  disclaimer: string | null;
 }
 
 export interface CandidatePoint {

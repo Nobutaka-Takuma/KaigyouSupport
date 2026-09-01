@@ -17,8 +17,8 @@ import { lastCenter, usePrefecture } from "../lib/prefecture";
 import { distance, num } from "../lib/format";
 import { ZONE_COLORS, ZONE_FALLBACK, zoneColorExpression }
   from "../lib/cityPlanningColors";
-import type { CandidateAnalysis, CityPlanningKind, CityPlanningProperties, Meta, SpecialtyOption }
-  from "../lib/types";
+import type { CandidateAnalysis, CityPlanningKind, CityPlanningProperties,
+              CityPlanningZone, Meta, SpecialtyOption } from "../lib/types";
 import { Disclaimer, ProvenanceList } from "../components/DataNotices";
 import { AccessTable, CatchmentNote, LandPriceTable, PopulationOutlookTable,
          PopulationTable,
@@ -60,36 +60,46 @@ interface LayerState {
  * 都市計画に沿って場所を選びたい人が知りたいのはこの 3 つで、告示番号や
  * 決定年月日ではありません（それはデータセット側にあります）。
  *
+ * 説明文は面 1 件ずつではなく、区分ごとの辞書から引きます。1 件ずつに
+ * 付けると同じ文が何千回も応答に乗り、Vercel の 4.5MB を超えて落ちます。
+ *
  * 可否が `null` のときは何も書きません。規則の無い区分に「建てられます」と
  * 書くほうが、空欄より危険です。
  */
-function cityPlanningPopup(p: CityPlanningProperties): string {
+function cityPlanningPopup(
+  p: CityPlanningProperties,
+  zone: CityPlanningZone | undefined,
+  kindLabel: string,
+  facility: string | null,
+): string {
   const title = p.zone_name && p.zone_name !== p.zone_type
     ? `${escapeHtml(p.zone_type ?? "")}（${escapeHtml(p.zone_name)}）`
     : escapeHtml(p.zone_type ?? "");
 
   const rows: string[] = [
     `<strong>${title}</strong>`,
-    `<span class="popup__types">${escapeHtml(p.zone_kind_label ?? "")}` +
+    `<span class="popup__types">${escapeHtml(kindLabel)}` +
       `${p.municipality_name ? ` ／ ${escapeHtml(p.municipality_name)}` : ""}</span>`,
   ];
 
   if (p.far != null || p.bcr != null) {
     const far = p.far != null ? `容積率 ${p.far}%` : "";
     const bcr = p.bcr != null ? `建蔽率 ${p.bcr}%` : "";
-    rows.push(`<div class="popup__figures">${escapeHtml([far, bcr].filter(Boolean).join(" ／ "))}</div>`);
-  }
-  if (p.description) {
-    rows.push(`<p class="popup__desc">${escapeHtml(p.description)}</p>`);
-  }
-  if (p.buildable !== null && p.facility_label) {
-    const verdict = p.buildable ? "建てられます" : "原則として建てられません";
     rows.push(
-      `<p class="popup__verdict ${p.buildable ? "is-ok" : "is-no"}">` +
-        `${escapeHtml(p.facility_label)}：${verdict}</p>`,
+      `<div class="popup__figures">${escapeHtml([far, bcr].filter(Boolean).join(" ／ "))}</div>`,
     );
-    if (p.buildable_note) {
-      rows.push(`<p class="popup__note">${escapeHtml(p.buildable_note)}</p>`);
+  }
+  if (zone?.description) {
+    rows.push(`<p class="popup__desc">${escapeHtml(zone.description)}</p>`);
+  }
+  if (zone && zone.buildable !== null && facility) {
+    const verdict = zone.buildable ? "建てられます" : "原則として建てられません";
+    rows.push(
+      `<p class="popup__verdict ${zone.buildable ? "is-ok" : "is-no"}">` +
+        `${escapeHtml(facility)}：${verdict}</p>`,
+    );
+    if (zone.note) {
+      rows.push(`<p class="popup__note">${escapeHtml(zone.note)}</p>`);
     }
   }
   rows.push(
@@ -136,6 +146,18 @@ export function MapPage() {
    * 取り違えます。
    */
   const [zoneLegend, setZoneLegend] = useState<{ key: string; color: string }[]>([]);
+  /**
+   * 区分ごとの説明。**吹き出しを描くときに読むので ref に置きます。**
+   * クリックの処理は地図の初期化時に 1 度だけ登録されるので、state を
+   * 見ると最初の空の値を閉じ込めてしまいます。
+   */
+  /** 容量の上限で面を落としたか。落としたことを黙らない。 */
+  const [planTruncated, setPlanTruncated] = useState(false);
+  const zoneInfoRef = useRef<{
+    zones: Record<string, CityPlanningZone>;
+    facility: string | null;
+    kindLabel: string;
+  }>({ zones: {}, facility: null, kindLabel: "" });
   const [layers, setLayers] = useState<LayerState>({
     // Off by default: it is reference information, and on over a whole city it
     // competes with the clinics the screen is actually about.
@@ -316,9 +338,11 @@ export function MapPage() {
       map.on("click", "cityPlanning-fill", (e) => {
         const props = e.features?.[0]?.properties as CityPlanningProperties | undefined;
         if (!props) return;
+        const info = zoneInfoRef.current;
         new maplibregl.Popup({ maxWidth: "300px" })
           .setLngLat(e.lngLat)
-          .setHTML(cityPlanningPopup(props))
+          .setHTML(cityPlanningPopup(props, info.zones[props.zone_key],
+                                     info.kindLabel, info.facility))
           .addTo(map);
       });
       map.on("mouseenter", "clinics-circle", () => (map.getCanvas().style.cursor = "pointer"));
@@ -383,6 +407,9 @@ export function MapPage() {
   const showLandPrices = layers.landPrices;
   const clinicSpecialty = specialty;
   const planKind = cityPlanningKind;
+  const kindLabelRef = useRef("");
+  kindLabelRef.current =
+    cityPlanningKinds.find((k) => k.kind === cityPlanningKind)?.label ?? "都市計画";
   const loadViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map) return;
@@ -446,10 +473,17 @@ export function MapPage() {
           .features ?? [];
       const seen = new Map<string, string>();
       for (const f of planFeatures) {
-        const key = String(f.properties?.zone_key ?? f.properties?.zone_type ?? "");
+        const key = String(f.properties?.zone_key ?? "");
         if (key && !seen.has(key)) seen.set(key, ZONE_COLORS[key] ?? ZONE_FALLBACK);
       }
       setZoneLegend([...seen].map(([key, color]) => ({ key, color })));
+      zoneInfoRef.current = {
+        zones: (cityPlanning as { zones?: Record<string, CityPlanningZone> }).zones ?? {},
+        facility:
+          (cityPlanning as { facility_label?: string | null }).facility_label ?? null,
+        kindLabel: kindLabelRef.current,
+      };
+      setPlanTruncated(Boolean((cityPlanning as { truncated?: boolean }).truncated));
       setZoomedOut(zoom < MIN_ZOOM.clinics);
       setLayerError(null);
     } catch (e) {
@@ -851,6 +885,11 @@ export function MapPage() {
           {zoomedOut && !layerError && !scoresMissing && (
             <div className="map__hint map__hint--zoom">
               広域表示のため歯科医院を省略しています。拡大すると表示されます。
+            </div>
+          )}
+          {cityPlanningKind && planTruncated && !layerError && (
+            <div className="map__hint map__hint--zoom">
+              区域が多いため、小さいものを省いて表示しています。拡大すると全部出ます。
             </div>
           )}
           {cityPlanningKind && zoneLegend.length === 0 && !layerError && (
