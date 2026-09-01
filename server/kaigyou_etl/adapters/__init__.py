@@ -17,6 +17,7 @@ from kaigyou_etl.adapters.estat_resident_profile import (
 from kaigyou_etl.adapters.estat_mesh import EStatMeshAdapter
 from kaigyou_etl.adapters.mhlw_clinics import MHLWClinicsAdapter
 from kaigyou_etl.adapters.mhlw_specialties import MHLWSpecialtiesAdapter
+from kaigyou_etl.adapters.mlit_city_planning import MLITCityPlanningAdapter
 from kaigyou_etl.adapters.mlit_municipalities import MLITMunicipalitiesAdapter
 from kaigyou_etl.adapters.mlit_future_population import MLITFuturePopulationAdapter
 from kaigyou_etl.adapters.mlit_land_prices import MLITLandPriceAdapter
@@ -33,6 +34,7 @@ ADAPTERS: dict[str, Type[SourceAdapter]] = {
     "estat_resident_profile": EStatResidentProfileAdapter,
     "mlit_stations": MLITStationsAdapter,
     "mlit_municipalities": MLITMunicipalitiesAdapter,
+    "mlit_city_planning": MLITCityPlanningAdapter,
     "mlit_land_prices": MLITLandPriceAdapter,
     "mlit_future_population": MLITFuturePopulationAdapter,
     "osm_walk_network": OSMWalkNetworkAdapter,

@@ -497,6 +497,103 @@ sources:
       # per-operator station code.
       max_spread_m: 2000
 
+  mlit_city_planning:
+    adapter: mlit_city_planning
+    name: "国土数値情報 都市計画決定情報（A55）"
+    publisher: "国土交通省"
+    dataset_kind: official
+    homepage_url: "https://nlftp.mlit.go.jp/ksj/gml/datalist/KsjTmplt-A55-2024.html"
+    license: "国土数値情報 利用約款に従う（出典明記）"
+    # 1 県 1 アーカイブ。中は市区町村ごとのフォルダで、層ごとの shapefile が
+    # 入っています（静岡県で 32 フォルダ・233 ファイル）。
+    #
+    #   kaigyou-etl run mlit_city_planning --input A5524_22000_SHP.zip --prefecture 22
+    #
+    url: null
+    # A55 の .cpg は utf_8 と宣言しています（国土数値情報では珍しい）。
+    # .cpg があればそれが優先されるので、ここは読めなかったときの落とし先です。
+    encoding: utf-8
+    # 告示の年度。A55-24 は令和6年度版。
+    source_date: 2024-04-01
+    # ------------------------------------------------------------------ 層
+    # **取り込む層と、層ごとの列名。** A55 は層ごとに列名が違います
+    # （YoutoName / AreaType / DistType / ParkName / TokeiType）。ここに無い層は
+    # 取り込みません。層を増やすのはこの表に 1 ブロック足すだけです。
+    #
+    # 鍵はファイル名の末尾（22100_youto.shp -> youto）。
+    #
+    # douro（都市計画道路）はここに入れません。線なので、面の表に入れると
+    # 点の内外判定にも面積按分にも使えないものが混ざります。
+    layers:
+      youto:
+        label: 用途地域
+        type_field: YoutoName
+        code_field: YoutoCode
+        # 容積率・建蔽率を持つのはこの層だけです。
+        far_field: FAR
+        bcr_field: BCR
+      senbiki:
+        label: 区域区分
+        type_field: AreaType
+        code_field: AreaCode
+      ritteki:
+        label: 立地適正化計画
+        type_field: AreaType
+        code_field: AreaCode
+      tokei:
+        label: 都市計画区域
+        type_field: TokeiType
+        code_field: TokeiCode
+        name_field: TokeiName
+      jyuntoshi:
+        label: 準都市計画区域
+        type_field: AreaType
+        code_field: AreaCode
+        name_field: AreaName
+      bouka:
+        label: 防火・準防火地域
+        type_field: AreaType
+        code_field: AreaCode
+      koudoti:
+        label: 高度地区
+        type_field: DistType
+        code_field: DistCode
+      koudori:
+        label: 高度利用地区
+        type_field: DistType
+        code_field: DistCode
+        name_field: DistName
+      tkbt:
+        label: 特別用途地区
+        type_field: DistType
+        code_field: DistCode
+        name_field: YoutoName
+      tokuteiyouto:
+        label: 特定用途制限地域
+        type_field: DistType
+        code_field: DistCode
+        name_field: DistName
+      fuuchichiku:
+        label: 風致地区
+        type_field: DistType
+        code_field: DistCode
+        name_field: DistName
+      chikukei:
+        label: 地区計画
+        type_field: DistType
+        code_field: DistCode
+        name_field: DistName
+      tochiku:
+        label: 市街地開発事業
+        type_field: DistType
+        code_field: DistCode
+        name_field: DistName
+      kouen:
+        label: 都市計画公園・緑地
+        type_field: ParkType
+        code_field: ParkCode
+        name_field: ParkName
+
   mlit_municipalities:
     adapter: mlit_municipalities
     name: "国土数値情報 行政区域（N03）"

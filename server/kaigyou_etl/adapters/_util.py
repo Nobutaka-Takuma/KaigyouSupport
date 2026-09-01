@@ -6,7 +6,7 @@ import io
 import re
 import zipfile
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from kaigyou_etl.acquisition import ERROR_PARSE, ERROR_SCHEMA, AcquisitionError
 
@@ -162,6 +162,58 @@ def read_shapefile(path: Path, member_prefix: str | None = None,
     return fields, list(reader.iterShapeRecords())
 
 
+def read_shapefiles(path: Path, match: Callable[[str], bool],
+                    encoding: str = "cp932",
+                    ) -> Iterator[tuple[str, list[str], list[Any]]]:
+    """Read *every* shapefile in a zip whose member name satisfies ``match``.
+
+    :func:`read_shapefile` reads one layer and stops. Some archives are a
+    directory tree of them: 国土数値情報 A55 ships one folder per municipality
+    with up to fifteen layers in each, 233 shapefiles in the prefecture file for
+    Shizuoka. Reading only the first would load one layer of one city and report
+    success.
+
+    Yields ``(member name, field names, ShapeRecords)`` one layer at a time, so
+    a caller never holds the whole prefecture in memory at once.
+
+    Encoding is resolved per member from its own ``.cpg``, because an archive
+    can mix them -- and it is the same rule as :func:`read_shapefile` so the two
+    cannot disagree about what a name says.
+    """
+    import shapefile  # pyshp
+
+    if not is_zip(path):
+        fields, records = read_shapefile(path, encoding=encoding)
+        yield path.name, fields, records
+        return
+
+    members = [m for m in zip_members(path, (".shp",)) if match(m)]
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+        for member in members:
+            stem = member[:-4]
+            parts: dict[str, io.BytesIO] = {}
+            missing = False
+            for ext in ("shp", "dbf", "shx"):
+                name = f"{stem}.{ext}"
+                if name not in names:
+                    name = next((n for n in names if n.lower() == name.lower()), None)
+                if name is None:
+                    # A layer without its .dbf carries no attributes at all, so
+                    # it is skipped rather than loaded as unlabelled polygons.
+                    if ext == "shx":
+                        continue
+                    missing = True
+                    break
+                parts[ext] = io.BytesIO(zf.read(name))
+            if missing:
+                continue
+            declared = zf.read(f"{stem}.cpg").decode("ascii", "ignore").strip() \
+                if f"{stem}.cpg" in names else ""
+            reader = shapefile.Reader(**parts,
+                                      encoding=_resolve_encoding(declared, encoding),
+                                      encodingErrors="replace")
+            yield member, [f[0] for f in reader.fields[1:]], list(reader.iterShapeRecords())
 def _resolve_encoding(declared: str, fallback: str) -> str:
     """Trust a .cpg declaration when Python recognises the codec it names."""
     if not declared:
