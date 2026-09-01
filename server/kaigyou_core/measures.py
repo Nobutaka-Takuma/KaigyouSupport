@@ -227,6 +227,7 @@ LAYERS: dict[str, str] = {
     "access": "交通・立地",
     "cost": "地価・コスト",
     "future": "将来推計",
+    "regulation": "都市計画（何を建ててよいか）",
 }
 
 

@@ -312,15 +312,84 @@ def test_the_regulation_section_says_what_may_be_built(doc):
 
     A practice is a tenant, and 96% floor area ratio and 583% are different
     quantities of tenantable floor above the same population.
+
+    **2 つの出所が別々に立っていること。** city_plan は都市計画決定情報の面で
+    候補地そのものの値、land_price_survey は地価公示の点で標準地の値です。
+    1 つに畳むと、点の値が面の判定として読まれます。
     """
-    zoning = doc["regulation"]
-    if zoning is None:
+    regulation = doc["regulation"]
+    assert set(regulation) >= {"city_plan", "land_price_survey", "note"}
+
+    survey = regulation["land_price_survey"]
+    if survey is None:
         pytest.skip("no land price data loaded here")
-    nearest = zoning["at_nearest_surveyed_point"]
+    nearest = survey["at_nearest_surveyed_point"]
     assert nearest["zoning"]
     assert nearest["floor_area_ratio_pct"] > 0
-    assert "用途地域図そのものではない" in zoning["definition"], (
+    assert "候補地そのものの用途地域とは" in survey["definition"], (
         "the reader must not take surveyed points for a zoning map")
+
+
+def test_the_city_plan_says_whether_it_may_be_built_at_all(doc):
+    """**この節だけが「そこに何を建ててよいか」を答えます。**
+
+    他は全部「そこに何人いるか」です。市街化調整区域の候補地に商圏人口を
+    書いても、読んだ人はその物件を選べません。
+    """
+    plan = doc["regulation"]["city_plan"]
+    if plan is None:
+        pytest.skip("no city planning data loaded here")
+
+    assert plan["source"].startswith("国土数値情報 A55")
+    for zone in plan["at_site"]:
+        assert zone["layer"] and zone["zone"]
+
+    verdict = plan["buildability"]
+    assert verdict["verdict"] in (
+        "permitted", "permitted_with_conditions", "not_permitted", "unknown")
+    # 建てられないと言うなら、なぜかを必ず添える。
+    if verdict["verdict"] == "not_permitted":
+        assert verdict["blocking"], "禁止と言いながら理由が空です"
+    # 断定しないための免責が必ず付く。
+    assert "特定行政庁" in (verdict.get("note") or "") or plan.get("disclaimer")
+
+    for entry in plan["zoning_mix_in_radius"]:
+        assert 0 <= entry["share"] <= 1
+
+
+def test_a_prohibited_zone_blocks_regardless_of_the_use_district():
+    """**禁止は 1 つでもあれば禁止。** 用途地域が可でも調整区域なら建たない。
+
+    and で畳まずに「最後に見た区域」で決める実装は、区域の並び順で答えが
+    変わります。しかも大半の候補地は市街化区域なので、気づくのは調整区域の
+    案件が来たときです。
+    """
+    from kaigyou_core.dataset import _buildability
+
+    rules = {
+        "facility_label": "診療所",
+        "zone_rules": {"工業専用地域": {"buildable": False, "note": "別表第2"}},
+        "area_division_rules": {"市街化調整区域": {"buildable": False, "note": "原則不可"},
+                                "市街化区域": {"buildable": True}},
+    }
+    verdict = _buildability({"商業地域", "市街化調整区域"}, rules)
+    assert verdict["verdict"] == "not_permitted"
+    assert [b["zone"] for b in verdict["blocking"]] == ["市街化調整区域"]
+
+    ok = _buildability({"商業地域", "市街化区域"}, rules)
+    assert ok["verdict"] == "permitted"
+
+
+def test_without_the_rules_no_verdict_is_claimed():
+    """規則が無い業態で「建てられます」と書かない。
+
+    病院版の設定を置き忘れた環境で、歯科の規則が流用されるほうが危険です。
+    """
+    from kaigyou_core.dataset import _buildability
+
+    verdict = _buildability({"商業地域"}, {})
+    assert verdict["verdict"] in ("permitted", "unknown")
+    assert verdict["blocking"] == []
 
 
 def test_numbers_are_numbers(doc):
@@ -439,3 +508,56 @@ def test_no_radius_is_measured_twice(client, monkeypatch):
 
     assert seen, "何も測っていない"
     assert len(seen) == len(set(seen)), f"同じ半径を測り直しています: {sorted(seen)}"
+
+
+def test_the_city_plan_reaches_the_llm_as_citable_facts():
+    """**取り込んだだけでは分析は変わりません。**
+
+    LLM が FACT として引けるのは ``citable`` に載っているキーだけです。
+    データセットに節が増えても、ここに出ていなければ本文には現れません。
+    層（layer）も要ります——PATTERN は層を跨いだものだけを数えるので、
+    層が付いていない数字は組み合わせの相手になれません。
+
+    フィクスチャは辞書です。県のデータが入っていない環境でも落ちないように
+    （銀座の検証用データベースには静岡の都市計画がありません）。
+    """
+    from kaigyou_core.measures import LAYERS
+    from kaigyou_intel.projection import for_step1
+
+    dataset = {
+        "regulation": {
+            "city_plan": {
+                "at_site": [
+                    {"layer": "用途地域", "zone": "商業地域",
+                     "floor_area_ratio_pct": 400, "building_coverage_pct": 80},
+                    {"layer": "区域区分", "zone": "市街化調整区域"},
+                ],
+                "buildability": {"facility": "診療所", "verdict": "not_permitted",
+                                 "verdict_label": "原則として建てられない",
+                                 "blocking": [{"zone": "市街化調整区域", "reason": "原則不可"}]},
+                "guidance_zones": [{"zone": "都市機能誘導区域", "meaning": "..."}],
+                "zoning_mix_in_radius": [{"zone": "商業地域", "share": 0.42}],
+            },
+        },
+    }
+    cited = {c["key"]: c for c in for_step1(dataset)["citable"]}
+
+    assert cited["regulation.area_division"]["value"] == "市街化調整区域"
+    assert cited["regulation.zoning"]["value"] == "商業地域"
+    assert cited["regulation.floor_area_ratio_pct"]["value"] == 400
+    assert cited["regulation.buildability"]["value"] == "原則として建てられない"
+    assert cited["regulation.guidance_zones"]["value"] == "都市機能誘導区域"
+    assert cited["regulation.dominant_zoning_share"]["value"] == 0.42
+
+    # 層が付いていないと、層を跨いだ PATTERN の相手になれません。
+    assert all(c["layer"] == "regulation" for c in cited.values()
+               if c["key"].startswith("regulation."))
+    assert "regulation" in LAYERS
+
+
+def test_nothing_is_cited_when_the_city_plan_is_missing():
+    """未取得の県で、空の判定を FACT として渡さないこと。"""
+    from kaigyou_intel.projection import for_step1
+
+    cited = {c["key"] for c in for_step1({"regulation": {"city_plan": None}})["citable"]}
+    assert not any(k.startswith("regulation.") for k in cited)

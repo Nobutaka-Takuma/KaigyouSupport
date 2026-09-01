@@ -17,7 +17,9 @@ TABLE_LABELS = {
     "stations": "駅",
     "municipalities": "行政区域",
     "walk_network": "街路ネットワーク（OSM）",
+    "land_prices": "地価公示",
     "mesh_population_projection": "将来推計人口（500mメッシュ）",
+    "city_planning_zones": "都市計画決定情報（用途地域・区域区分ほか）",
 }
 
 

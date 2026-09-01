@@ -148,6 +148,47 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
             heading.get("bearing_deg"), "度（真北から時計回り）", "access",
             "国土数値情報 S12 と候補地の座標")
 
+    # --- 都市計画：何を建ててよい場所か -------------------------------------
+    # **他の数字は全部「そこに何人いるか」です。ここだけが「そこに何を建てて
+    # よいか」を言います。** 市街化調整区域なら商圏人口を論じても始まらない
+    # ので、可否は他のどの数字より先に読まれる必要があります。
+    plan = (dataset.get("regulation") or {}).get("city_plan") or {}
+    at_site = {z.get("layer"): z for z in (plan.get("at_site") or [])}
+
+    youto = at_site.get("用途地域") or {}
+    add("regulation.zoning", "候補地点の用途地域", youto.get("zone"), "", "regulation",
+        A55, note="地価公示の標準地の値ではなく、候補地の座標が入る面の値。")
+    add("regulation.floor_area_ratio_pct", "候補地点の容積率",
+        youto.get("floor_area_ratio_pct"), "%", "regulation", A55,
+        note="敷地面積に対して建てられる延床面積の割合。テナントとして入りうる床の量に効く。")
+    add("regulation.building_coverage_pct", "候補地点の建蔽率",
+        youto.get("building_coverage_pct"), "%", "regulation", A55)
+    add("regulation.area_division", "候補地点の区域区分",
+        (at_site.get("区域区分") or {}).get("zone"), "", "regulation", A55,
+        note="市街化調整区域は原則として建築できない。用途地域より強い制約。")
+
+    buildability = plan.get("buildability") or {}
+    add("regulation.buildability",
+        f"{buildability.get('facility') or '施設'}を建てられるか",
+        buildability.get("verdict_label"), "", "regulation", A55,
+        note=("用途地域と区域区分の公表値だけによる一次判定。規模・接道・条例で"
+              "変わり、決めるのは特定行政庁。建築確認の代わりにはならない。"))
+
+    guidance = [g.get("zone") for g in (plan.get("guidance_zones") or []) if g.get("zone")]
+    add("regulation.guidance_zones", "候補地点が入る誘導区域",
+        "・".join(guidance) if guidance else None, "", "regulation", A55,
+        note=("立地適正化計画。規制ではなく市町の意思表示で、将来推計人口が"
+              "「このままいくとこうなる」を示すのに対し「行政がこうしようとして"
+              "いる」を示す。"))
+
+    mix = plan.get("zoning_mix_in_radius") or []
+    if mix and mix[0].get("share") is not None:
+        add("regulation.dominant_zoning", "商圏で最も面積の広い用途地域",
+            mix[0].get("zone"), "", "regulation", A55)
+        add("regulation.dominant_zoning_share", "その用途地域が商圏に占める面積割合",
+            mix[0].get("share"), "割合", "regulation", A55,
+            note="半径で切った円による面積按分。徒歩圏で分析していても円で算出。")
+
     # --- 競合の提供体制：診療時間 -----------------------------------------
     hours = competition.get("hours") or {}
     declared = hours.get("declared") or 0
@@ -308,6 +349,7 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 MHLW = "厚生労働省 医療機能情報提供制度"
+A55 = "国土数値情報 A55 都市計画決定情報"
 CENSUS_BIZ = "総務省・経済産業省 経済センサス"
 
 

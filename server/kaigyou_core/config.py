@@ -180,3 +180,20 @@ def insights_config(category: str | None = None) -> dict[str, Any]:
         return load_yaml(business_file("insights.yaml", category))
     except ConfigNotFound:
         return {}
+
+
+def city_planning_config(category: str | None = None) -> dict[str, Any]:
+    """用途地域・区域区分と、そこにこの業態の施設を建てられるかの規則。
+
+    **業態で変わるのでコードに書きません。** 建築基準法 別表第2 では診療所は
+    工業専用地域を除くすべての用途地域で建てられますが、病院は低層住居専用・
+    第一種中高層住居専用・工業・工業専用で建てられません。同じ「医療施設」でも
+    別の表になります。
+
+    無ければ空。**空のときは可否を判定せず、区域名だけを出します**——
+    規則が無いのに「建てられます」と書くほうが危険だからです。
+    """
+    try:
+        return load_yaml(business_file("city_planning.yaml", category))
+    except ConfigNotFound:
+        return {}

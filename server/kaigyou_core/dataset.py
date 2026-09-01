@@ -202,9 +202,28 @@ DEFINITIONS: dict[str, dict[str, str]] = {
     "zoning": {
         "unit": "区分",
         "description": (
-            "都市計画の用途地域。地価公示の標準地が置かれた地点の値であり、"
-            "用途地域図そのものではない。全域の判定には国土数値情報 A29 が必要。"),
+            "都市計画の用途地域。regulation.land_price_survey にあるものは"
+            "地価公示の標準地が置かれた地点の値で、候補地そのものの用途地域とは"
+            "限らない。候補地の判定は regulation.city_plan（面データ）を見ること。"),
         "source": "国土数値情報 L01",
+    },
+    "city_plan_zone": {
+        "unit": "区分",
+        "description": (
+            "候補地の座標が入っている都市計画の区域。用途地域は「何を建ててよいか」、"
+            "区域区分（市街化区域／市街化調整区域）は「そもそも建てられるか」、"
+            "立地適正化計画の誘導区域は「市町がそこに何を集めようとしているか」。"
+            "面データによる判定なので、候補地そのものの値。"),
+        "source": "国土数値情報 A55 都市計画決定情報",
+    },
+    "buildability": {
+        "unit": "判定",
+        "description": (
+            "用途地域と区域区分の公表値だけによる、その業態の施設を建てられるかの"
+            "一次判定。規模・接道・条例で変わり、決めるのは特定行政庁なので、"
+            "建築確認や事前相談の代わりにはならない。判定の規則は業態ごとの"
+            "設定ファイルにあり、診療所と病院では建てられる用途地域が異なる。"),
+        "source": "国土数値情報 A55 と 建築基準法 別表第2（config/<業態>/city_planning.yaml）",
     },
     "score": {
         "unit": "0-100",
@@ -1240,6 +1259,176 @@ def _catchment_shape(conn: psycopg.Connection, lat: float, lng: float,
     }
 
 
+def _city_planning(conn: psycopg.Connection, lat: float, lng: float,
+                   radius_m: int, category: str = DEFAULT_CATEGORY,
+                   ) -> dict[str, Any] | None:
+    """候補地に掛かっている都市計画。**何が建てられるかを決めているのはここです。**
+
+    人口も競合も「そこに何人いるか」の話です。この節だけが「そこに何を建てて
+    よいか」を答えます。市街化調整区域なら他の数字を読む意味がほとんど無く、
+    工業専用地域なら診療所は建てられません——**それを知らずに商圏人口を
+    論じても仕方がありません。**
+
+    地価公示から採る :func:`_zoning` との違いは、点か面かです。地価公示は
+    静岡県で 3,221 点しかなく、近くに標準地が無ければ不明になり、あっても
+    用途地域の境目は道 1 本で変わるので最寄り点の用途地域が候補地の用途地域
+    とは限りません。A55 は面なので ST_Contains で決まります。
+
+    可否の規則は ``config/<業態>/city_planning.yaml`` にあります。診療所と
+    病院で建てられる用途地域が違うためで、コードには書きません。規則が
+    無い環境では**可否を判定せず区域名だけ**を返します。
+    """
+    from kaigyou_core import config as cfg
+
+    if not table_exists(conn, "city_planning_zones"):
+        return None
+
+    rules = cfg.city_planning_config(category)
+    point = (lng, lat)
+    with conn.cursor() as cur:
+        # --- 候補地点そのものに掛かる区域 ---------------------------------
+        # 公表データには同じ層で重なる面があるので（沼津市の調整区域など）、
+        # 1 件だけ返る前提では書きません。
+        cur.execute(
+            """
+            SELECT zone_kind, zone_kind_label, zone_type, zone_name,
+                   far, bcr, municipality_name, decided_on
+            FROM city_planning_zones
+            WHERE geom && ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+              AND ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            ORDER BY zone_kind_label, zone_type
+            """, (*point, *point))
+        here = cur.fetchall()
+
+        # --- 商圏の用途地域の構成（面積按分） -----------------------------
+        # 「商圏の何割が商業地域か」。合計人口と同じで、1 点の用途地域だけでは
+        # 商店街なのか住宅地なのかが分かりません。
+        cur.execute(
+            """
+            WITH buf AS (
+                SELECT ST_Buffer(ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+                                 %s)::geometry AS g
+            )
+            SELECT z.zone_type,
+                   round(avg(z.far))::int AS floor_area_ratio_pct,
+                   sum(ST_Area(ST_Intersection(z.geom, buf.g)::geography)) AS area_m2,
+                   max(ST_Area(buf.g::geography)) AS buffer_m2
+            FROM city_planning_zones z, buf
+            WHERE z.zone_kind = 'youto'
+              AND z.geom && buf.g AND ST_Intersects(z.geom, buf.g)
+            GROUP BY z.zone_type
+            ORDER BY 3 DESC
+            """, (*point, radius_m))
+        mix = cur.fetchall()
+
+    if not here and not mix:
+        return None
+
+    at_site = [
+        {
+            "layer": row["zone_kind_label"],
+            "zone": row["zone_type"],
+            "name": row["zone_name"],
+            "floor_area_ratio_pct": _round(row["far"]),
+            "building_coverage_pct": _round(row["bcr"]),
+            "decided_on": row["decided_on"],
+        }
+        for row in here
+    ]
+    zones_here = {row["zone_type"] for row in here if row["zone_type"]}
+
+    buffer_m2 = float(mix[0]["buffer_m2"]) if mix else 0.0
+    composition = [
+        {
+            "zone": row["zone_type"],
+            "floor_area_ratio_pct": row["floor_area_ratio_pct"],
+            "area_km2": _round(float(row["area_m2"]) / 1e6, 3),
+            "share": (round(float(row["area_m2"]) / buffer_m2, 3)
+                      if buffer_m2 > 0 else None),
+        }
+        for row in mix
+    ]
+
+    out: dict[str, Any] = {
+        "at_site": at_site,
+        "municipality": next((r["municipality_name"] for r in here
+                              if r["municipality_name"]), None),
+        "zoning_mix_in_radius": composition,
+        "zoning_mix_note": (
+            f"半径 {radius_m}m の円で切った用途地域の面積構成。"
+            "徒歩圏で分析している場合でもこの構成は円で算出しています。"),
+        "definition": (
+            "国土数値情報 A55（都市計画決定情報）の面データ。候補地の座標が"
+            "どの区域の中にあるかで判定している。用途地域は「何を建ててよいか」、"
+            "区域区分（市街化区域／市街化調整区域）は「そもそも建てられるか」、"
+            "立地適正化計画の誘導区域は「市町がそこに何を集めようとしているか」。"),
+        "source": "国土数値情報 A55 都市計画決定情報",
+    }
+
+    if not rules:
+        out["buildability"] = None
+        out["note"] = ("この業態の用途地域規則（config/<業態>/city_planning.yaml）が"
+                       "無いため、区域名のみを示し可否は判定していません。")
+        return out
+
+    out["buildability"] = _buildability(zones_here, rules)
+    out["guidance_zones"] = [
+        {"zone": zone, "meaning": meaning}
+        for zone, meaning in (rules.get("guidance_notes") or {}).items()
+        if zone in zones_here
+    ]
+    out["disclaimer"] = rules.get("disclaimer")
+    return out
+
+
+def _buildability(zones: set[str], rules: Mapping[str, Any]) -> dict[str, Any]:
+    """区域名の集合を「建てられるか」に写す。
+
+    **禁止が 1 つでもあれば禁止です。** 用途地域が可でも市街化調整区域なら
+    建てられません。可否は and で畳み、理由は全部残します——「なぜ駄目か」が
+    1 行しか無いと、読んだ人はもう一方の制約に気づかないままになります。
+    """
+    zone_rules = rules.get("zone_rules") or {}
+    area_rules = rules.get("area_division_rules") or {}
+    default = rules.get("default") or {}
+
+    blocking: list[dict[str, str]] = []
+    cautions: list[dict[str, str]] = []
+    matched = False
+    for zone in sorted(zones):
+        rule = zone_rules.get(zone) or area_rules.get(zone)
+        if rule is None:
+            continue
+        matched = True
+        if rule.get("buildable") is False:
+            blocking.append({"zone": zone, "reason": str(rule.get("note") or "")})
+        elif rule.get("caution"):
+            cautions.append({"zone": zone, "caution": str(rule["caution"])})
+
+    if blocking:
+        verdict = "not_permitted"
+    elif matched or zones:
+        verdict = "permitted_with_conditions" if cautions else "permitted"
+    else:
+        verdict = "unknown"
+
+    return {
+        "facility": rules.get("facility_label"),
+        "verdict": verdict,
+        "verdict_label": {
+            "not_permitted": "原則として建てられない",
+            "permitted_with_conditions": "建てられるが条件がある",
+            "permitted": "用途地域・区域区分の上では制約なし",
+            "unknown": "判定できない（区域が特定できていない）",
+        }[verdict],
+        "blocking": blocking,
+        "cautions": cautions,
+        "note": ("用途地域と区域区分の公表値だけによる一次判定。規模・接道・条例で"
+                 "変わり、決めるのは特定行政庁。"
+                 if default is not None else None),
+    }
+
+
 def _zoning(conn: psycopg.Connection, lat: float, lng: float,
             radius_m: int) -> dict[str, Any] | None:
     """用途地域・容積率・建蔽率。何をどれだけ建てられる場所か。
@@ -1512,7 +1701,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     insights = build_insights(measures, insights_config)
 
     tables = ["population_mesh", "mesh_business", "facilities", "stations",
-              "municipalities", "land_prices"]
+              # 都市計画が未取得の県では「建てられるか」を判定できません。
+              # 黙って節が消えるのではなく、未取得として名前が出るようにします。
+              "municipalities", "land_prices", "city_planning_zones"]
     provenance = prov.for_tables(conn, tables)
     unavailable = [d["dataset_label"] for d in provenance.get("datasets_unavailable", [])]
 
@@ -1682,9 +1873,22 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 _round(metrics.get("land_price_yen_per_sqm")),
                 insights_config.get("rent_estimate") or {}),
         },
-        # 用途地域・容積率・建蔽率。The constraint the rest of the figures sit
-        # inside, and the only section here that is about what may be built.
-        "regulation": _zoning(conn, lat, lng, radius_m),
+        # 用途地域・容積率・建蔽率。**この節だけが「何を建ててよいか」を
+        # 答えます。** 他は全部「そこに何人いるか」の話です。
+        #
+        # 2 つの出所を並べ、どちらがどちらか分かるようにしています。
+        # city_plan は都市計画決定情報（面）で、候補地の座標がどの区域に
+        # 入るかが決まります。land_price_survey は地価公示（点）で、
+        # 標準地が置かれた場所の値です。**混ぜると、点の値が面の判定として
+        # 読まれます。**
+        "regulation": {
+            "city_plan": _city_planning(conn, lat, lng, radius_m, category),
+            "land_price_survey": _zoning(conn, lat, lng, radius_m),
+            "note": ("city_plan は国土数値情報 A55（面）による候補地点の判定。"
+                     "land_price_survey は地価公示の標準地（点）の値で、"
+                     "候補地そのものの用途地域とは限らない。"
+                     "食い違う場合は city_plan が候補地の値。"),
+        },
         "scores": {
             "normalization_scope": scope,
             "normalization_reference": scope.rsplit(":", 1)[-1],
