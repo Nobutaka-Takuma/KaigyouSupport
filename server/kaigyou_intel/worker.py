@@ -109,6 +109,14 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     })
     if sources:
         jobs.save_sources(conn, job_id, number, None, sources)
+    # 中間 JSON（指示書 §21）。DB に入っていることと、手元でファイルとして
+    # 読めることは違います。プロンプトを直したあと「なぜこの PATTERN が
+    # 出たのか」を追うのに、DB クライアントを開かせません。
+    # **便宜なので、書けなくても段は成功のままです。**
+    try:
+        report.write_step_file(conn, job_id, number, payload, output)
+    except OSError:
+        pass
     if number == max(RUNNERS):
         # 最終段。レポートは Markdown にして保存します。免責とデータ時点は
         # ここで付けるので、LLM が書き忘れても落ちません。

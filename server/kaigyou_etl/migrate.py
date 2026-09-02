@@ -6,6 +6,7 @@ from pathlib import Path
 import psycopg
 
 from kaigyou_core import config as cfg
+from kaigyou_core.db import forget_schema
 
 
 def migrations_dir() -> Path:
@@ -42,6 +43,10 @@ def migrate(conn: psycopg.Connection, *, force: bool = False) -> list[str]:
         run.append(path.name)
 
     _ensure_optional_functions(conn)
+    # **スキーマを変えたので、この接続が覚えている「その列はまだ無い」を
+    # 捨てます。** db.column_exists / table_exists は往復を減らすために
+    # 答えを接続ごとに覚えていて、当てた直後に読むと古い答えを見ます。
+    forget_schema(conn)
     return run
 
 

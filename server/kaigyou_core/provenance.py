@@ -24,15 +24,19 @@ TABLE_LABELS = {
 
 
 def for_tables(conn: psycopg.Connection, tables: Iterable[str]) -> dict[str, Any]:
-    from kaigyou_core.db import table_exists
+    from kaigyou_core.db import tables_that_exist
 
     tables = list(tables)
+    # **表ごとに訊くと、表の数だけ往復します。** まとめて 1 往復で訊きます
+    # （手元では 0.2ms なので誰も気づきませんが、Vercel から Supabase へは
+    # 1 往復 10〜30ms です）。
+    present = tables_that_exist(conn, tables)
     entries: list[dict[str, Any]] = []
     with conn.cursor() as cur:
         for table in tables:
             # Not migrated yet is the same story as loaded-but-empty: the
             # dataset is unavailable, and the caller lists it as such.
-            if not table_exists(conn, table):
+            if table not in present:
                 continue
             cur.execute(
                 f"""

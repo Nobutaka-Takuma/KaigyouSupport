@@ -232,17 +232,28 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         + structured.usage.cache_write_tokens,
     )
 
-    # 2 周目。**1 周目が何かを残したときだけ**走ります。
-    if _should_iterate(output, limits):
-        extra_usage, extra_sources = _second_round(
-            output, patterns, location, payload, limits, category)
+    # 2 周目以降。**前の周が何かを残したときだけ**走ります。
+    for round_number in range(2, int(limits.get("research_rounds", 1)) + 1):
+        if not _should_iterate(output, limits):
+            break
+        before = len(output.external_facts)
+        extra_usage, extra_sources = _another_round(
+            output, patterns, location, payload, limits, category, round_number)
         usage = _add(usage, extra_usage)
         retrieved = retrieved + extra_sources
+        # **何も足せなかった周の次は、走らせません。** 同じ問いに、同じ
+        # 「公表されていない」が返ってくるだけです。増えるのは費用と時間で、
+        # 分かることは増えません。
+        if len(output.external_facts) == before:
+            output.unanswered = list(output.unanswered) + [
+                f"{round_number} 周目で新しい外部事実が得られなかったため、"
+                "調べ直しをここで打ち切りました。"]
+            break
 
     return output.model_dump(), usage, _sources_with_patterns(retrieved, output)
 
 
-# --------------------------------------------------------------- 2 周目
+# --------------------------------------------------------------- 2 周目以降
 #
 # 1 周目は STEP1 が立てた問いをそのまま検索に持っていきます。実際の調査は
 # そうではありません。**1 回目に何が出てこなかったかを見て、次に何を引くかが
@@ -251,10 +262,15 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
 # とくに CONTRADICTED——「調べたら違うと分かった」——は、**問いがまだ生きて
 # いるのに 1 周目で止まると、そこで終わりになります。** 人がやるなら
 # 「では何が本当の理由なのか」と続けるところです。
+#
+# 周の数は ``limits.research_rounds`` です。既定は 2。**3 以上にできますが、
+# 既定を上げていません**——2 周目で決着しなかったものは、たいてい公表されて
+# いないことだからです。上げてよいかは `analyze --questions` の「2 周目で
+# 決着」の件数が貯まれば分かります。回してみるための口は開けてあります。
 
 
 def _should_iterate(output: Step2Output, limits: Mapping[str, Any]) -> bool:
-    """2 周目を走らせるか。
+    """次の周を走らせるか。
 
     残っているものが無ければ走りません。**走らせても足すものがありません**し、
     1 件あたりの費用と時間はそのぶん増えます。
@@ -267,14 +283,15 @@ def _should_iterate(output: Step2Output, limits: Mapping[str, Any]) -> bool:
                 or any(h.status == "CONTRADICTED" for h in output.hypotheses))
 
 
-def _second_round(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
-                  location: Mapping[str, Any], payload: Mapping[str, Any],
-                  limits: Mapping[str, Any], category: str,
-                  ) -> tuple[llm.Usage, list[dict[str, Any]]]:
+def _another_round(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
+                   location: Mapping[str, Any], payload: Mapping[str, Any],
+                   limits: Mapping[str, Any], category: str,
+                   round_number: int = 2,
+                   ) -> tuple[llm.Usage, list[dict[str, Any]]]:
     """答えの出なかった問いを、角度を変えて調べ直す。
 
-    **失敗しても例外を上げません。** 1 周目は既に払った検索と時間の上に
-    立っています。2 周目がしくじったからといってそれを捨てるのは割に
+    **失敗しても例外を上げません。** 前の周は既に払った検索と時間の上に
+    立っています。この周がしくじったからといってそれを捨てるのは割に
     合いません。落ちたことは ``unanswered`` に残ります。
 
     ``output`` をその場で書き換えます（呼び出し側が model_dump します）。
@@ -286,33 +303,36 @@ def _second_round(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
     budget = max(1, int(limits.get("followup_searches", 3)))
     try:
         system = cfg.prompt_text(name, category).replace(
-            "{followup_searches}", str(budget))
+            "{followup_searches}", str(budget)).replace(
+            "{round_number}", str(round_number))
         result = llm.ask(
             step_number=STEP_NUMBER, system=system, max_uses=budget,
             user=_followup_brief(output, patterns, location, payload))
     except Exception as exc:  # noqa: BLE001 - 1 周目を捨てない
         output.unanswered = list(output.unanswered) + [
-            f"2 周目の調べ直しは呼び出しに失敗しました（{type(exc).__name__}: {exc}）。"
-            "1 周目の結果はそのままです。"]
+            f"{round_number} 周目の調べ直しは呼び出しに失敗しました"
+            f"（{type(exc).__name__}: {exc}）。ここまでの結果はそのままです。"]
         return llm.Usage(), []
 
     sources = [s for s in result.sources if s.get("url")]
     if not (result.text or "").strip():
         output.unanswered = list(output.unanswered) + [
-            "2 周目の調べ直しは本文が空でした。1 周目の結果はそのままです。"]
+            f"{round_number} 周目の調べ直しは本文が空でした。"
+            "ここまでの結果はそのままです。"]
         return result.usage, sources
 
     try:
         merged = _structure_followup(result.text, sources, patterns, category)
     except Exception as exc:  # noqa: BLE001
         output.unanswered = list(output.unanswered) + [
-            f"2 周目の結果を JSON に写せませんでした（{type(exc).__name__}: {exc}）。"
-            "1 周目の結果はそのままです。"]
+            f"{round_number} 周目の結果を JSON に写せませんでした"
+            f"（{type(exc).__name__}: {exc}）。ここまでの結果はそのままです。"]
         return result.usage, sources
 
     _merge(output, merged, {s["url"] for s in sources},
            {str(p["id"]) for p in patterns},
-           {str(q.get("id")) for q in (payload.get("questions") or []) if q.get("id")})
+           {str(q.get("id")) for q in (payload.get("questions") or []) if q.get("id")},
+           round_number)
     total = llm.Usage(
         input_tokens=result.usage.input_tokens + merged.usage.input_tokens,
         output_tokens=result.usage.output_tokens + merged.usage.output_tokens,
@@ -352,11 +372,11 @@ def _followup_brief(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
         + json.dumps(location, ensure_ascii=False, indent=1)
         + "\n```\n\n## まだ答えが出ていない問い\n\n```json\n"
         + json.dumps(unsettled, ensure_ascii=False, indent=1)
-        + "\n```\n\n## 1 周目に消えた説明（問いはまだ生きています）\n\n```json\n"
+        + "\n```\n\n## 消えた説明（問いはまだ生きています）\n\n```json\n"
         + json.dumps(dead_ends, ensure_ascii=False, indent=1)
         + "\n```\n\n## 調べていた PATTERN\n\n```json\n"
         + json.dumps(list(patterns), ensure_ascii=False, indent=1)
-        + "\n```\n\n## 1 周目に確認できた事実（重複して調べないため）\n\n"
+        + "\n```\n\n## ここまでに確認できた事実（重複して調べないため）\n\n"
         + ("\n".join(f"- {f.statement}" for f in output.external_facts)
            or "（なし）"))
 
@@ -382,7 +402,8 @@ def _structure_followup(text: str, sources: Sequence[Mapping[str, Any]],
 
 
 def _merge(first: Step2Output, second: Any, urls: set[str],
-           allowed_patterns: set[str], allowed_questions: set[str]) -> None:
+           allowed_patterns: set[str], allowed_questions: set[str],
+           round_number: int = 2) -> None:
     """2 周目の結果を 1 周目に足す。**id は振り直します。**
 
     どちらの周も C001 から採番します。そのまま足すと、2 周目の C001 が
@@ -398,7 +419,8 @@ def _merge(first: Step2Output, second: Any, urls: set[str],
     output: Step2Output | None = getattr(second, "parsed", None)
     if output is None:
         first.unanswered = list(first.unanswered) + [
-            "2 周目の構造化出力を受け取れませんでした。1 周目の結果はそのままです。"]
+            f"{round_number} 周目の構造化出力を受け取れませんでした。"
+            "ここまでの結果はそのままです。"]
         return
 
     _drop_unverifiable(output, urls)
@@ -409,9 +431,10 @@ def _merge(first: Step2Output, second: Any, urls: set[str],
                             allowed_questions or None)
     if problems:
         first.unanswered = list(first.unanswered) + [
-            "2 周目の結果は参照が解決しなかったため採用しませんでした（"
+            f"{round_number} 周目の結果は参照が解決しなかったため採用しません"
+            "でした（"
             + "; ".join(f"{p.where}: {p.problem}" for p in problems)
-            + "）。1 周目の結果はそのままです。"]
+            + "）。ここまでの結果はそのままです。"]
         return
 
     fact_id = {}
@@ -419,13 +442,13 @@ def _merge(first: Step2Output, second: Any, urls: set[str],
         fact_id[fact.id] = f"C{len(first.external_facts) + offset:03d}"
     for fact in output.external_facts:
         fact.id = fact_id[fact.id]
-        fact.round = 2
+        fact.round = round_number
     hyp_id = {}
     for offset, hypothesis in enumerate(output.hypotheses, 1):
         hyp_id[hypothesis.id] = f"H{len(first.hypotheses) + offset:03d}"
     for hypothesis in output.hypotheses:
         hypothesis.id = hyp_id[hypothesis.id]
-        hypothesis.round = 2
+        hypothesis.round = round_number
         hypothesis.evidence = [fact_id.get(e, e) for e in hypothesis.evidence]
         for link in hypothesis.evidence_links:
             link.fact_id = fact_id.get(link.fact_id, link.fact_id)

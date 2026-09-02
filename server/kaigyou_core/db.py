@@ -8,7 +8,8 @@ from __future__ import annotations
 import os
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
+from weakref import WeakKeyDictionary
 from urllib.parse import urlsplit
 
 import psycopg
@@ -213,6 +214,94 @@ def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
         conn.close()
 
 
+#: スキーマの有無の答えを、**その接続が生きている間だけ**覚えておきます。
+#:
+#: 同じ表・同じ列の有無を、1 リクエストの中で何十回も訊いていました。実測：
+#: ``/api/dataset`` の 114 往復のうち **35 往復がこれ**でした（mesh_scores の
+#: 列の有無 35 回、うち facility_category だけで 15 回）。手元では 1 往復が
+#: 0.2ms（unix ソケット）なので誰も気づきませんが、**Vercel から Supabase へは
+#: 1 往復が 10〜30ms** です。35 往復で 0.4〜1.0 秒、地図をクリックするたびに。
+#:
+#: 覚えるのは接続ごとです。接続は API ではリクエストごと、worker ではジョブ
+#: ごとに開き直すので、**この記憶は次のリクエストまで生き延びません。**
+#: マイグレーションを当てた直後の 1 リクエストが古い答えを見ることはあっても、
+#: 次のリクエストは新しい接続で訊き直します。デプロイの窓（コードが先、
+#: マイグレーションが後）を守るという、この関数の本来の目的は変わりません。
+_SCHEMA_CACHE: "WeakKeyDictionary[psycopg.Connection, dict[Any, bool]]" = (
+    WeakKeyDictionary())
+
+
+def forget_schema(conn: psycopg.Connection) -> None:
+    """この接続で覚えたスキーマの答えを捨てる。
+
+    同じ接続でマイグレーションを当てたときのため（`kaigyou-etl migrate` は
+    1 接続の中で当ててから、当てた表を読みます）。
+    """
+    _SCHEMA_CACHE.pop(conn, None)
+
+
+def _remembered(conn: psycopg.Connection, key: Any, ask: Any) -> bool:
+    try:
+        known = _SCHEMA_CACHE.setdefault(conn, {})
+    except TypeError:      # 参照を保持できない接続（テストの偽物など）
+        return ask()
+    if key not in known:
+        known[key] = ask()
+    return known[key]
+
+
+def columns_that_exist(conn: psycopg.Connection, table: str,
+                       columns: Iterable[str]) -> set[str]:
+    """この表に実在する列を、**1 往復で**まとめて返す。
+
+    ``column_exists`` を 14 個の列に対して呼ぶと 14 往復です。列が違うので
+    接続ごとの記憶も効きません。**問いが 14 個あることと、往復が 14 回必要な
+    ことは別**なので、まとめて訊きます（実測：``/api/dataset`` の mesh_scores
+    の列チェックが 14 往復 → 1 往復）。
+
+    答えは ``column_exists`` と同じ記憶に入れます。あとから 1 個ずつ訊かれても
+    往復しません。
+    """
+    wanted = sorted(set(columns))
+    if not wanted:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+              AND column_name = ANY(%s)
+            """, (table, wanted))
+        found = {r["column_name"] for r in cur.fetchall()}
+    try:
+        known = _SCHEMA_CACHE.setdefault(conn, {})
+        for column in wanted:
+            known[("column", table, column)] = column in found
+    except TypeError:
+        pass
+    return found
+
+
+def tables_that_exist(conn: psycopg.Connection,
+                      tables: Iterable[str]) -> set[str]:
+    """実在する表を、**1 往復で**まとめて返す（``columns_that_exist`` と同じ理由）。"""
+    wanted = sorted(set(tables))
+    if not wanted:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ANY(%s)", (wanted,))
+        found = {r["table_name"] for r in cur.fetchall()}
+    try:
+        known = _SCHEMA_CACHE.setdefault(conn, {})
+        for table in wanted:
+            known[("table", table)] = table in found
+    except TypeError:
+        pass
+    return found
+
+
 def column_exists(conn: psycopg.Connection, table: str, column: str) -> bool:
     """Whether a column has been added yet.
 
@@ -220,14 +309,21 @@ def column_exists(conn: psycopg.Connection, table: str, column: str) -> bool:
     adds a column to an existing table reaches the running code before the
     migration reaches the database, and a SELECT naming the missing column
     fails the whole request rather than the one figure it feeds.
+
+    答えは接続ごとに覚えます（``_SCHEMA_CACHE``）。**同じ問いを 1 リクエスト
+    の中で何十回も往復させないため**です。
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT count(*) AS n FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
-            """, (table, column))
-        return cur.fetchone()["n"] > 0
+    def ask() -> bool:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) AS n FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                  AND column_name = %s
+                """, (table, column))
+            return cur.fetchone()["n"] > 0
+
+    return _remembered(conn, ("column", table, column), ask)
 
 
 def table_exists(conn: psycopg.Connection, table: str) -> bool:
@@ -239,10 +335,15 @@ def table_exists(conn: psycopg.Connection, table: str) -> bool:
     Reads that can happen during that window ask first, and report the dataset
     as unavailable, which the app already knows how to display. Answering "not
     loaded" beats answering 500 to every request until someone runs a command.
+
+    答えは接続ごとに覚えます（``column_exists`` と同じ理由）。
     """
-    with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass(%s) AS t", (f"public.{table}",))
-        return cur.fetchone()["t"] is not None
+    def ask() -> bool:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s) AS t", (f"public.{table}",))
+            return cur.fetchone()["t"] is not None
+
+    return _remembered(conn, ("table", table), ask)
 
 
 def fetch_all(conn: psycopg.Connection, sql: str, params: Any = None) -> list[dict]:

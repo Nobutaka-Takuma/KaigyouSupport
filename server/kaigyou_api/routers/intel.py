@@ -14,7 +14,8 @@ from typing import Any
 import psycopg
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import (APIRouter, BackgroundTasks, Depends, Header, HTTPException,
+                     Query, Response)
 
 from kaigyou_api import accounts as acc
 from kaigyou_api.deps import DISCLAIMER, get_conn, get_model
@@ -81,6 +82,7 @@ def create_analysis(
     category: str = Query(DEFAULT_CATEGORY),
     location_name: str | None = Query(None, description="レポートに載せる地点名"),
     profile: str | None = Query(None),
+    background: BackgroundTasks = None,  # type: ignore[assignment]
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
     account: acc.Account | None = Depends(acc.current_account),
@@ -119,6 +121,19 @@ def create_analysis(
         location_name=location_name, profile=profile or model.profile_name,
         user_id=account.user_id if account else None)
 
+    # **作った直後に、こちらから worker を起こします。**
+    #
+    # cron は 1 分おきです。それは「1 分に 1 回進む」という意味であって、
+    # 「押してから 1 分待つ」という意味ではないはずでした。ところが作った
+    # ジョブを最初に拾うのも cron なので、**押してから最初の 1 歩までが
+    # 最大 60 秒、平均 30 秒、何も起きません。** 画面には「順番待ち」とだけ
+    # 出ます。分析そのものが数分かかるので紛れますが、待たされているのは
+    # 事実です。
+    #
+    # 起こせなくても壊れません。cron が次の分に拾います。
+    if background is not None:
+        background.add_task(_start_soon)
+
     return {
         "job_id": job_id,
         "quota": _quota_view(conn, account),
@@ -130,6 +145,30 @@ def create_analysis(
         "note": ("分析は worker が実行します。`kaigyou-etl analyze --worker` を"
                  "起動してください。進捗は GET /api/analysis/{job_id} で取得できます。"),
     }
+
+
+def _start_soon() -> None:
+    """作ったジョブを、cron を待たずに 1 歩進める。
+
+    **鍵がある環境でだけ**動きます。手元では API サーバに ANTHROPIC_API_KEY が
+    無く、worker（`analyze --worker`）を別の端末で回すのが普通の形です。鍵の
+    無い側で走らせると、そのステップは失敗し、やり直し回数だけ減ります。
+
+    自分で接続を開きます。リクエストの接続は応答と一緒に閉じているためです。
+    **何が起きても外へ投げません。** ここは応答が返ったあとの処理なので、
+    投げても誰も受け取れず、ジョブは既に作られています。cron が拾います。
+    """
+    from kaigyou_core.db import connect
+
+    if not llm.is_configured():
+        return
+    try:
+        from kaigyou_intel.worker import tick
+
+        with connect() as conn:
+            tick(conn)
+    except Exception:  # noqa: BLE001 - 応答後の処理。投げても誰も受け取れない
+        pass
 
 
 def _quota_view(conn: psycopg.Connection,

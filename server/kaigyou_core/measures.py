@@ -36,7 +36,7 @@ from typing import Any, Mapping, Sequence
 
 import psycopg
 
-from kaigyou_core.db import column_exists, table_exists
+from kaigyou_core.db import column_exists, columns_that_exist, table_exists
 from kaigyou_core.scoring import DEFAULT_FACILITY_CATEGORY
 
 #: percentile（その値以下のメッシュの割合）から言葉を決める閾値。
@@ -649,10 +649,17 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
 
     # 列が無い指標は比較を諦めます。デプロイとマイグレーションの間の窓で、
     # 存在しない列を SELECT すると分析全体が落ちるため。
+    #
+    # **列ごとに訊くと、列の数だけ往復します。** 問いが 14 個あることと、
+    # 往復が 14 回必要なことは別です（実測：14 往復 → 1 往復）。
+    needed_by_key = {
+        key: [c.split(".")[1].rstrip(")") for c in _columns_in(spec["column"])]
+        for key, spec in specs.items()}
+    present = columns_that_exist(
+        conn, "mesh_scores", [c for cs in needed_by_key.values() for c in cs])
     usable = {}
     for key, spec in specs.items():
-        needed = [c.split(".")[1].rstrip(")") for c in _columns_in(spec["column"])]
-        if all(column_exists(conn, "mesh_scores", c) for c in needed):
+        if all(c in present for c in needed_by_key[key]):
             usable[key] = spec
         else:
             notes.append(f"{spec['label']}: 比較用の列が未作成のため percentile と"

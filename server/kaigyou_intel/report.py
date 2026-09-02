@@ -263,7 +263,8 @@ def _hypothesis_lines(hypotheses: Sequence[Mapping[str, Any]],
         # 2 周目で出てきた仮説には、そう書きます。**1 周目で答えが出なかった
         # ことと、調べ直して出たことは、別の情報です。**同じ顔で並べると、
         # 調べ直した事実そのものが消えます。
-        again = "（調べ直して）" if int(h.get("round") or 1) > 1 else ""
+        round_number = int(h.get("round") or 1)
+        again = f"（{round_number} 周目に調べ直して）" if round_number > 1 else ""
         lines += [f"- **{h.get('id', '')}** {h.get('statement', '')}  ",
                   f"  判定：{again}{verdict}"]
         if h.get("reasoning"):
@@ -1266,3 +1267,80 @@ def markdown_for(conn: psycopg.Connection, job_id: str) -> str | None:
                     (job_id,))
         row = cur.fetchone()
     return row["report_markdown"] if row else None
+
+
+# ------------------------------------------------------- 中間 JSON（指示書 §21）
+#
+# 段ごとの出力は `analysis_steps.output_json` に入っています。DB に入っている
+# ことと、**手元でファイルとして読めること**は違います。
+#
+# プロンプトを直したあと「なぜこの PATTERN が出たのか」を追うとき、DB
+# クライアントを開いて JSON を取り出すのは、追う気を削ぐだけの手間です。
+# 入力も一緒に書きます——出力だけあっても、何を渡したときにそうなったのかが
+# 分からなければ再現できません。
+#
+# **これは成果物ではなく便宜です。** 書けない環境（読み取り専用の関数）で
+# 例外を上げると、仕上がった段を持ったまま失敗し、やり直しにもう $1 かかります。
+
+def steps_dir_for(conn: psycopg.Connection, job_id: str,
+                  directory: str | None = None) -> Path:
+    """このジョブの中間 JSON を置く場所。
+
+    レポートと同じ名前のフォルダにします。``reports/銀座4丁目 商圏分析レポート/``
+    の中に ``step1.json`` が並ぶ形で、**同じ分析のものが 1 か所にまとまります。**
+    """
+    from kaigyou_core import config as cfg
+
+    settings = (cfg.analysis_config().get("report") or {})
+    root = Path(directory or settings.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    return root / Path(file_name_for(conn, job_id)).stem
+
+
+def write_step_file(conn: psycopg.Connection, job_id: str, number: int,
+                    payload: Mapping[str, Any] | None,
+                    output: Mapping[str, Any] | None,
+                    directory: str | None = None) -> Path | None:
+    """1 段ぶんの入力と出力を 1 つの JSON にする。
+
+    **書けなければ黙って諦めます。** 戻り値が None なのはそのときで、
+    呼び出し側は続けて構いません。
+    """
+    from kaigyou_core import config as cfg
+
+    settings = (cfg.analysis_config().get("report") or {})
+    if not settings.get("write_step_json", True):
+        return None
+    try:
+        target = steps_dir_for(conn, job_id, directory)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / f"step{number}.json"
+        path.write_text(
+            json.dumps({"job_id": job_id, "step_number": number,
+                        "input": payload, "output": output},
+                       ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def write_all_step_files(conn: psycopg.Connection, job_id: str,
+                         directory: str | None = None) -> list[Path]:
+    """済んだ段をまとめて書き出す。
+
+    走らせたあとから欲しくなったときのため（`analyze --export`）。入力も
+    保存されているので、あとからでも同じものが出せます。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT step_number, input_json, output_json FROM analysis_steps "
+            "WHERE job_id = %s AND status = 'completed' ORDER BY step_number",
+            (job_id,))
+        rows = [dict(r) for r in cur.fetchall()]
+    written = []
+    for row in rows:
+        path = write_step_file(conn, job_id, int(row["step_number"]),
+                               row["input_json"], row["output_json"], directory)
+        if path is not None:
+            written.append(path)
+    return written

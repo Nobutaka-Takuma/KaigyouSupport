@@ -758,6 +758,31 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if getattr(args, "questions", False):
         return _print_question_quality()
 
+    if getattr(args, "export", None) is not None:
+        from kaigyou_intel import report as _report
+
+        with connect() as conn:
+            with conn.cursor() as cur:
+                if args.export:
+                    cur.execute("SELECT id FROM analysis_jobs WHERE id = %s",
+                                (args.export,))
+                else:
+                    cur.execute("SELECT id FROM analysis_jobs "
+                                "ORDER BY created_at DESC LIMIT 1")
+                row = cur.fetchone()
+            if row is None:
+                print("ジョブが見つかりません。")
+                return EXIT_OK
+            written = _report.write_all_step_files(conn, str(row["id"]),
+                                                   args.out or None)
+        if not written:
+            print("書き出せる段がありません（完了した段がまだ無いか、"
+                  "書き込めない場所です）。")
+            return EXIT_OK
+        for path in written:
+            print(f"  {path}")
+        return EXIT_OK
+
     if args.report is not None:
         from kaigyou_intel import report as _report
 
@@ -1220,6 +1245,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ジョブを取り下げる（all で待機中すべて）")
     p.add_argument("--questions", action="store_true",
                    help="立てた問いが実際に何を動かしたかを、保存済みのジョブから数える")
+    p.add_argument("--export", nargs="?", const="", metavar="ID",
+                   help="段ごとの入力と出力を JSON ファイルに書き出す"
+                        "（省略時は最新のジョブ）")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")

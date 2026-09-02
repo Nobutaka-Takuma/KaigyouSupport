@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import pathlib
+from contextlib import contextmanager
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from kaigyou_core import config as cfg
@@ -5390,7 +5392,7 @@ def test_the_report_says_when_it_went_back_and_looked_again(dataset):
     assert "角度を変えて調べ直しました" in markdown
     assert "2 周目で立てた仮説 1 件" in markdown
     # 調査の記録でも、1 周目のものと同じ顔で並べない。
-    assert "（調べ直して）" in markdown
+    assert "（2 周目に調べ直して）" in markdown
 
 
 def test_a_one_round_job_does_not_claim_it_looked_again(dataset):
@@ -5411,7 +5413,7 @@ def test_a_one_round_job_does_not_claim_it_looked_again(dataset):
     markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
                            [], None, None, inquiry)
     assert "調べ直しました" not in markdown
-    assert "（調べ直して）" not in markdown
+    assert "周目に調べ直して" not in markdown
 
 
 # ------------------------------------------------- 問いの品質（指示書 §8-3）
@@ -5540,3 +5542,293 @@ def test_jobs_from_before_questions_existed_are_not_in_the_denominator(
         assert all(r["job_id"] != job_id for r in summary["rows"])
     finally:
         _drop_job(job_id)
+
+
+def test_a_round_that_added_nothing_stops_the_next_one(monkeypatch):
+    """**何も足せなかった周の次は走らせません。**
+
+    同じ問いに、同じ「公表されていない」が返ってくるだけです。増えるのは
+    費用と時間で、分かることは増えません。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_intel.schemas import Step2Output
+    from kaigyou_intel.steps import step2_research
+
+    base = cfg.analysis_config()
+    monkeypatch.setattr(cfg, "analysis_config", lambda: {
+        **base, "limits": {**(base.get("limits") or {}), "research_rounds": 4}})
+
+    # 2 周目は何も見つけない（外部事実 0 件）。
+    fake_ask, calls = _round_two_asks(followup=Step2Output())
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(), "questions": [{"id": "Q001", "question": "q"},
+                                             {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    assert len(calls) == 4, "空振りした 2 周目のあとに 3 周目を走らせている"
+    assert any("打ち切り" in u for u in output["unanswered"])
+
+
+def test_a_third_round_runs_when_the_second_one_found_something(monkeypatch):
+    """周の数は設定で決まります。2 で固定していません。"""
+    from kaigyou_core import config as cfg
+    from kaigyou_intel.schemas import ExternalFact, Hypothesis, Step2Output
+    from kaigyou_intel.steps import step2_research
+
+    base = cfg.analysis_config()
+    monkeypatch.setattr(cfg, "analysis_config", lambda: {
+        **base, "limits": {**(base.get("limits") or {}), "research_rounds": 3}})
+
+    def found(url: str, statement: str) -> Step2Output:
+        # 問いは決着させず（open のまま）、事実だけ増やす周。
+        return Step2Output(
+            external_facts=[ExternalFact(
+                id="C001", pattern_id="P001", statement=statement,
+                source_url=url, source_title="t", confidence="high")],
+            hypotheses=[Hypothesis(
+                id="H001", pattern_id="P001", question_id="Q002",
+                statement=statement, status="UNCERTAIN", evidence=[],
+                reasoning="r", confidence="low", changes=["患者層"],
+                decision_impact="親子ではなく単身勤務者を一組として獲得する設計にする。")])
+
+    calls: list[dict] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, **kw):
+        calls.append({"schema": schema})
+        research = len([c for c in calls if c["schema"] is None])
+        if schema is None:
+            url = ("https://www.city.chuo.lg.jp/toukei/jinkou.html" if research == 1
+                   else f"https://www.city.chuo.lg.jp/r{research}.html")
+            return llm.Result(
+                parsed=None, text=f"{research}周目。",
+                usage=llm.Usage(web_searches=1), model="m",
+                sources=[{"url": url, "title": "t", "page_age": None}])
+        nth = len([c for c in calls if c["schema"] is not None])
+        if nth == 1:
+            return llm.Result(parsed=_step2_with_a_dead_end(),
+                              usage=llm.Usage(), model="m")
+        return llm.Result(parsed=found(f"https://www.city.chuo.lg.jp/r{nth}.html",
+                                       f"{nth}周目の事実"),
+                          usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(), "questions": [{"id": "Q001", "question": "q"},
+                                             {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    assert len(calls) == 6, "3 周目まで回っていない（調べる×3・写す×3）"
+    assert [f["round"] for f in output["external_facts"]] == [1, 2, 3]
+    assert [f["id"] for f in output["external_facts"]] == ["C001", "C002", "C003"]
+
+
+# ------------------------------------------------- 中間 JSON（指示書 §21）
+
+def test_each_step_is_written_as_a_file_you_can_open(conn, dataset, tmp_path):
+    """DB に入っていることと、手元でファイルとして読めることは違います。
+
+    プロンプトを直したあと「なぜこの PATTERN が出たのか」を追うのに、
+    DB クライアントを開かせません。
+    """
+    from kaigyou_intel import jobs, report
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             location_name="銀座4丁目")
+    try:
+        jobs.start_step(conn, job_id, 1, {"patterns_asked_for": 4}, {})
+        jobs.finish_step(conn, job_id, 1, {"patterns": [{"id": "P001"}]}, {})
+        written = report.write_all_step_files(conn, job_id, str(tmp_path))
+
+        assert len(written) == 1
+        saved = json.loads(written[0].read_text(encoding="utf-8"))
+        assert saved["output"]["patterns"] == [{"id": "P001"}]
+        # **入力も書きます。**出力だけあっても、何を渡したときにそうなった
+        # のかが分からなければ再現できません。
+        assert saved["input"] == {"patterns_asked_for": 4}
+        # レポートと同じ名前のフォルダにまとまること。
+        assert "銀座4丁目" in str(written[0].parent)
+    finally:
+        _drop_job(job_id)
+
+
+def test_an_unwritable_place_does_not_lose_a_finished_step(conn, dataset,
+                                                           monkeypatch):
+    """おまけの失敗で、仕上がった段を捨てさせない。
+
+    ホスティングされた関数のファイルシステムは読み取り専用です（実測：Vercel で
+    ``OSError: [Errno 30] Read-only file system: 'reports'``）。
+    """
+    from kaigyou_intel import jobs, report
+
+    def refuse(*a, **kw):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {})
+        jobs.finish_step(conn, job_id, 1, {"patterns": []}, {})
+        assert report.write_step_file(conn, job_id, 1, {}, {}) is None
+    finally:
+        _drop_job(job_id)
+
+
+def test_writing_step_files_can_be_switched_off(conn, dataset, tmp_path,
+                                                monkeypatch):
+    from kaigyou_core import config as cfg
+    from kaigyou_intel import jobs, report
+
+    base = cfg.analysis_config()
+    monkeypatch.setattr(cfg, "analysis_config", lambda: {
+        **base, "report": {**(base.get("report") or {}), "write_step_json": False}})
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {})
+        jobs.finish_step(conn, job_id, 1, {"patterns": []}, {})
+        assert report.write_step_file(conn, job_id, 1, {}, {},
+                                      str(tmp_path)) is None
+        assert not list(tmp_path.iterdir())
+    finally:
+        _drop_job(job_id)
+
+
+# --------------------------------------------- 往復を減らす（地図の速さ）
+#
+# 手元では 1 往復が 0.2ms（unix ソケット）なので誰も気づきません。**Vercel から
+# Supabase へは 1 往復が 10〜30ms** です。実測：`/api/dataset` は 114 往復して
+# いて、うち 47 往復は「同じ表の同じ列があるか」を訊き直しているだけでした。
+
+@contextmanager
+def _counting_queries():
+    """この中で投げられた SQL の本数を数える。"""
+    count = [0]
+    original = psycopg.Cursor.execute
+
+    def execute(self, query, params=None, **kw):
+        count[0] += 1
+        return original(self, query, params, **kw)
+
+    psycopg.Cursor.execute = execute
+    try:
+        yield count
+    finally:
+        psycopg.Cursor.execute = original
+
+
+def test_the_same_schema_question_is_not_asked_twice_on_one_connection(conn):
+    """1 リクエストの中で、同じ問いを何度も往復させない。
+
+    実測：`mesh_scores.facility_category` があるかを 1 リクエストで 15 回
+    訊いていました。スキーマは 1 リクエストの間に変わりません。
+    """
+    from kaigyou_core.db import column_exists, forget_schema
+
+    forget_schema(conn)
+    with _counting_queries() as n:
+        column_exists(conn, "mesh_scores", "facility_category")
+        assert n[0] == 1
+        for _ in range(10):
+            column_exists(conn, "mesh_scores", "facility_category")
+        assert n[0] == 1, "同じ問いで往復している"
+
+        # 覚えているのは接続ごとです。捨てれば訊き直します。
+        forget_schema(conn)
+        column_exists(conn, "mesh_scores", "facility_category")
+        assert n[0] == 2
+
+
+def test_many_columns_are_asked_for_in_one_round_trip(conn):
+    """問いが 14 個あることと、往復が 14 回必要なことは別です。"""
+    from kaigyou_core.db import column_exists, columns_that_exist, forget_schema
+
+    columns = ["population", "score", "この列はありません", "facility_category"]
+    forget_schema(conn)
+    with _counting_queries() as n:
+        present = columns_that_exist(conn, "mesh_scores", columns)
+        assert n[0] == 1, "列ごとに往復している"
+        assert "この列はありません" not in present
+
+        # まとめて訊いた答えは、1 個ずつ訊かれても往復しません。
+        for column in columns:
+            assert column_exists(conn, "mesh_scores", column) == (column in present)
+        assert n[0] == 1
+
+
+def test_a_missing_column_is_still_reported_as_missing(conn):
+    """速くするために、デプロイの窓の守りを外していないこと。
+
+    コードは push で即デプロイされますが、マイグレーションは手で当てます。
+    存在しない列を SELECT すると分析全体が 500 になります（実際に静岡で
+    起きました）。
+    """
+    from kaigyou_core.db import column_exists, forget_schema, table_exists
+
+    forget_schema(conn)
+    assert column_exists(conn, "mesh_scores", "そんな列はない") is False
+    assert table_exists(conn, "そんな表はない") is False
+    assert table_exists(conn, "mesh_scores") is True
+
+
+def test_building_a_dataset_does_not_ask_the_schema_over_and_over(conn, dataset):
+    """**この 1 本が、地図をクリックしてからパネルが出るまでの速さです。**
+
+    実測：`/api/dataset` は 114 往復していました。うち 47 往復は同じ問いの
+    訊き直しと、まとめられる問いを 1 つずつ訊いていたぶんです。
+    """
+    from kaigyou_core.dataset import build_dataset
+    from kaigyou_core.db import forget_schema
+
+    forget_schema(conn)
+    with _counting_queries() as n:
+        build_dataset(conn, 35.6717, 139.7650, 1000)
+    assert n[0] < 90, f"1 リクエストの往復が {n[0]} 本まで増えています"
+
+
+def test_creating_a_job_does_not_wait_for_the_next_cron_minute(conn, dataset,
+                                                               monkeypatch):
+    """押してから最初の 1 歩まで、最大 60 秒 何も起きませんでした。
+
+    cron が 1 分おきなのは「1 分に 1 回進む」という意味で、「押してから 1 分
+    待つ」という意味ではないはずでした。作ったジョブを最初に拾うのも cron
+    だったので、平均 30 秒、画面には「順番待ち」とだけ出ていました。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_api.routers import intel as router
+
+    started: list[bool] = []
+    monkeypatch.setattr(router, "_start_soon", lambda: started.append(True))
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("KAIGYOU_ANALYSIS_TOKEN", raising=False)
+
+    res = TestClient(app).post(
+        "/api/analysis", params={"lat": 35.6717, "lng": 139.7650, "radius": 1000})
+    assert res.status_code == 200, res.text
+    try:
+        assert started == [True], "cron を待たずに起こしていない"
+    finally:
+        _drop_job(res.json()["job_id"])
+
+
+def test_the_api_does_not_start_a_step_it_has_no_key_for(monkeypatch):
+    """鍵の無い側で走らせない。
+
+    手元では API サーバに ANTHROPIC_API_KEY が無く、worker を別の端末で回すのが
+    普通の形です。鍵の無い側で走らせると、そのステップは失敗し、やり直し回数
+    だけ減ります。
+    """
+    from kaigyou_api.routers import intel as router
+
+    ticked: list[bool] = []
+    monkeypatch.setattr(llm, "is_configured", lambda: False)
+    monkeypatch.setattr("kaigyou_intel.worker.tick",
+                        lambda conn: ticked.append(True))
+    router._start_soon()
+    assert ticked == []

@@ -122,7 +122,7 @@ export function MapPage() {
   const [catchment, setCatchment] = useState<Catchment>("circle");
   const [showExport, setShowExport] = useState(false);
   const { list: prefectures, code: prefecture, current: prefectureInfo,
-          select: selectPrefecture } = usePrefecture();
+          select: selectPrefecture, loaded: prefectureLoaded } = usePrefecture();
   /**
    * 地図に出す歯科医院を標榜科目で絞る。空文字は「すべて」。
    *
@@ -380,7 +380,12 @@ export function MapPage() {
     };
   }, []);
 
+  // **県が決まるまで待ちます。** `prefecture` は最初 localStorage の値（初回は
+  // null）で、`/api/prefectures` が返ったあとに確定します。待たないと 2 回
+  // 問い合わせることになり、1 回目の答えはそのまま捨てます。地図の描画と違って
+  // ここは絞り込みの選択肢なので、少し遅れても見た目には何も起きません。
   useEffect(() => {
+    if (!prefectureLoaded) return;
     let cancelled = false;
     api
       .specialties({ prefecture_code: prefecture ?? undefined })
@@ -399,7 +404,7 @@ export function MapPage() {
     return () => {
       cancelled = true;
     };
-  }, [prefecture]);
+  }, [prefecture, prefectureLoaded]);
 
   // ------------------------------------------------------------- load layers
   // Every layer follows the viewport. Loading all of Tokyo is
@@ -586,6 +591,8 @@ export function MapPage() {
   // 取り込んでいない県で「用途地域」と書いた選択肢を出すと、選んでも何も
   // 出ない画面になります。
   useEffect(() => {
+    // 選択肢なので、県が確定するまで待ちます（specialties と同じ理由）。
+    if (!prefectureLoaded) return;
     let cancelled = false;
     api
       .cityPlanningKinds({ prefecture_code: prefecture ?? undefined })
@@ -605,7 +612,7 @@ export function MapPage() {
     return () => {
       cancelled = true;
     };
-  }, [prefecture]);
+  }, [prefecture, prefectureLoaded]);
 
   // -------------------------------------------------------- candidate marker
   useEffect(() => {
