@@ -5412,3 +5412,131 @@ def test_a_one_round_job_does_not_claim_it_looked_again(dataset):
                            [], None, None, inquiry)
     assert "調べ直しました" not in markdown
     assert "（調べ直して）" not in markdown
+
+
+# ------------------------------------------------- 問いの品質（指示書 §8-3）
+#
+# LLM に採点させません。「この問いは良い問いですか」と聞けばそれらしい点数が
+# 返りますが、それは問いを出したのと同じモデルの意見です。
+
+def test_a_question_that_was_answered_but_changed_nothing_is_not_counted_as_good():
+    """**答えが出ることと、判断が動くことは違います。**
+
+    実測で出た例：「区画整理により計画的に形成された市街地である」——正しくても
+    診療コンセプトも設備も診療時間も変わりません。答えが出た件数だけを数えると、
+    こういう問いが良い問いとして数えられます。
+    """
+    from kaigyou_intel import question_quality as q
+
+    rows = q.outcomes(
+        {"questions": [{"id": "Q001", "question": "区画整理で形成された市街地か"},
+                       {"id": "Q002", "question": "若年層が多いのはなぜか"}]},
+        {"hypotheses": [
+            {"id": "H001", "question_id": "Q001", "status": "SUPPORTED",
+             "changes": []},
+            {"id": "H002", "question_id": "Q002", "status": "SUPPORTED",
+             "changes": ["患者層"]}]})
+    by_id = {r["question_id"]: r for r in rows}
+    assert by_id["Q001"]["settled"] is True
+    assert by_id["Q001"]["levers"] == [], "動かないのに動いたことにしている"
+    assert by_id["Q002"]["levers"] == ["患者層"]
+
+
+def test_an_uncertain_answer_is_not_an_answer():
+    """「調べたが、どちらとも言えなかった」を答えが出たと数えない。"""
+    from kaigyou_intel import question_quality as q
+
+    rows = q.outcomes(
+        {"questions": [{"id": "Q001", "question": "q"}]},
+        {"hypotheses": [{"id": "H001", "question_id": "Q001",
+                         "status": "UNCERTAIN", "changes": ["患者層"]}]})
+    assert rows[0]["settled"] is False
+    assert rows[0]["hypotheses"] == 1, "仮説が立ったことは残す"
+
+
+def test_a_question_sent_to_the_field_is_not_a_failure():
+    """検索では決着しない問いを、失敗として数えない。
+
+    それは「開業前に現地で確かめること」で、この調査の結論の一部です。
+    """
+    from kaigyou_intel import question_quality as q
+
+    rows = q.outcomes(
+        {"questions": [{"id": "Q001", "question": "q"}]},
+        {"open_questions": [{"question_id": "Q001", "why": "w",
+                             "what_would_settle_it": "平日12時台に現地で数える"}]})
+    assert rows[0]["left_to_the_field"] is True
+    assert rows[0]["settled"] is False
+
+
+def test_a_primary_source_and_a_blog_are_not_the_same_evidence():
+    """企業ブログで「支持された」問いと、官公庁の資料で支持された問いを分ける。"""
+    from kaigyou_intel import question_quality as q
+
+    step2 = {
+        "external_facts": [
+            {"id": "C001", "source_url": "https://www.mhlw.go.jp/a"},
+            {"id": "C002", "source_url": "https://example.com/b"}],
+        "hypotheses": [
+            {"id": "H001", "question_id": "Q001", "status": "SUPPORTED",
+             "changes": ["患者層"],
+             "evidence_links": [{"fact_id": "C001", "stance": "supports"}]},
+            {"id": "H002", "question_id": "Q002", "status": "SUPPORTED",
+             "changes": ["患者層"],
+             "evidence_links": [{"fact_id": "C002", "stance": "supports"}]}],
+    }
+    sources = [{"url": "https://www.mhlw.go.jp/a", "source_type": "government"},
+               {"url": "https://example.com/b", "source_type": "company"}]
+    rows = q.outcomes({"questions": [{"id": "Q001"}, {"id": "Q002"}]},
+                      step2, sources)
+    by_id = {r["question_id"]: r for r in rows}
+    assert by_id["Q001"]["primary_evidence"] is True
+    assert by_id["Q002"]["primary_evidence"] is False
+
+
+def test_the_tally_does_not_average_across_prompt_versions(conn, dataset):
+    """版を跨いで平均しない。**直した効果が薄まって見えます。**"""
+    from kaigyou_intel import jobs
+    from kaigyou_intel import question_quality as q
+
+    made = []
+    try:
+        for version, status in (("step1-v9", "SUPPORTED"), ("step1-v10", "UNCERTAIN")):
+            job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                                     dataset=to_jsonable(dataset), base_hash=version)
+            made.append(job_id)
+            jobs.start_step(conn, job_id, 1, {}, {"prompt_version": version})
+            jobs.finish_step(conn, job_id, 1,
+                             {"questions": [{"id": "Q001", "question": "q"}]}, {})
+            jobs.start_step(conn, job_id, 2, {}, {})
+            jobs.finish_step(conn, job_id, 2, {
+                "hypotheses": [{"id": "H001", "question_id": "Q001",
+                                "status": status, "changes": ["患者層"]}]}, {})
+
+        summary = q.across_jobs(conn)
+        by_version = {r["prompt_version"]: r for r in summary["by_prompt_version"]}
+        assert by_version["step1-v9"]["settled"] == 1
+        assert by_version["step1-v10"]["settled"] == 0
+    finally:
+        for job_id in made:
+            _drop_job(job_id)
+
+
+def test_jobs_from_before_questions_existed_are_not_in_the_denominator(
+        conn, dataset):
+    """問いを記録していない頃のジョブを母数に混ぜない。
+
+    混ぜると、版の違いが「答えが出た割合の低下」に見えます。
+    """
+    from kaigyou_intel import jobs
+    from kaigyou_intel import question_quality as q
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="old")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "step1-v1.0"})
+        jobs.finish_step(conn, job_id, 1, {"facts": [{"id": "F001"}]}, {})
+        summary = q.across_jobs(conn)
+        assert all(r["job_id"] != job_id for r in summary["rows"])
+    finally:
+        _drop_job(job_id)

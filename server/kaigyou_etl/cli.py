@@ -755,6 +755,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             _print_step_output(step["step_number"], step["output_json"] or {})
         return EXIT_OK
 
+    if getattr(args, "questions", False):
+        return _print_question_quality()
+
     if args.report is not None:
         from kaigyou_intel import report as _report
 
@@ -1215,6 +1218,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "（省略時は最新のジョブ）")
     p.add_argument("--cancel", metavar="ID", default=None,
                    help="ジョブを取り下げる（all で待機中すべて）")
+    p.add_argument("--questions", action="store_true",
+                   help="立てた問いが実際に何を動かしたかを、保存済みのジョブから数える")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("generate-sample", help="generate synthetic development data")
@@ -1277,3 +1282,76 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _print_question_quality() -> int:
+    """立てた問いが、実際に何かを動かしたか（指示書 §8-3）。
+
+    **LLM に採点させません。**「この問いは良い問いですか」と聞けばそれらしい
+    点数が返りますが、それは問いを出したのと同じモデルの意見で、外から
+    確かめる手立てがありません。ここは**実際に何が起きたか**だけを数えます。
+
+    表を足していないので、いつでも数え直せます。材料は
+    ``analysis_steps.output_json`` に既にあります。
+    """
+    from kaigyou_intel import question_quality as _quality
+
+    with connect() as conn:
+        summary = _quality.across_jobs(conn)
+
+    if not summary["jobs"]:
+        print("問いを記録したジョブがまだありません。")
+        print("  （問いを第一級にする前のジョブは、母数に入れていません。"
+              "混ぜると版の違いが「答えが出た割合の低下」に見えます）")
+        return EXIT_OK
+
+    total = summary["questions"]
+    print(f"問い {total} 件（ジョブ {summary['jobs']} 件）")
+    print()
+    print(f"  答えが出た              {summary['settled']:4d} 件"
+          f"{_pct(summary['settled'], total)}")
+    print(f"    うち一次資料が根拠    {summary['primary_evidence']:4d} 件")
+    print(f"    うち 2 周目で決着     {summary['needed_a_second_round']:4d} 件")
+    print(f"  現地で確かめる項目に    {summary['left_to_the_field']:4d} 件"
+          f"{_pct(summary['left_to_the_field'], total)}")
+    print("    （検索では決着しない問い。失敗ではありません）")
+    print()
+    # ここがこの表の要です。答えが出ることと、判断が動くことは違います。
+    print(f"  判断が動いた            {summary['moved_a_decision']:4d} 件"
+          f"{_pct(summary['moved_a_decision'], total)}")
+    print("    答えが出ても動かない問いがあります。「区画整理で計画的に形成")
+    print("    された市街地か」は、正しくても診療コンセプトも設備も動きません。")
+
+    if summary["levers"]:
+        print()
+        print("  動いたもの")
+        for lever, count in summary["levers"]:
+            print(f"    {lever}　{count} 件")
+
+    versions = summary["by_prompt_version"]
+    if len(versions) > 1:
+        # 版を跨いで平均しません。直した効果が薄まって見えます。
+        print()
+        print("  プロンプト版ごと（問いを出す STEP1 の版）")
+        print("    版              問い  答えが出た  判断が動いた")
+        for row in versions:
+            print(f"    {row['prompt_version']:<14} {row['questions']:4d}"
+                  f"  {row['settled']:9d}  {row['moved_a_decision']:11d}")
+
+    dead = [r for r in summary["rows"]
+            if not r["settled"] and not r["left_to_the_field"]]
+    if dead:
+        # 答えも出ず、現地確認にも回らなかった問い。**いちばん筋の悪い形**
+        # です。調べようがなかったのか、そもそも問いとして弱かったのか。
+        # 次にプロンプトを直すときに読む一覧です。
+        print()
+        print(f"  答えも出ず、現地確認にも回らなかった問い {len(dead)} 件")
+        for row in dead[:10]:
+            print(f"    {row['question_id']}  {row['question'][:60]}")
+        if len(dead) > 10:
+            print(f"    ほか {len(dead) - 10} 件")
+    return EXIT_OK
+
+
+def _pct(part: int, whole: int) -> str:
+    return f"  ({part * 100 // whole}%)" if whole else ""
