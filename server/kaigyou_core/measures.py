@@ -36,7 +36,10 @@ from typing import Any, Mapping, Sequence
 
 import psycopg
 
-from kaigyou_core.db import column_exists, columns_that_exist, table_exists
+from bisect import bisect_right
+
+from kaigyou_core.db import (
+    column_exists, columns_that_exist, table_exists)
 from kaigyou_core.scoring import DEFAULT_FACILITY_CATEGORY
 
 #: percentile（その値以下のメッシュの割合）から言葉を決める閾値。
@@ -674,7 +677,22 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
         municipality=municipality, population=metrics.get("population"),
         radius_m=radius_m, lat=lat, lng=lng, config=config,
         viable_floor_population=floor, neighbours=neighbours)
+    # **事前計算した分布があれば、母集団を測り直しません。**
+    #
+    # 実測（銀座1km・手元）：母集団の形を測るのに 14 往復・49ms、商圏の集計
+    # そのものは 15ms。「この地点が何人か」より「周りがどうなっているか」の
+    # ほうが 3 倍高く、しかも周りはクリックした地点によって変わりません。
+    #
+    # 無ければその場で測ります。**新しく県を読み込んだ直後に位置づけが出ない
+    # より、遅いほうがましです。**
+    stored = stored_distributions(
+        conn, prefecture_code=prefecture_code, municipality=municipality,
+        profile=profile, radius_m=radius_m, facility_category=facility_category)
+    live_scopes: list[str] = []
     for scope in scopes:
+        if shape_from_stored(scope, stored.get(scope.type) or {}):
+            continue
+        live_scopes.append(scope.type)
         measure_scope_shape(conn, scope, profile=profile, radius_m=radius_m,
                             facility_category=facility_category,
                             floor=floor, max_share_below=max_share,
@@ -703,6 +721,10 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
         fell_back = primary_type is not None
     primary_info = {
         "benchmark_type": primary_type,
+        # **どの母集団を事前計算から読み、どれをその場で測ったか。**
+        # 書いておかないと、「なぜこの地点だけ遅いのか」に後から答えられません。
+        # nearby と similar_population は地点で母集団が変わるので、常にここ。
+        "measured_live": live_scopes or None,
         "viable_floor_population": None if floor is None else round(floor),
         "viable_floor_definition": (
             "県内で歯科医院が実在する商圏の人口の下位10%点。"
@@ -734,9 +756,14 @@ def build_measures(conn: psycopg.Connection, metrics: Mapping[str, Any], *,
     for scope in ordered:
         if scope.sample_count < min_sample:
             continue
-        rows = _scope_statistics(conn, usable, values, profile, radius_m, scope,
-                                 facility_category)
-        if rows is None:
+        saved = stored.get(scope.type) or {}
+        if saved:
+            # 二分探索。SQL の往復はゼロ。
+            rows = statistics_from_stored(usable, values, scope, saved)
+        else:
+            rows = _scope_statistics(conn, usable, values, profile, radius_m,
+                                     scope, facility_category)
+        if not rows:
             continue
         for key, bench in rows.items():
             results[key].append(bench)
@@ -841,6 +868,125 @@ def _scope_statistics(conn: psycopg.Connection, specs: Mapping[str, Mapping[str,
             position_label=_position_label(int(rank), int(total)),
             rank=int(rank), of=int(total),
             p25=_maybe_round(quartiles[0]), p75=_maybe_round(quartiles[2]),
+            direction=direction, direction_label=direction_label,
+            significance=significance, significance_label=significance_label,
+            discriminating=scope.discriminating,
+            significance_withheld_reason=withheld,
+        )
+    return out
+
+
+# ------------------------------------------------- 事前計算した分布から位置を出す
+#
+# **地点をクリックしたときに、母集団を測り直しません。**
+#
+# 実測（銀座1km・手元）：母集団の形を測るのに 14 往復・49ms、商圏の集計そのものは
+# 15ms でした。「この地点が何人か」より「周りがどうなっているか」のほうが 3 倍
+# 高い。そして周りは、クリックした地点によって変わりません。
+#
+# 保存してあるのは**昇順に並んだ値**（benchmark_distributions.boundaries）です。
+# 任意の値の位置は二分探索で出ます。SQL の往復はゼロ。
+
+def stored_distributions(conn: psycopg.Connection, *, prefecture_code: str,
+                         municipality: str | None, profile: str, radius_m: int,
+                         facility_category: str = DEFAULT_FACILITY_CATEGORY,
+                         ) -> dict[str, dict[str, Any]]:
+    """この地点に関係する母集団の分布を、**1 往復で**まとめて読む。
+
+    無ければ空を返します。呼び出し側はその場で測り直します——**新しく県を
+    読み込んだ直後に、位置づけが出ないより遅いほうがましです。**
+    """
+    if not table_exists(conn, "benchmark_distributions"):
+        return {}
+    keys = [prefecture_code]
+    if municipality:
+        keys.append(f"{prefecture_code}:{municipality}")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT scope_kind, scope_label, metric, sample_count, value_count,
+                   boundaries, is_exact, median, p25, p75, discriminating,
+                   not_discriminating_reason, share_below_viable_floor
+            FROM benchmark_distributions
+            WHERE profile = %s AND radius_m = %s AND facility_category = %s
+              AND scope_key = ANY(%s)
+            """, (profile, radius_m, facility_category, keys))
+        rows = cur.fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        out.setdefault(row["scope_kind"], {})[row["metric"]] = dict(row)
+    return out
+
+
+def shape_from_stored(scope: BenchmarkScope,
+                      stored: Mapping[str, Mapping[str, Any]]) -> bool:
+    """母集団の大きさと弁別力を、保存済みの値から埋める。
+
+    どの指標の行にも同じ値が入っています（母集団の性質なので）。1 行取れれば
+    足ります。埋められなければ False を返し、呼び出し側が測りに行きます。
+    """
+    any_row = next(iter(stored.values()), None)
+    if any_row is None:
+        return False
+    scope.sample_count = int(any_row["sample_count"])
+    scope.discriminating = bool(any_row["discriminating"])
+    scope.not_discriminating_reason = any_row["not_discriminating_reason"]
+    scope.share_below_viable_floor = any_row["share_below_viable_floor"]
+    if any_row["scope_label"]:
+        scope.label = any_row["scope_label"]
+    return True
+
+
+def statistics_from_stored(specs: Mapping[str, Mapping[str, Any]],
+                           values: Mapping[str, float | None],
+                           scope: BenchmarkScope,
+                           stored: Mapping[str, Mapping[str, Any]],
+                           ) -> dict[str, Benchmark]:
+    """保存済みの分布に、この地点の値を当てる。**SQL は投げません。**
+
+    `_scope_statistics` と同じ答えを返します（分布が exact なとき）。違うのは
+    往復の回数だけです。
+    """
+    out: dict[str, Benchmark] = {}
+    for key in specs:
+        value = values.get(key)
+        row = stored.get(key)
+        if value is None or row is None:
+            continue
+        boundaries = row["boundaries"] or []
+        total = int(row["value_count"] or 0)
+        if not boundaries or not total:
+            continue
+        value = float(value)
+        if row["is_exact"]:
+            # 全部の値が入っているので、順位も percentile も厳密。
+            below = bisect_right(boundaries, value)
+            percentile = round(100.0 * below / total, 1)
+            rank = total - below + 1
+        else:
+            # 分位点の格子。**順位は格子の刻みまでしか分かりません。**
+            # 刻みは 0.1 パーセンタイルなので、母集団が 10,000 を超えると
+            # 「上位0.05%」のような言い方はできなくなります。
+            below_share = bisect_right(boundaries, value) / len(boundaries)
+            percentile = round(100.0 * below_share, 1)
+            rank = max(1, int(round(total * (1.0 - below_share))) + 1)
+        median = row["median"]
+        direction, direction_label = _direction(
+            value, float(median) if median is not None else None)
+        if scope.discriminating:
+            significance, significance_label = significance_for(percentile)
+            withheld = None
+        else:
+            significance, significance_label = None, None
+            withheld = scope.not_discriminating_reason
+        out[key] = Benchmark(
+            type=scope.type, label=scope.label,
+            value=None if median is None else round(float(median), 4),
+            comparison="median", sample_count=scope.sample_count,
+            percentile=percentile, top_share_pct=round(100.0 - percentile, 1),
+            position_label=_position_label(int(rank), total),
+            rank=int(rank), of=total,
+            p25=_maybe_round(row["p25"]), p75=_maybe_round(row["p75"]),
             direction=direction, direction_label=direction_label,
             significance=significance, significance_label=significance_label,
             discriminating=scope.discriminating,

@@ -219,6 +219,7 @@ $env:DATABASE_URL = 'postgresql://postgres.<プロジェクトID>:<パスワー�
 ```powershell
 .\.venv\Scripts\kaigyou-etl refresh-stats
 .\.venv\Scripts\kaigyou-etl compute-scores --all-profiles
+.\.venv\Scripts\kaigyou-etl compute-benchmarks
 ```
 
 `--all-profiles` を付けないと**有効なプロファイル1つ分**しか計算されず、

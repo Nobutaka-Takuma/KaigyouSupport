@@ -6434,3 +6434,151 @@ def test_the_prompts_still_say_the_model_does_not_make_the_numbers():
     step4 = cfg.prompt_text("step4_client_report.md")
     assert "数字も作りません" in step4
     assert "母集団を書かずに" in step4
+
+
+# ================================================ 母集団の分布を事前計算する
+#
+# 実測（銀座1km・手元の PostgreSQL）：
+#   measures.measure_scope_shape   8 往復  18.0ms
+#   measures._scope_statistics     6 往復  31.3ms
+#   analysis.analyze_point         3 往復  14.7ms   ← 商圏の集計そのもの
+#
+# **母集団の形を測るのに 14 往復・49ms、商圏の集計そのものは 15ms。**
+# そして周りは、クリックした地点によって変わりません。
+
+def test_the_stored_distribution_gives_the_same_answer_as_measuring_it(conn):
+    """**これが、この表を入れてよい唯一の理由です。**
+
+    速いだけで答えが変わるなら、入れてはいけません。
+    """
+    from kaigyou_core import measures as M
+    from kaigyou_core.dataset import build_dataset
+    from kaigyou_etl import benchmarks as bench
+
+    bench.compute(conn, prefecture_code="13", profile="default", radius_m=1000)
+
+    def positions(dataset):
+        out = {}
+        for measure in dataset["measures"]["items"]:
+            for b in measure.get("benchmarks") or []:
+                out[(measure["key"], b["benchmark_type"])] = (
+                    b.get("percentile"), b.get("rank"), b.get("of"),
+                    b.get("position_label"), b.get("significance"))
+        return out
+
+    stored = positions(build_dataset(conn, 35.6717, 139.7650, 1000))
+    original = M.stored_distributions
+    M.stored_distributions = lambda *a, **k: {}
+    try:
+        live = positions(build_dataset(conn, 35.6717, 139.7650, 1000))
+    finally:
+        M.stored_distributions = original
+
+    assert stored and live
+    assert stored == live, {k: (stored.get(k), live.get(k))
+                            for k in set(stored) | set(live)
+                            if stored.get(k) != live.get(k)}
+
+
+def test_a_population_that_moves_with_the_point_is_never_stored():
+    """**この 2 つは事前計算できません。**
+
+    「この地点から10km以内」と「商圏人口が同規模」は、クリックした場所で
+    母集団そのものが変わります。鍵を作れないので、貯めません。
+    """
+    from kaigyou_core.measures import BenchmarkScope
+    from kaigyou_etl.benchmarks import scope_key_of
+
+    for kind in ("nearby", "similar_population"):
+        scope = BenchmarkScope(kind, "l", "", ())
+        assert scope_key_of(scope, "13", "新宿区") is None
+
+    assert scope_key_of(BenchmarkScope("urban", "l", "", ()), "13", None) == "13"
+    assert scope_key_of(BenchmarkScope("municipality", "l", "", ()),
+                        "13", "新宿区") == "13:新宿区"
+
+
+def test_a_missing_distribution_falls_back_to_measuring(conn):
+    """**新しく県を読み込んだ直後に位置づけが出ないより、遅いほうがましです。**"""
+    from kaigyou_core.dataset import build_dataset
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM benchmark_distributions")
+    conn.commit()
+    try:
+        dataset = build_dataset(conn, 35.6717, 139.7650, 1000)
+        items = {m["key"]: m for m in dataset["measures"]["items"]}
+        assert items["population"]["benchmarks"], "測り直していない"
+        # 何をその場で測ったかが残ること。「なぜ遅いのか」に後から答えるため。
+        assert dataset["measures"]["primary_benchmark"]["measured_live"]
+    finally:
+        from kaigyou_etl import benchmarks as bench
+        bench.compute(conn, prefecture_code="13", profile="default",
+                      radius_m=1000)
+
+
+def test_the_grid_form_is_used_only_for_large_populations():
+    """小さい母集団は全部そのまま貯めます。**順位が厳密に出ます。**
+
+    「5,448 件中 1 位」を「上位0.1%」と言えるかどうかがここで決まります。
+    """
+    from kaigyou_core.measures import BenchmarkScope, statistics_from_stored
+
+    scope = BenchmarkScope("urban", "市街地", "", ())
+    scope.sample_count = 5
+    exact = {"population": {
+        "boundaries": [10.0, 20.0, 30.0, 40.0, 50.0], "is_exact": True,
+        "value_count": 5, "median": 30.0, "p25": 20.0, "p75": 40.0,
+        "sample_count": 5, "scope_label": "市街地",
+        "discriminating": True, "not_discriminating_reason": None,
+        "share_below_viable_floor": None}}
+    out = statistics_from_stored({"population": {}}, {"population": 40.0},
+                                 scope, exact)
+    bench = out["population"]
+    # 40 以下は 4 件 / 5 件 = 80.0 percentile、順位は 5 - 4 + 1 = 2 位。
+    assert bench.percentile == 80.0
+    assert bench.rank == 2 and bench.of == 5
+
+
+def test_the_point_is_placed_without_a_single_query(conn):
+    """**地点をクリックしたときに、母集団を測り直しません。**
+
+    保存済みの母集団については SQL を投げないこと。投げていたら、この表は
+    ただ場所を取っているだけです。
+    """
+    from kaigyou_core.measures import (
+        BenchmarkScope, shape_from_stored, statistics_from_stored,
+        stored_distributions)
+    from kaigyou_etl import benchmarks as bench
+
+    bench.compute(conn, prefecture_code="13", profile="default", radius_m=1000)
+    stored = stored_distributions(
+        conn, prefecture_code="13", municipality=None, profile="default",
+        radius_m=1000)
+    assert "urban" in stored, sorted(stored)
+
+    scope = BenchmarkScope("urban", "", "", ())
+    with _counting_queries() as n:
+        assert shape_from_stored(scope, stored["urban"]) is True
+        out = statistics_from_stored(
+            {"population": {}}, {"population": 12430.0}, scope, stored["urban"])
+        assert n[0] == 0, "保存済みの母集団に SQL を投げている"
+    assert out["population"].percentile is not None
+    # 母集団の名前も一緒に持っていること。**書かずに「上位8%」と言えば、
+    # それはもう統計ではありません。**
+    assert scope.label
+
+
+def test_the_stored_distribution_records_how_it_was_computed(conn):
+    """再現性（指示書 §19）。データが更新されても、どの版の計算かが分かること。"""
+    from kaigyou_etl import benchmarks as bench
+
+    bench.compute(conn, prefecture_code="13", profile="default", radius_m=1000)
+    with conn.cursor() as cur:
+        cur.execute("SELECT benchmark_version, computed_at, scope_label, "
+                    "sample_count FROM benchmark_distributions LIMIT 1")
+        row = cur.fetchone()
+    assert row["benchmark_version"]
+    assert row["computed_at"]
+    assert row["scope_label"], "どの母集団かが読める形で入っていること"
+    assert row["sample_count"] > 0

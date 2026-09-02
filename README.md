@@ -255,7 +255,8 @@ kaigyou-etl run estat_daytime_mesh      --input <従業地・通学地メッシ�
 
 kaigyou-etl drop-sample      # 合成データを削除（残すと二重計上になります）
 kaigyou-etl refresh-stats    # スコア基準を実データの分布で再計算
-kaigyou-etl compute-scores   # ランキング・ヒートマップ用スコアを再計算
+kaigyou-etl compute-scores      # ランキング・ヒートマップ用スコアを再計算
+kaigyou-etl compute-benchmarks  # 母集団の分布を事前計算（compute-scores のあと）
 kaigyou-etl status           # 4/4 になっていることを確認
 ```
 
@@ -355,7 +356,7 @@ kaigyou-etl doctor
 
 ```bash
 kaigyou-etl generate-sample
-kaigyou-etl refresh-stats && kaigyou-etl compute-scores
+kaigyou-etl refresh-stats && kaigyou-etl compute-scores && kaigyou-etl compute-benchmarks
 ```
 
 このデータは**実データではありません**。情報源名が `【サンプル】` で始まり、
@@ -622,7 +623,7 @@ demand_weights:
 
 ```bash
 kaigyou-etl refresh-stats
-kaigyou-etl compute-scores --all-profiles
+kaigyou-etl compute-scores --all-profiles && kaigyou-etl compute-benchmarks
 ```
 
 商圏の集計（重い処理）はプロファイルに依存しないため、

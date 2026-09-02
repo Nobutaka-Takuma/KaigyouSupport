@@ -1263,6 +1263,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_category(p)
     p.set_defaults(func=cmd_refresh_stats)
 
+    p = sub.add_parser(
+        "compute-benchmarks",
+        help="母集団の分布を事前計算する（地点評価の往復を減らす）")
+    p.add_argument("--prefecture", metavar="CODE", default=None,
+                   help="対象の都道府県コード（省略時は読み込み済みすべて）")
+    p.add_argument("--profile", metavar="NAME", default=None,
+                   help="対象のプロファイル（省略時は mesh_scores にあるすべて）")
+    p.set_defaults(func=cmd_compute_benchmarks)
+
     p = sub.add_parser("compute-scores", help="score every mesh (ranking + heat map)")
     p.add_argument("--profile", default=None)
     p.add_argument("--all-profiles", action="store_true",
@@ -1413,3 +1422,43 @@ def _print_question_quality() -> int:
 
 def _pct(part: int, whole: int) -> str:
     return f"  ({part * 100 // whole}%)" if whole else ""
+
+
+def cmd_compute_benchmarks(args: argparse.Namespace) -> int:
+    """母集団の分布を貯める（`benchmark_distributions`）。
+
+    **compute-scores のあとに実行してください。** この計算は mesh_scores を
+    読みます。順番を逆にすると、古いスコアの分布が残ります。
+    """
+    from kaigyou_etl import benchmarks as bench
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT pm.prefecture_code AS code, ms.profile,
+                       ms.radius_m, ms.facility_category
+                FROM mesh_scores ms
+                JOIN population_mesh pm ON pm.id = ms.mesh_id
+                WHERE (%s::text IS NULL OR pm.prefecture_code = %s)
+                  AND (%s::text IS NULL OR ms.profile = %s)
+                ORDER BY 1, 2, 3
+                """,
+                (args.prefecture, args.prefecture, args.profile, args.profile))
+            combos = [dict(r) for r in cur.fetchall()]
+        if not combos:
+            print("mesh_scores に該当する行がありません。"
+                  "先に `kaigyou-etl compute-scores` を実行してください。")
+            return EXIT_OK
+        total = 0
+        for combo in combos:
+            print(f"{combo['code']} / {combo['profile']} / "
+                  f"半径{combo['radius_m']}m / {combo['facility_category']}")
+            total += bench.compute(
+                conn, prefecture_code=combo["code"], profile=combo["profile"],
+                radius_m=combo["radius_m"],
+                facility_category=combo["facility_category"],
+                progress=lambda m: None)
+    print(f"\n{total} 行を保存しました。")
+    print("  これで、地点をクリックしたときに母集団を測り直しません。")
+    return EXIT_OK
