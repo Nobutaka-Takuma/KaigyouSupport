@@ -38,7 +38,9 @@ from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.projection import citable_keys, for_step1
 from kaigyou_intel.schemas import (
+    Step1Inquiry,
     Step1Output,
+    Step1Reading,
     drop_unverifiable_facilities,
     verify_step1,
 )
@@ -394,11 +396,14 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         "\n\n" + _scan_block(scan)
     )
 
-    result = llm.ask(step_number=STEP_NUMBER, system=system, user=user,
-                     schema=Step1Output)
-    output: Step1Output | None = result.parsed
-    if output is None:
+    # **1 回目：読む。** GIS が確定した数字から FACT と PATTERN を起こし、
+    # 周辺スキャンの本文を構造化します。
+    reading = llm.ask(step_number=STEP_NUMBER, system=system, user=user,
+                      schema=Step1Reading)
+    read: Step1Reading | None = reading.parsed
+    if read is None:
         raise StepFailed("構造化出力を受け取れませんでした")
+    output = Step1Output(**read.model_dump())
 
     # 出典を確かめられなかった施設は落とします。**段は落としません。**
     # スキャンは付随物で、その 1 件のために FACT 十数件を捨てるのは
@@ -413,6 +418,14 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
             f"周辺施設のスキャンは完了していません（{scan.error}）。"
             "周辺に何があるかは確認できていません。"]
 
+    # **2 回目：疑う。** 読み取った FACT と PATTERN が置いている前提を見つけ、
+    # それを確かめる問いを立てます。**確定した FACT を入力として渡します**——
+    # これが「GIS が Fact を確定し、LLM がそれを解釈する」という分業です。
+    # 1 回でやらせていたときは、読みながら疑うことになっていました。
+    inquiry = _ask_the_questions(output, payload, category)
+    output.assumptions = inquiry.assumptions
+    output.questions = inquiry.questions
+
     # スキーマは形しか保証しません。参照が解決するかはこちらで確かめます。
     # 層は指標から引きます。モデルの自己申告にすると、形だけ整った出力が
     # 通ります（「人口 × 競合」と書きながら人口の指標を2つ引く、など）。
@@ -425,13 +438,70 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
             + "; ".join(f"{p.where}: {p.problem}" for p in problems))
 
     usage = llm.Usage(
-        input_tokens=scan.usage.input_tokens + result.usage.input_tokens,
-        output_tokens=scan.usage.output_tokens + result.usage.output_tokens,
-        web_searches=scan.usage.web_searches + result.usage.web_searches,
-        cache_read_tokens=scan.usage.cache_read_tokens + result.usage.cache_read_tokens,
-        cache_write_tokens=scan.usage.cache_write_tokens + result.usage.cache_write_tokens,
+        input_tokens=(scan.usage.input_tokens + reading.usage.input_tokens
+                      + _INQUIRY_USAGE.input_tokens),
+        output_tokens=(scan.usage.output_tokens + reading.usage.output_tokens
+                       + _INQUIRY_USAGE.output_tokens),
+        web_searches=scan.usage.web_searches + reading.usage.web_searches,
+        cache_read_tokens=(scan.usage.cache_read_tokens
+                           + reading.usage.cache_read_tokens
+                           + _INQUIRY_USAGE.cache_read_tokens),
+        cache_write_tokens=(scan.usage.cache_write_tokens
+                            + reading.usage.cache_write_tokens
+                            + _INQUIRY_USAGE.cache_write_tokens),
     )
     return output.model_dump(), usage, _cited_sources(output, scan)
+
+
+#: 直近の「疑う」呼び出しの使用量。呼び出しを関数に切り出したので、
+#: 合計するために持ち帰ります。
+_INQUIRY_USAGE = llm.Usage()
+
+
+def _ask_the_questions(output: Step1Output, payload: Mapping[str, Any],
+                       category: str) -> Step1Inquiry:
+    """読み取った FACT と PATTERN が置いている前提を疑う（STEP1 後半）。
+
+    **渡すのは、確定した FACT と PATTERN です。** データセット全体ではありません。
+    疑うのに要るのは「何が確からしいとされたか」であって、元の数字全部では
+    ありません。入力が小さいぶん、この呼び出しは速く安く済みます。
+
+    **失敗しても段は落としません。** 前半で FACT と PATTERN は取れています。
+    問いが立たなかったことは `not_determinable` に残り、STEP2 は PATTERN の
+    `research_questions` で調べます（古い形と同じ経路です）。
+    """
+    global _INQUIRY_USAGE
+    _INQUIRY_USAGE = llm.Usage()
+    settings = llm.step_settings(STEP_NUMBER)
+    name = settings.get("prompt_inquiry")
+    if not name:
+        return Step1Inquiry()
+    try:
+        result = llm.ask(
+            step_number=STEP_NUMBER,
+            system=(cfg.prompt_text(name, category)
+                    .replace("{dead_ends}", _dead_end_block())
+                    .replace("{qualitative_factors}", _factor_frame(
+                        cfg.hypotheses_config(category), citable_keys(payload)))),
+            user=("## 読み取った事実と特徴\n\n```json\n"
+                  + json.dumps({"facts": [f.model_dump() for f in output.facts],
+                                "patterns": [p.model_dump()
+                                             for p in output.patterns],
+                                "surroundings": (output.surroundings.model_dump()
+                                                 if output.surroundings else None)},
+                               ensure_ascii=False, indent=1)
+                  + "\n```\n\n## この地点の位置づけ（GIS が計算したもの）\n\n```json\n"
+                  + json.dumps(payload.get("positioning") or {},
+                               ensure_ascii=False, indent=1)
+                  + "\n```"),
+            schema=Step1Inquiry, web_search=False)
+    except Exception as exc:  # noqa: BLE001 - 前半を捨てない
+        output.not_determinable = list(output.not_determinable) + [
+            f"前提と問いを立てる呼び出しが失敗しました（{type(exc).__name__}: {exc}）。"
+            "FACT と PATTERN は取れています。"]
+        return Step1Inquiry()
+    _INQUIRY_USAGE = result.usage
+    return result.parsed or Step1Inquiry()
 
 
 def _cited_sources(output: Step1Output, scan: _Scan) -> list[dict[str, Any]]:

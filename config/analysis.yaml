@@ -253,7 +253,18 @@ steps:
     # 順番が逆では、この読み直しが起きたときには仮説が出来上がっています。
     prompt_surroundings: step1_surroundings.md
     prompt: step1_features.md
-    prompt_version: step1-v2.0
+    # 3 回目。**読む**（prompt）と**疑う**（prompt_inquiry）を分けています。
+    #
+    # 1 回の構造化出力に FACT・PATTERN・周辺施設・前提・問いを全部入れていたら、
+    # 文法が大きくなりすぎて API が 400 を返しました：
+    #   The compiled grammar is too large, which would cause performance issues.
+    # 実測：スキーマ 7,977 文字（通っている STEP2 は 4,512 文字）。
+    #
+    # ただし、しのぎとして分けたのではありません。読むことと疑うことは違う
+    # 仕事で、分けると「疑う」側は**確定した FACT を入力として受け取ります**。
+    # それが「GIS が Fact を確定し、LLM がそれを解釈する」という分業です。
+    prompt_inquiry: step1_inquiry.md
+    prompt_version: step1-v2.1
     # 既に算出済みの順位とパーセンタイルから FACT を選び、食い違いを見つける
     # 段です。深く考えるより、たくさん見て取りこぼさないほうが効きます。
     # effort: high では思考だけで 10,094 トークン出ていました。

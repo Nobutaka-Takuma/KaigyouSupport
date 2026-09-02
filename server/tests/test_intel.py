@@ -694,15 +694,25 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
                           "title": "商業施設の概要"}],
                 usage=llm.Usage(input_tokens=300, output_tokens=100),
                 model="claude-opus-5")
-        return llm.Result(parsed=_crossing_output(), text="",
-                          usage=llm.Usage(input_tokens=1000, output_tokens=200),
-                          model="claude-opus-5")
+        from kaigyou_intel.schemas import Step1Inquiry, Step1Reading
+
+        if schema is Step1Inquiry:   # 3 回目：疑う
+            return llm.Result(parsed=Step1Inquiry(), text="",
+                              usage=llm.Usage(input_tokens=200, output_tokens=50),
+                              model="claude-opus-5")
+        # 2 回目：読む
+        base = _crossing_output()
+        return llm.Result(
+            parsed=Step1Reading(**{k: v for k, v in base.model_dump().items()
+                                   if k in Step1Reading.model_fields}),
+            text="", usage=llm.Usage(input_tokens=1000, output_tokens=200),
+            model="claude-opus-5")
 
     monkeypatch.setattr(llm, "ask", fake_ask)
     output, usage, sources = step1_features.run(step1_features.build_input(dataset))
 
-    scan, main = calls
-    assert [c["step_number"] for c in calls] == [1, 1]
+    scan, main, inquiry = calls
+    assert [c["step_number"] for c in calls] == [1, 1, 1]
     # 1 回目は検索する呼び出し。**先に場所を調べてから統計を読みます。**
     assert scan["web_search"] is True
     assert scan["schema"] is None, "検索と構造化出力は同じ呼び出しで併用しない"
@@ -713,8 +723,23 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     assert "measures" not in scan["user"]
 
     # 2 回目は要件 §6 のまま。道具を渡さず、構造化出力で受けます。
+    #
+    # **スキーマは Step1Output ではありません。** 保存する形と、API に渡す形は
+    # 別です。1 回の構造化出力に FACT・PATTERN・周辺施設・前提・問いを全部
+    # 入れたら、文法が大きくなりすぎて API が 400 を返しました。
+    from kaigyou_intel.schemas import Step1Inquiry, Step1Reading
+
     assert main["tools"] is None, "STEP1 の本体に道具を渡してはいけない"
-    assert main["schema"] is Step1Output
+    assert main["schema"] is Step1Reading
+    # 3 回目は「疑う」。**確定した FACT を入力として受け取ります。**
+    assert inquiry["schema"] is Step1Inquiry
+    assert inquiry["web_search"] is False
+    assert "elderly_share" in inquiry["user"], "確定した FACT が渡っていない"
+    # **データセット全体は渡しません。** 疑うのに要るのは「何が確からしいと
+    # されたか」であって、元の数字全部ではありません。入力が小さいぶん、
+    # この呼び出しは速く安く済みます。
+    assert "measurement_basis" not in inquiry["user"]
+    assert len(inquiry["user"]) < len(main["user"]) / 2
     # スキャンの結果と、取得した URL の一覧が届いていること。
     assert "〇〇モール" in main["user"]
     assert "https://example.go.jp/mall" in main["user"]
@@ -722,13 +747,14 @@ def test_step1_runs_end_to_end_with_a_stubbed_model(dataset, monkeypatch):
     limit = cfg.analysis_config()["limits"]["max_patterns"]
     assert f"最大 {limit} 個" in main["system"]
     assert "{max_patterns}" not in main["system"]
-    # 定性要因の枠と、層の掛け合わせの指示が入っていること。
-    assert "デンタルIQ" in main["system"]
-    assert "{qualitative_factors}" not in main["system"]
     assert "{crossing_examples}" not in main["system"]
-    # 使用量は 2 回ぶんの合計。片方だけだと費用が半分に見えます。
-    assert usage.input_tokens == 1300
-    assert usage.output_tokens == 300
+    # 定性要因の枠は「疑う」側にあります（問いを立てるときに要るもの）。
+    assert "デンタルIQ" in inquiry["system"]
+    assert "{qualitative_factors}" not in inquiry["system"]
+    assert "{dead_ends}" not in inquiry["system"]
+    # 使用量は 3 回ぶんの合計。ひとつでも落とすと費用が実際より安く見えます。
+    assert usage.input_tokens == 1500
+    assert usage.output_tokens == 350
     assert output["facts"][0]["measure_key"] == "elderly_share"
     # measures に無いキーも FACT の根拠として引けること。診療時間は
     # measures ではなく citable にあります。
@@ -1969,7 +1995,10 @@ def test_step1_is_told_which_questions_have_public_answers():
     """
     from kaigyou_intel.steps.step1_features import _dead_end_block
 
-    text = cfg.prompt_text("step1_features.md")
+    # **問いを立てるのは「疑う」側の呼び出しです**（step1_inquiry.md）。
+    # 「読む」側と分けたのは、1 回の構造化出力に全部入れると文法が大きく
+    # なりすぎて API が 400 を返したためです。
+    text = cfg.prompt_text("step1_inquiry.md")
     # 検索するかどうかを決める欄が、プロンプトで説明されていること。
     assert "researchability" in text
     assert "`low` の問いは検索しません" in text
@@ -4624,10 +4653,13 @@ def test_a_question_carries_how_to_answer_it():
         # どこから生まれた問いか（§57）。問いだけを保存してはいけません。
         "assumption_id", "trigger",
         # 検索するかどうかを決める欄（§55）。**researchability だけが
-        # 検索の可否を決めます。** 残りは順序づけと、あとから
-        # 「どんな問いが効いたか」を数えるためのものです。
+        # 検索の可否を決めます。**
         "researchability", "researchability_reason", "decision_levers",
-        "importance", "already_in_data"}
+        "already_in_data"}
+    # **動作を変えない欄を足さないこと。** 欄はそのまま構造化出力の文法に
+    # 乗ります。実測：欄を増やしたら API が
+    # 「The compiled grammar is too large」で 400 を返しました。
+    assert "importance" not in Question.model_fields
 
 
 def test_not_knowing_and_being_wrong_are_different_verdicts():
@@ -6602,7 +6634,8 @@ def test_the_dry_run_shows_what_is_actually_sent(conn, dataset, tmp_path):
     assert not left, f"置き換わっていないプレースホルダ: {left}"
     # 実際に効く中身が入っていること。
     assert "あなたは数字を作りません" in system
-    assert "歯科医師・歯科衛生士の年齢構成" in system, "台帳が差し込まれていない"
+    # 台帳は「疑う」側の呼び出しに入ります（問いを立てるのはそちらなので）。
+    assert "歯科医師・歯科衛生士の年齢構成" in step1_features._dead_end_block()
 
 
 def test_the_run_and_the_dry_run_build_the_same_prompt(monkeypatch, dataset):
@@ -6625,3 +6658,207 @@ def test_the_run_and_the_dry_run_build_the_same_prompt(monkeypatch, dataset):
 
     built = step1_features.system_prompt(payload)
     assert seen and seen[-1] == built, "実行と dry-run で違うプロンプトを組んでいる"
+
+
+# ========================================= スキーマを小さく保つ（文法の上限）
+#
+# 実測のエラー：
+#   The compiled grammar is too large, which would cause performance issues.
+#   Simplify your tool schemas or reduce the number of strict tools.
+#
+# STEP1 のスキーマが 7,977 文字まで膨らんでいました（通っている STEP2 は
+# 4,512 文字）。差はこのセッションで足したもの——Assumption・QuestionTrigger・
+# Question の 7 欄です。
+
+def _schema_size(model) -> int:
+    return len(json.dumps(model.model_json_schema(), ensure_ascii=False))
+
+
+def test_what_goes_over_the_wire_is_smaller_than_what_gets_saved():
+    """**保存する形と、API に渡す形は別です。**
+
+    1 回の構造化出力に FACT・PATTERN・周辺施設・前提・問いを全部入れたら、
+    文法が大きくなりすぎて 400 になりました。
+    """
+    from kaigyou_intel.schemas import (
+        Step1Inquiry, Step1Output, Step1Reading, Step2Output)
+
+    # 通っている実績のある大きさ。ここを超えたら要注意。
+    known_good = _schema_size(Step2Output)
+    for wire in (Step1Reading, Step1Inquiry):
+        assert _schema_size(wire) < known_good, (
+            f"{wire.__name__} が {_schema_size(wire):,} 文字。"
+            f"通っている Step2Output は {known_good:,} 文字")
+    # 保存する形は大きくて構いません（API には渡らないので）。
+    assert _schema_size(Step1Output) > _schema_size(Step1Reading)
+
+
+def test_the_two_calls_together_cover_what_gets_saved():
+    """分けたことで欄が落ちていないこと。**保存される形は変えていません。**"""
+    from kaigyou_intel.schemas import Step1Inquiry, Step1Output, Step1Reading
+
+    covered = set(Step1Reading.model_fields) | set(Step1Inquiry.model_fields)
+    assert set(Step1Output.model_fields) == covered
+    # 重なっていないこと。両方が同じ欄を出すと、どちらが正かが決まりません。
+    assert not (set(Step1Reading.model_fields) & set(Step1Inquiry.model_fields))
+
+
+def test_long_explanations_do_not_ride_along_in_the_schema():
+    """**class docstring はそのまま JSON schema の description になります。**
+
+    人が読むための長い説明は、構造化出力のたびに送られます。
+    """
+    from kaigyou_intel.schemas import Question, Step1Output
+
+    schema = Step1Output.model_json_schema()
+    found: list[str] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("description"), str):
+                found.append(node["description"])
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(schema)
+    longest = max(found, key=len)
+    assert len(longest) < 200, f"説明が長すぎます（{len(longest)} 文字）: {longest[:80]}"
+    # 説明そのものは残っています——コードを読む人のために。
+    assert "文法" in Question.__doc__ or len(Question.__doc__) < 100
+
+
+def test_nothing_in_the_wire_schema_is_nullable():
+    """`| None` は anyOf になり、分岐がひとつ増えます。「無い」は既定値で表せます。"""
+    from kaigyou_intel.schemas import Question, QuestionTrigger
+
+    for model in (Question, QuestionTrigger):
+        raw = json.dumps(model.model_json_schema(), ensure_ascii=False)
+        assert '"type": "null"' not in raw and '"type":"null"' not in raw, model
+
+
+def test_a_grammar_that_is_too_large_falls_back_instead_of_failing(monkeypatch):
+    """**スキーマを小さく保つのが本筋ですが、越えたことは動かすまで分かりません。**
+
+    欄を 1 つ足しただけで越えることがあります。そのたびに段が丸ごと失敗して
+    やり直しに $1 かかるのでは割に合いません。制約を外してもう一度だけ頼み、
+    本文から JSON を取り出します。**検算はどちらの経路でも同じように掛かる**
+    ので、通ってはいけない出力が通るようにはなりません。
+    """
+    from pydantic import BaseModel
+
+    from kaigyou_intel import client as real
+
+    class Small(BaseModel):
+        answer: str
+
+    class _Block:
+        type = "text"
+        text = '見つけました。\n```json\n{"answer": "42"}\n```'
+
+    class _Msg:
+        content = [_Block()]
+        stop_reason = "end_turn"
+        model = "m"
+        usage = type("U", (), {"input_tokens": 1, "output_tokens": 1,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0})()
+        parsed_output = None
+
+    seen: list[dict] = []
+
+    def fake_send(client, request, settings, step_number):
+        seen.append(request)
+        if "output_format" in request:
+            raise RuntimeError(
+                "Error code: 400 - The compiled grammar is too large, which "
+                "would cause performance issues.")
+        return _Msg()
+
+    monkeypatch.setattr(real, "_send", fake_send)
+    monkeypatch.setattr(real, "_client", lambda: object())
+    result = real.ask(step_number=1, system="s", user="u", schema=Small)
+
+    assert len(seen) == 2, "制約を外して頼み直していない"
+    assert "output_format" not in seen[1]
+    # スキーマは user の末尾に。**system を変えるとキャッシュが全部外れます。**
+    assert "answer" in str(seen[1]["messages"][-1]["content"])
+    assert seen[1]["system"] == seen[0]["system"]
+    assert result.parsed.answer == "42"
+
+
+def test_only_a_grammar_error_falls_back():
+    """400 は「入力が長すぎる」でも「モデル名が違う」でも返ります。
+
+    **状態コードでは見分けられません。** 緩い経路へ落として構わないのは、
+    スキーマが原因のときだけです。
+    """
+    from kaigyou_intel.client import _grammar_too_large
+
+    assert _grammar_too_large(RuntimeError(
+        "The compiled grammar is too large, which would cause performance issues."))
+    assert not _grammar_too_large(RuntimeError("credit balance is too low"))
+    assert not _grammar_too_large(RuntimeError("prompt is too long: 250000 tokens"))
+
+
+def test_a_failed_inquiry_does_not_lose_the_facts(monkeypatch, dataset):
+    """**前半で FACT と PATTERN は取れています。**
+
+    問いが立たなかったからといって、それを捨てるのは割に合いません。
+    """
+    from kaigyou_intel.schemas import Step1Inquiry, Step1Reading
+    from kaigyou_intel.steps import step1_features
+
+    def fake_ask(*, step_number, system, user, schema=None, **kw):
+        if schema is None:
+            return llm.Result(parsed=None, text="モール。",
+                              sources=[{"url": "https://example.go.jp/m",
+                                        "title": "t"}],
+                              usage=llm.Usage(), model="m")
+        if schema is Step1Inquiry:
+            raise RuntimeError("overloaded")
+        base = _crossing_output()
+        return llm.Result(
+            parsed=Step1Reading(**{k: v for k, v in base.model_dump().items()
+                                   if k in Step1Reading.model_fields}),
+            text="", usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    output, _, _ = step1_features.run(step1_features.build_input(dataset))
+
+    assert output["facts"], "問いが立たなかっただけで FACT を捨てている"
+    assert output["patterns"]
+    assert output["questions"] == []
+    # 黙って落とさない。何が起きたかを残します。
+    assert any("前提と問い" in n for n in output["not_determinable"])
+
+
+#: 構造化出力で実際に送るスキーマと、その大きさの上限。
+#:
+#: **これは推測です。** API が正確に何文字で断るかは公表されていません。
+#: 分かっているのは 7,977 文字が断られ、4,512 文字が通っていることだけなので、
+#: 通った実績のある大きさを上限にします。ここに引っかかったら、欄を減らすか
+#: 呼び出しを分けてください——**上限のほうを上げないでください。**
+_WIRE_SCHEMA_LIMIT = 5_200
+
+
+def test_every_schema_we_send_stays_small_enough():
+    """**欄を 1 つ足しただけで越えることがあり、越えたことは動かすまで
+    分かりません。** ここで気づけるようにします。
+
+    実測：STEP1 が 7,977 文字で
+      The compiled grammar is too large, which would cause performance issues.
+    """
+    from kaigyou_intel.schemas import (
+        Step1Inquiry, Step1Reading, Step2Output, Step3Output, Step4Output)
+
+    sent = {"Step1Reading": Step1Reading, "Step1Inquiry": Step1Inquiry,
+            "Step2Output": Step2Output, "Step3Output": Step3Output,
+            "Step4Output": Step4Output}
+    too_big = {name: _schema_size(m) for name, m in sent.items()
+               if _schema_size(m) > _WIRE_SCHEMA_LIMIT}
+    assert not too_big, (
+        f"構造化出力のスキーマが大きすぎます: {too_big}。"
+        "欄を減らすか、呼び出しを分けてください（上限を上げないこと）")

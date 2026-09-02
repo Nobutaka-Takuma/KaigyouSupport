@@ -81,13 +81,7 @@ class NearbyFacility(BaseModel):
 
 
 class Surroundings(BaseModel):
-    """候補地の周辺施設と立地類型。**統計の前に、まず何がある場所なのか。**
-
-    500m メッシュの統計は「そこに何人いるか」を教えますが、「そこが何なのか」
-    は教えません。大学のキャンパスも、ショッピングモールも、総合病院も、
-    メッシュ統計の上では同じ「人がいる区画」です。ここだけは外部情報でしか
-    分かりません。
-    """
+    """候補地の周辺施設と立地類型。統計の前に、まず何がある場所なのか。"""
 
     setting: LocationSetting
     setting_reason: str = Field(description="なぜその類型と判断したか。1〜2文")
@@ -146,21 +140,7 @@ Researchability = Literal[
 
 
 class Assumption(BaseModel):
-    """この分析が置いている前提（指示書 §53・§58）。
-
-    **良い問いは、ここを経由して生まれます。**
-
-        FACT → PATTERN → 矛盾・乖離 → **ASSUMPTION** → QUESTION
-
-    この段が無いと、問いは「なぜ若年層が多いのか」で止まります。悪くは
-    ありませんが、**判断は動きません。** 動くのは「この将来人口推計を、
-    そのまま開業判断の前提にしてよいか」のほうです。前者はデータの説明を
-    求め、後者はデータの信用を問うています。
-
-    実測（沼津）：将来推計人口は減少。ところが復興土地区画整理事業の中央工区が
-    進行中でした。**「推計は住宅供給を織り込んでいる」という前提**が、誰にも
-    確かめられないまま分析の土台になっていました。
-    """
+    """この分析が置いている前提（指示書 §53・§58）。FACT → PATTERN → 前提 → QUESTION。"""
 
     id: str = Field(description="A001 のような通し番号")
     statement: str = Field(
@@ -187,66 +167,48 @@ class QuestionTrigger(BaseModel):
 
 
 class Question(BaseModel):
-    """PATTERN から出た「なぜこうなっているのか」の問い（指示書 §8）。
-
-    **文字列ではなく id を持つ物にしています。** ``research_questions`` は
-    ただの文字列の並びで、下流から参照できませんでした。参照できないと、
-    「H003 は Q002 への答え」と書けず、**どの問いが答えられずに残ったかも
-    数えられません。** 「7つ問いを立て、5つに答えが出た」が言えるかどうかは、
-    このサービスが GIS と違うと言えるかどうかそのものです。
-
-    ``what_would_answer_it`` が「調査すべきことを AI 自身に決めさせる」
-    （§16）の実体です。**問いを立てた段で、調べ方まで決めさせます。**
-    次の段に丸投げすると「〇〇駅について検索してください」になり、§23 が
-    禁じているものになります。
-    """
+#: **長い説明をここに書かないでください。** class docstring はそのまま
+#: JSON schema の description になり、構造化出力の文法に毎回乗ります。
+#: 実測：STEP1 のスキーマが 7,977 文字まで膨らみ、API が
+#: 「The compiled grammar is too large」で 400 を返しました。
+#: 問いの立て方の説明は config/<業態>/prompts/step1_features.md にあります。
+    """PATTERN から出た問い（指示書 §8）。"""
 
     id: str = Field(description="Q001 のような通し番号")
     pattern_id: str = Field(description="どの PATTERN から出た問いか")
-    question: str = Field(
-        description="なぜこの特徴が存在するのか。地域紹介を求める問いにしない")
-    why_it_matters: str = Field(
-        description="答えが出ると、どの経営判断が変わるのか。1〜2文")
-    what_would_answer_it: str = Field(
-        description="何を調べれば答えが出るのか。資料の種類・発行者まで具体的に")
+    question: str = Field(description="その前提は本当にそうなのか")
+    why_it_matters: str = Field(description="答えが出ると何の判断が変わるか")
+    what_would_answer_it: str = Field(description="何を調べれば答えが出るか")
     #: 以下は**空でも受け付けます**——古い形の保存済み出力を読み直せなく
     #: なるほうが困るためです。新しい出力では埋まります（プロンプトが求め、
     #: verify_step1 が検算します）。
-    assumption_id: str | None = Field(
-        default=None,
-        description="この問いが疑っている ASSUMPTION の id（A001 など）")
-    trigger: QuestionTrigger | None = Field(
-        default=None, description="この問いを生んだ突き合わせ")
+    #: `| None` を使いません。anyOf が 1 つ増えるたびに文法の分岐が増えます。
+    #: 「無い」は空文字で表せます。
+    assumption_id: str = Field(
+        default="", description="疑っている ASSUMPTION の id（A001 など）")
+    trigger: QuestionTrigger = Field(
+        default_factory=lambda: QuestionTrigger(type="other"),
+        description="この問いを生んだ突き合わせ")
     researchability: Researchability = Field(
-        default="medium",
-        description="公表情報で確かめられる見込み。low なら**検索しません**")
+        default="medium", description="low なら検索しません")
     researchability_reason: str = Field(
-        default="",
-        description="なぜその見込みなのか。low なら、どこに無いのかまで")
+        default="", description="low なら、どこに無いのかまで")
     #: 答えが出たとき何が動くか。**Hypothesis と同じ 6 つ**を使います。
     #: 問いの段で書かせるのは、動かないと分かっている問いに検索を使わせない
     #: ためです（指示書 §59）。
     decision_levers: list[DecisionLever] = Field(
-        default_factory=list,
-        description="答えによって動きうるもの。1 つも無いなら問いにしない")
-    importance: Importance = Field(
-        default="medium", description="この意思決定にとっての重さ")
+        default_factory=list, description="答えによって動きうるもの。1 つ以上")
+    #: `importance` は置きません。**動作を変えない欄は、文法を太らせるだけ**
+    #: です。問いの重さは `decision_levers`（どの判断が動くか）で表せていて、
+    #: 順序づけにしか使っていませんでした。
     #: **手元のデータで既に答えが出ている問いを、外部に訊きに行かせない。**
-    #: 「昼間人口は何人か」「周辺の歯科医院は何件か」は、データセットに
-    #: 書いてあります（指示書 §62）。
+    #: 「昼間人口は何人か」はデータセットに書いてあります（指示書 §62）。
     already_in_data: bool = Field(
-        default=False,
-        description="手元のデータセットだけで答えが出るなら true。"
-                    "true の問いは出力しないでください")
+        default=False, description="手元のデータだけで答えが出るなら true")
 
 
 class Step1Output(BaseModel):
-    """STEP1（商圏特徴抽出）の出力。
-
-    benchmarks を含みません。パーセンタイル・順位・significance は
-    /api/dataset が算出済みで、FACT はそれを ``measure_key`` で参照します。
-    LLM に作らせると、入力に無い数字が「それらしく」出てきます（要件 §3 原則2）。
-    """
+    """STEP1 の出力（保存される形）。benchmarks は含みません。"""
 
     facts: list[Fact] = Field(min_length=1)
     patterns: list[Pattern] = Field(min_length=1)
@@ -266,6 +228,48 @@ class Step1Output(BaseModel):
     #: ここが効くのは PATTERN の見立てと research_questions で、つまり
     #: 「何を調べに行くか」のほうです。
     surroundings: Surroundings | None = None
+
+
+# --------------------------------------------------------- STEP1 の 2 つの呼び出し
+#
+# **`Step1Output` は保存される形です。API に渡す形ではありません。**
+#
+# 1 回の構造化出力に FACT・PATTERN・周辺施設・前提・問いを全部入れていたら、
+# 文法が大きくなりすぎて API が 400 を返しました。
+#
+#     The compiled grammar is too large, which would cause performance issues.
+#
+# 実測：Step1Output のスキーマ 7,977 文字。通っている Step2Output は 4,512 文字。
+# この差はこのセッションで足したもの（Assumption・QuestionTrigger・Question の
+# 7 欄）です。
+#
+# **分けたのは、しのぎのためではありません。** STEP1 は 2 つの違う仕事を 1 回で
+# やっていました。
+#
+#     読む   … GIS が確定した数字から FACT と PATTERN を起こし、
+#              周辺スキャンの本文を構造化する（機械的な写し取り）
+#     疑う   … 起こした FACT / PATTERN が置いている前提を見つけ、
+#              それを確かめる問いを立てる（解釈）
+#
+# 分けると、**「疑う」側は確定した FACT を入力として受け取ります。** これは
+# ちょうど「GIS が Fact を確定し、LLM がそれを解釈する」という分業そのもの
+# です。1 回でやらせていたときは、読みながら疑うことになっていました。
+
+
+class Step1Reading(BaseModel):
+    """STEP1 前半：読む。GIS が確定した数字と、周辺スキャンの本文から。"""
+
+    facts: list[Fact] = Field(min_length=1)
+    patterns: list[Pattern] = Field(min_length=1)
+    not_determinable: list[str] = Field(default_factory=list)
+    surroundings: Surroundings | None = None
+
+
+class Step1Inquiry(BaseModel):
+    """STEP1 後半：疑う。読み取った FACT と PATTERN が置いている前提を。"""
+
+    assumptions: list[Assumption] = Field(default_factory=list)
+    questions: list[Question] = Field(default_factory=list)
 
 
 class TraceProblem(BaseModel):

@@ -112,6 +112,11 @@ def step_settings(step_number: int) -> dict[str, Any]:
         # Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は
         # 「調べる」「書き写す」の 2 回に分かれます。
         "prompt_structure": step.get("prompt_structure"),
+        # STEP1 の 3 回目。**読む**（prompt）と**疑う**（prompt_inquiry）を
+        # 分けています。1 回の構造化出力に全部入れると、文法が大きくなりすぎて
+        # API が 400 を返しました。無ければ前提と問いは出ません（FACT と
+        # PATTERN は出ます）。
+        "prompt_inquiry": step.get("prompt_inquiry"),
         # STEP2 の 2 周目。1 周目の結果を見て、答えの出なかった問いだけを
         # 角度を変えて調べ直す呼び出しで使うプロンプト。無ければ 2 周目は
         # 走りません（limits.research_rounds でも止められます）。
@@ -270,27 +275,35 @@ def ask(*, step_number: int, system: str, user: str,
     #   ValueError: Streaming is required for operations that may take longer
     #   than 10 minutes
     # で落ちました。ストリームなら上限を気にせず上げられます。
-    if schema is not None and "tools" not in request:
+    constrained = schema is not None and "tools" not in request
+    if constrained:
         # 構造化出力。schema は **型のまま** output_format に渡します。SDK が
         # JSON Schema へ変換して output_config.format にマージします。自分で
         # output_config へ入れると、型がそのまま送信されて落ちます。
         request = {**request, "output_format": schema}
-    with client.messages.stream(**request) as stream:
-        try:
-            message = stream.get_final_message()
-        except Exception as exc:  # noqa: BLE001 - 種類を見分けてから投げ直す
-            if _looks_truncated(exc):
-                raise Truncated(
-                    f"出力が max_tokens（{settings['max_tokens']:,}）に達して"
-                    "途中で切れました。JSON が壊れているのではなく、書き終わる前に"
-                    "止められています。config/analysis.yaml の model.max_tokens か、"
-                    f"steps.{step_number}.max_tokens を上げてから、"
-                    "そのステップだけやり直してください"
-                    "（払うのは実際に出た分だけなので、上げても高くなりません）。"
-                ) from exc
+
+    try:
+        message = _send(client, request, settings, step_number)
+    except Exception as exc:  # noqa: BLE001 - 文法が大きすぎるときだけ拾う
+        if not (constrained and _grammar_too_large(exc)):
             raise
+        # **制約を外して、もう一度だけ頼みます。**
+        #
+        # スキーマが大きすぎると API は 400 を返します。**そのまま落とすと、
+        # 段が丸ごと失敗します。** スキーマを小さく保つのが本筋ですが、欄を
+        # 1 つ足しただけで越えることがあり、越えたことは動かすまで分かりません。
+        #
+        # 制約を外しても、欲しい JSON の形は伝えられます。検算（verify_step1
+        # など）はどちらの経路でも同じように掛かるので、**通ってはいけない
+        # 出力が通るようにはなりません。** 落ちるか、緩い経路で通って検算に
+        # かかるかの違いです。
+        message = _send(client, _as_prose_json(request, schema, settings),
+                        settings, step_number)
     # output_format を渡さなかったときは None。text ブロックに付きます。
     parsed = getattr(message, "parsed_output", None)
+    if parsed is None and constrained and schema is not None:
+        # 制約を外して頼んだぶん。本文から JSON を取り出して検証します。
+        parsed = _parse_prose_json(message, schema)
 
     # 拒否は例外ではなく HTTP 200 で返ります。content を読む前に確かめないと、
     # 空の応答を「モデルが何も見つけなかった」と取り違えます。
@@ -314,6 +327,98 @@ def ask(*, step_number: int, system: str, user: str,
         model=getattr(message, "model", settings["model"]),
         sources=extract_sources(message),
     )
+
+
+def _send(client: Any, request: Mapping[str, Any], settings: Mapping[str, Any],
+          step_number: int) -> Any:
+    """常にストリームで受けます。
+
+    SDK は「10 分を超えうる操作」を非ストリームで呼ぶと送信前に ValueError を
+    投げ、その境目は max_tokens で決まります。実測：max_tokens を 16,000 から
+    24,000 に上げた途端、STEP1 が
+      ValueError: Streaming is required for operations that may take longer
+      than 10 minutes
+    で落ちました。ストリームなら上限を気にせず上げられます。
+    """
+    with client.messages.stream(**request) as stream:
+        try:
+            return stream.get_final_message()
+        except Exception as exc:  # noqa: BLE001 - 種類を見分けてから投げ直す
+            if _looks_truncated(exc):
+                raise Truncated(
+                    f"出力が max_tokens（{settings['max_tokens']:,}）に達して"
+                    "途中で切れました。JSON が壊れているのではなく、書き終わる前に"
+                    "止められています。config/analysis.yaml の model.max_tokens か、"
+                    f"steps.{step_number}.max_tokens を上げてから、"
+                    "そのステップだけやり直してください"
+                    "（払うのは実際に出た分だけなので、上げても高くなりません）。"
+                ) from exc
+            raise
+
+
+def _grammar_too_large(exc: Exception) -> bool:
+    """スキーマが大きすぎて構造化出力を組めなかったか。
+
+    実測のメッセージ：
+
+        The compiled grammar is too large, which would cause performance
+        issues. Simplify your tool schemas or reduce the number of strict tools.
+
+    **状態コードでは見分けられません。** 400 は「入力が長すぎる」でも
+    「モデル名が違う」でも返ります。緩い経路へ落として構わないのは、
+    スキーマが原因のときだけです。
+    """
+    text = str(exc).lower()
+    return "grammar is too large" in text or (
+        "grammar" in text and "too large" in text)
+
+
+def _as_prose_json(request: Mapping[str, Any], schema: Any,
+                   settings: Mapping[str, Any]) -> dict[str, Any]:
+    """構造化出力の制約を外し、代わりに JSON の形を文章で頼む。
+
+    **スキーマは system の末尾ではなく user の末尾に置きます。** system は
+    キャッシュの区切りより前で、そこを変えると以降のキャッシュが全部外れます。
+    """
+    import json as _json
+
+    body = {k: v for k, v in request.items() if k != "output_format"}
+    messages = list(body.get("messages") or [])
+    if messages:
+        last = dict(messages[-1])
+        last["content"] = (
+            str(last.get("content", ""))
+            + "\n\n---\n\n## 出力形式\n\n"
+            "**JSON だけを出力してください。** 前後に説明を書かないでください。"
+            "コードブロックの記号（```）も付けないでください。\n\n"
+            "次の JSON Schema に従ってください。\n\n```json\n"
+            + _json.dumps(schema.model_json_schema(), ensure_ascii=False, indent=1)
+            + "\n```")
+        messages[-1] = last
+    body["messages"] = messages
+    return body
+
+
+def _parse_prose_json(message: Any, schema: Any) -> Any:
+    """本文から JSON を取り出して検証する。
+
+    **取れなければ None を返します。** 呼び出し側は「構造化出力を受け取れ
+    ませんでした」として扱い、やり直しの対象になります。ここで例外を投げると、
+    緩い経路に落ちたことが truncated と区別できなくなります。
+    """
+    import json as _json
+
+    text = "".join(b.text for b in message.content
+                   if getattr(b, "type", "") == "text").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return schema.model_validate(_json.loads(text[start:end + 1]))
+    except Exception:  # noqa: BLE001 - 壊れていれば「受け取れなかった」
+        return None
 
 
 def _looks_truncated(exc: Exception) -> bool:
