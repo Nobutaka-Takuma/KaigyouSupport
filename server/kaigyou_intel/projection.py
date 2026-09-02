@@ -499,6 +499,17 @@ def _cost_summary(dataset: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _unsearchable(step1: Mapping[str, Any]) -> set[str]:
+    """公表されていないと分かっている問いの文。
+
+    ``questions`` と ``research_questions`` は同じ問いを別の形で持っています
+    （前者が id 付き、後者が古い文字列の並び）。片方だけ落としても、もう
+    片方から検索に渡ります。
+    """
+    return {str(q.get("question")) for q in (step1.get("questions") or [])
+            if q.get("researchability") == "low" and q.get("question")}
+
+
 def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
               limits: Mapping[str, Any]) -> dict[str, Any]:
     """STEP2（外部コンテクスト調査）の入力。
@@ -528,7 +539,13 @@ def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
             {"id": p.get("id"), "title": p.get("title"),
              "evidence_summary": p.get("evidence_summary") or p.get("title"),
              "importance": p.get("importance"),
-             "research_questions": p.get("research_questions") or []}
+             # **ここからも落とします。** STEP2 の調査プロンプトは「この PATTERN
+             # の research_questions にだけ答えてください」と言います。下の
+             # `questions` から外しただけでは、同じ問いが文字列としてここから
+             # 渡り、結局そのまま検索されます。**外したつもりで外れていない、
+             # がいちばん質が悪い**——画面にもレポートにも何も出ません。
+             "research_questions": [q for q in (p.get("research_questions") or [])
+                                    if q not in _unsearchable(step1)]}
             for p in patterns
         ],
         # **問いそのもの。** これまで PATTERN の中の文字列としてしか渡って
@@ -542,9 +559,32 @@ def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
             {"id": q.get("id"), "pattern_id": q.get("pattern_id"),
              "question": q.get("question"),
              "why_it_matters": q.get("why_it_matters"),
-             "what_would_answer_it": q.get("what_would_answer_it")}
+             "what_would_answer_it": q.get("what_would_answer_it"),
+             # 検索するかどうかは、この 2 つで決まります。
+             "researchability": q.get("researchability") or "medium",
+             "decision_levers": q.get("decision_levers") or []}
             for q in (step1.get("questions") or [])
             if q.get("pattern_id") in {p.get("id") for p in patterns}
+            # **公表されていないと分かっている問いは、ここに入れません。**
+            # 入れると次の段が検索します。下の欄に回します。
+            and q.get("researchability") != "low"
+        ],
+        # **公表されていないと分かっている問い。検索に回しません。**
+        #
+        # 実測：これを分けていなかったとき、外部調査の半分が「その統計は
+        # 存在しない」という報告になりました。空振りは検索の上限と費用を
+        # 使い切ります。
+        #
+        # 落とすのではなく、**そのまま「開業前に現地で確かめること」に
+        # 回します**（指示書 §56）。重要なのに調べられない、は結論の一部です。
+        "questions_for_the_field": [
+            {"id": q.get("id"), "question": q.get("question"),
+             "why_it_matters": q.get("why_it_matters"),
+             "why_not_searchable": q.get("researchability_reason") or "",
+             "what_would_answer_it": q.get("what_would_answer_it")}
+            for q in (step1.get("questions") or [])
+            if (q.get("researchability") == "low"
+                and q.get("pattern_id") in {p.get("id") for p in patterns})
         ],
         "nearby_clinics": [
             {"name": c.get("name"), "distance_m": c.get("distance_m"),

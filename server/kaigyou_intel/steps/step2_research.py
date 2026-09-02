@@ -27,7 +27,8 @@ from kaigyou_core import config as cfg
 from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.projection import for_step2
-from kaigyou_intel.schemas import Step2Output, normalize_url, verify_step2
+from kaigyou_intel.schemas import (
+    Step2Output, UnansweredQuestion, normalize_url, verify_step2)
 
 STEP_NUMBER = 2
 
@@ -205,10 +206,28 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         for f in failed] + [
         f"{pid} は検索回数の上限に達したため調べていません。" for pid in skipped]
 
+    # **調べても出ないと分かっている問いは、検索せずに現地確認へ回します。**
+    #
+    # 実測：これを分けていなかったとき、外部調査の半分が「その統計は存在
+    # しない」という報告になりました。「市内の歯科衛生士・歯科医師の年齢
+    # 構成」「在宅療養支援歯科診療所の届出数」——**公表されていないことは
+    # 分かっているのに、分析のたびに検索していました。** 空振りは検索の
+    # 上限と費用を使い切り、そのぶんは答えの出る問いに回りません。
+    #
+    # 落とすのではありません。重要なのに調べられない問いは、そのまま
+    # 「開業前に現地で確かめること」になります（指示書 §56）。
+    _send_to_the_field(output, payload.get("questions_for_the_field") or [])
+
     # 問いが渡っていない古い入力では None（検算を掛けません）。掛けると、
     # 古い形の再実行が毎回「存在しない QUESTION」で埋まります。
+    #
+    # 現地へ回した問いも「実在する QUESTION」です。検算から漏らすと、
+    # _send_to_the_field が足した open_questions が毎回落とされます。
     question_ids = {str(q.get("id")) for q in (payload.get("questions") or [])
                     if q.get("id")}
+    question_ids |= {str(q.get("id"))
+                     for q in (payload.get("questions_for_the_field") or [])
+                     if q.get("id")}
     problems = verify_step2(output, allowed, urls, question_ids or None)
     if problems:
         raise StepFailed(
@@ -251,6 +270,30 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
             break
 
     return output.model_dump(), usage, _sources_with_patterns(retrieved, output)
+
+
+def _send_to_the_field(output: Step2Output,
+                       questions: Sequence[Mapping[str, Any]]) -> None:
+    """検索せずに、そのまま現地確認へ回す。
+
+    **これは諦めではなく、判断です。** 公表されていないと分かっているものを
+    検索して「その統計は存在しません」という報告を持ち帰るより、最初から
+    現地確認に回すほうが、正確で、速く、安い。
+
+    ``what_would_settle_it`` には STEP1 の ``what_would_answer_it`` を使います。
+    問いを立てた段で調べ方まで決めさせてあるので、ここで考え直しません。
+    """
+    known = {str(q.question_id) for q in output.open_questions}
+    for question in questions:
+        qid = str(question.get("id") or "")
+        if not qid or qid in known:
+            continue
+        output.open_questions.append(UnansweredQuestion(
+            question_id=qid,
+            why=str(question.get("why_not_searchable")
+                    or "公表資料に無いことが分かっているため、検索していません。"),
+            what_would_settle_it=str(question.get("what_would_answer_it") or "")
+            or "現地確認または自治体への照会。"))
 
 
 # --------------------------------------------------------------- 2 周目以降

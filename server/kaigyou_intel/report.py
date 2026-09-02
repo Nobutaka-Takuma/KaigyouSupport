@@ -236,9 +236,14 @@ def _inquiry_block(inquiry: Mapping[str, Any] | None) -> list[str]:
         lines += [f"この商圏について **{len(questions)} 件の問い**を立て、"
                   f"**{answered} 件**に外部情報で答えが出ました。", ""]
 
+    assumptions = {str(a.get("id")): a for a in (inquiry.get("assumptions") or [])}
     for question in questions:
         qid = str(question.get("id") or "")
         lines += [f"### {qid}　{question.get('question', '')}", ""]
+        # **なぜこの問いが生まれたのか**を先に出します（指示書 §57）。
+        # 問いだけを並べると、読んだ人には「なぜこれを訊いたのか」が
+        # 分かりません。**そこが、この文書と地域紹介との違いです。**
+        lines += _why_this_question(question, assumptions)
         if question.get("why_it_matters"):
             lines += [f"**答えが出ると何が変わるか**　{question['why_it_matters']}", ""]
         if question.get("what_would_answer_it"):
@@ -250,6 +255,48 @@ def _inquiry_block(inquiry: Mapping[str, Any] | None) -> list[str]:
         lines += _hypothesis_lines(orphans, facts)
 
     lines += _open_question_lines(inquiry.get("open_questions") or [], questions)
+    return lines
+
+
+#: 問いの生まれ方の表示名。**どこから来た問いかで、読み方が変わります。**
+#: 手元のデータと外部の状況がぶつかって出た問いは、片方だけを見て立てた問い
+#: より重い——確かめていない前提に当たっている見込みが高いためです。
+_TRIGGER_LABEL = {
+    "data_external_conflict": "手元のデータと、外部で見つかった事実が食い違う",
+    "present_future_conflict": "いまの数字と、将来の数字が食い違う",
+    "deviation_from_peers": "周辺と大きく違う",
+    "inconsistent_measures": "手元の指標同士が噛み合わない",
+    "future_assumption": "将来についての前提を疑う",
+    "other": "",
+}
+
+
+def _why_this_question(question: Mapping[str, Any],
+                       assumptions: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """この問いが、どの前提を疑って生まれたのか（指示書 §53・§57）。
+
+    **これが無いと、問いは思いつきに見えます。** 「区画整理の保留地は残って
+    いるか」だけを読んでも、なぜそれを訊くのかは分かりません。「将来推計人口は
+    住宅供給を織り込んでいる、という前提を置いていた」と並べて初めて、
+    それが**判断の土台を確かめる問い**だと分かります。
+    """
+    lines: list[str] = []
+    assumption = assumptions.get(str(question.get("assumption_id") or ""))
+    if assumption:
+        lines += [f"**疑っている前提**　{assumption.get('statement', '')}"]
+        if assumption.get("if_wrong"):
+            lines.append(f"　外れていた場合：{assumption['if_wrong']}")
+        lines.append("")
+    trigger = question.get("trigger") or {}
+    facts = [str(f) for f in (trigger.get("facts") or []) if f]
+    if facts:
+        label = _TRIGGER_LABEL.get(str(trigger.get("type")), "")
+        head = f"**この問いが出たわけ**{'（' + label + '）' if label else ''}"
+        lines += [head, ""]
+        lines += [f"- {fact}" for fact in facts]
+        if trigger.get("reason"):
+            lines.append(f"- → {trigger['reason']}")
+        lines.append("")
     return lines
 
 
@@ -291,7 +338,8 @@ def _open_question_lines(open_questions: Sequence[Mapping[str, Any]],
     lines = ["### 答えが出なかった問い（開業前に確かめること）", ""]
     for item in open_questions:
         qid = str(item.get("question_id") or "")
-        lines += [f"**{qid}　{text.get(qid, '')}**", ""]
+        # 問いの文が引けないときは id だけ。**空の見出しを出しません。**
+        lines += [f"**{qid}　{text[qid]}**" if text.get(qid) else f"**{qid}**", ""]
         if item.get("why"):
             lines.append(f"- 公表資料では答えが出なかった理由：{item['why']}")
         if item.get("what_would_settle_it"):
@@ -1121,6 +1169,8 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         step2_out = (cur.fetchone() or {}).get("output_json") or {}
         inquiry = {
             "questions": step1_out.get("questions") or [],
+            # 疑っていた前提。**問いの意味はここで決まります。**
+            "assumptions": step1_out.get("assumptions") or [],
             "hypotheses": step2_out.get("hypotheses") or [],
             "external_facts": step2_out.get("external_facts") or [],
             "open_questions": step2_out.get("open_questions") or [],

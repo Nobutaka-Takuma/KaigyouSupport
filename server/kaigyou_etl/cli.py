@@ -1356,6 +1356,25 @@ def _print_question_quality() -> int:
         for lever, count in summary["levers"]:
             print(f"    {lever}　{count} 件")
 
+    # **良い問いの定義そのものを数えます。** 既に持っているデータから
+    # 見落とされている前提を発見し、それを外部情報で検証できた問い。
+    questioned = summary.get("questioned_an_assumption", 0)
+    if questioned:
+        print()
+        print(f"  前提を疑って生まれた問い    {questioned:4d} 件"
+              f"{_pct(questioned, total)}")
+        print(f"    うち判断が動いた          "
+              f"{summary.get('moved_and_questioned', 0):4d} 件")
+
+    triggers = [t for t in summary.get("by_trigger", []) if t["questions"]]
+    if len(triggers) > 1:
+        print()
+        print("  問いの生まれ方ごと")
+        print("    生まれ方                          問い  答えが出た  判断が動いた")
+        for row in triggers:
+            print(f"    {row['trigger_type']:<28} {row['questions']:4d}"
+                  f"  {row['settled']:9d}  {row['moved_a_decision']:11d}")
+
     versions = summary["by_prompt_version"]
     if len(versions) > 1:
         # 版を跨いで平均しません。直した効果が薄まって見えます。
@@ -1365,6 +1384,17 @@ def _print_question_quality() -> int:
         for row in versions:
             print(f"    {row['prompt_version']:<14} {row['questions']:4d}"
                   f"  {row['settled']:9d}  {row['moved_a_decision']:11d}")
+
+    # 検索に回して繰り返し空振りしている問い。**台帳に足す候補です。**
+    candidates = summary.get("dead_end_candidates") or []
+    if candidates:
+        print()
+        print("  検索に回して、繰り返し空振りしている問い")
+        print("    → config/dead_ends.yaml に足すと、次からは検索せずに")
+        print("      現地確認へ回ります。**足すかどうかは人が決めてください。**")
+        print("      機械が勝手に塞ぐと、公表され始めたものに気づけません。")
+        for row in candidates[:8]:
+            print(f"    {row['times']} 回  {row['examples'][0][:56]}")
 
     dead = [r for r in summary["rows"]
             if not r["settled"] and not r["left_to_the_field"]]

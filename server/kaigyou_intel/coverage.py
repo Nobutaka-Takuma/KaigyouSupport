@@ -43,6 +43,7 @@ def inquiry_from_steps(step1: Mapping[str, Any] | None,
     two = step2 or {}
     return {
         "questions": list(one.get("questions") or []),
+        "assumptions": list(one.get("assumptions") or []),
         "patterns": list(one.get("patterns") or []),
         "facts": list(one.get("facts") or []),
         "hypotheses": list(two.get("hypotheses") or []),

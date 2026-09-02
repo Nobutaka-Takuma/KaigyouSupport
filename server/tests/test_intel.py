@@ -539,7 +539,9 @@ def test_the_step1_schema_does_not_ask_for_benchmarks():
     します。スキーマに benchmarks を戻すと、LLM が数字を作り始めます。
     """
     assert set(Step1Output.model_fields) == {
-        "facts", "patterns", "not_determinable", "surroundings", "questions"}
+        "facts", "patterns", "not_determinable", "surroundings", "questions",
+        # 問いはここから生まれます（指示書 §53）。数値を伴う欄ではありません。
+        "assumptions"}
     assert "measure_key" in Fact.model_fields
     # surroundings は外部情報の置き場所で、FACT の材料ではありません。
     # 数字を伴う欄（percentile / rank / benchmark）を足さないこと。
@@ -1959,10 +1961,42 @@ def test_step1_is_told_which_questions_have_public_answers():
 
     医院の経営方針・患者の居住地別内訳・自由診療比率は、どこにも公表されて
     いません。それを尋ねると、STEP2 の検索上限と費用が空振りに消えます。
+
+    以前はプロンプトに禁止事項として並べていました。**それでは足りません。**
+    「市内の歯科衛生士・歯科医師の年齢構成」は禁止の語に当たらず、公的統計に
+    ありそうな顔をしていて、実際には市区町村単位では公表されていません。
+    いまは実測でできた台帳（config/dead_ends.yaml）を渡します。
     """
+    from kaigyou_intel.steps.step1_features import _dead_end_block
+
     text = cfg.prompt_text("step1_features.md")
-    assert "公表資料で答えが出る質問だけを書く" in text
-    assert "自由診療比率" in text
+    # 検索するかどうかを決める欄が、プロンプトで説明されていること。
+    assert "researchability" in text
+    assert "`low` の問いは検索しません" in text
+    # 台帳が本文に差し込まれること。
+    assert "{dead_ends}" in text
+    rendered = _dead_end_block()
+    assert "自由診療比率" in rendered
+    assert "歯科医師・歯科衛生士の年齢構成" in rendered
+    # **代わりに何をすればよいか**まで渡すこと。塞ぐだけでは、次に何を
+    # 問えばよいかが分かりません。
+    assert "代わりに" in rendered
+
+
+def test_the_dead_end_ledger_says_where_it_looked():
+    """「無いから無い」では、あとから直せません。
+
+    公表され始めたものに気づけるのは、どこを探して無かったのかが書いて
+    あるときだけです。
+    """
+    entries = cfg.dead_ends()
+    assert entries, "台帳が空です"
+    for entry in entries:
+        assert entry.get("topic"), entry
+        assert entry.get("why"), f"{entry.get('topic')} に why がありません"
+        assert entry.get("instead"), (
+            f"{entry.get('topic')} に instead がありません。"
+            "塞ぐだけでは、次に何を問えばよいかが分かりません")
 
 
 def test_the_cache_breakpoint_sits_on_the_part_that_does_not_change():
@@ -4586,7 +4620,14 @@ def test_a_question_carries_how_to_answer_it():
     from kaigyou_intel.schemas import Question
 
     assert set(Question.model_fields) == {
-        "id", "pattern_id", "question", "why_it_matters", "what_would_answer_it"}
+        "id", "pattern_id", "question", "why_it_matters", "what_would_answer_it",
+        # どこから生まれた問いか（§57）。問いだけを保存してはいけません。
+        "assumption_id", "trigger",
+        # 検索するかどうかを決める欄（§55）。**researchability だけが
+        # 検索の可否を決めます。** 残りは順序づけと、あとから
+        # 「どんな問いが効いたか」を数えるためのものです。
+        "researchability", "researchability_reason", "decision_levers",
+        "importance", "already_in_data"}
 
 
 def test_not_knowing_and_being_wrong_are_different_verdicts():
@@ -5832,3 +5873,302 @@ def test_the_api_does_not_start_a_step_it_has_no_key_for(monkeypatch):
                         lambda conn: ticked.append(True))
     router._start_soon()
     assert ticked == []
+
+
+# ============================================================ 問いのセンス
+#
+# 良い問いとは、**既に持っているデータから「見落とされている重要な前提」を
+# 発見し、その前提を外部情報によって検証できる問い**（指示書 §51）。
+#
+# 実測（沼津）で出た悪い問い：
+#   「市内の歯科衛生士・歯科医師の年齢構成は」
+#   → 市区町村単位では公表されていません。**分かっているのに毎回検索して
+#     いました。**
+# 同じ分析で出た良い問い：
+#   「復興土地区画整理事業中央工区の保留地・住宅供給計画は、将来推計人口の
+#     減少を緩和しうる規模か」
+#   → 手元の将来推計（減少）と外部の事実（区画整理）を突き合わせ、
+#     「推計は住宅供給を織り込んでいる」という前提を疑っています。
+
+def _question(**overrides):
+    from kaigyou_intel.schemas import Question
+
+    data = {
+        "id": "Q001", "pattern_id": "P001",
+        "question": "区画整理の保留地は、将来推計人口の減少を緩和しうる規模か",
+        "why_it_matters": "減少を前提にした立地判断そのものが変わる",
+        "what_would_answer_it": "市の区画整理事業計画書（保留地の残数と計画戸数）",
+        "assumption_id": "A001",
+        "trigger": {"type": "data_external_conflict",
+                    "facts": ["将来推計人口は2040年まで減少予測",
+                              "中央工区で土地区画整理事業が進行中"],
+                    "reason": "住宅供給が推計に織り込まれているか確かめられる"},
+        "researchability": "high",
+        "researchability_reason": "市の事業計画書は公表されている",
+        "decision_levers": ["立地判断"],
+        "importance": "high",
+    }
+    data.update(overrides)
+    return Question(**data)
+
+
+def _step1_with_questions(**overrides):
+    from kaigyou_intel.schemas import Assumption, Step1Output
+
+    data = {
+        "facts": [Fact(id="F001", statement="2040年の推計人口は8,500人",
+                       measure_key="population"),
+                  Fact(id="F002", statement="歯科医院は8院",
+                       measure_key="dental_clinics")],
+        "patterns": [Pattern(id="P001", title="将来人口は減少する見込み",
+                             evidence=["F001", "F002"], evidence_summary="…",
+                             importance="medium",
+                             research_questions=["なぜか"])],
+        "assumptions": [Assumption(
+            id="A001",
+            statement="将来推計人口は、この地区の住宅供給を織り込んでいる",
+            rests_on=["F001"],
+            if_wrong="人口が増える側に振れ、立地判断が変わる")],
+        "questions": [_question()],
+    }
+    data.update(overrides)
+    return Step1Output(**data)
+
+
+def test_a_question_that_the_data_already_answers_is_rejected():
+    """**手元にある答えを、外部に訊きに行かせない。**
+
+    「昼間人口は何人か」「周辺の歯科医院は何件か」はデータセットに書いて
+    あります（指示書 §62）。それを外部調査の問いにすると、検索の上限が
+    既に知っていることに使われます。
+    """
+    from kaigyou_intel.schemas import verify_step1
+
+    output = _step1_with_questions(
+        questions=[_question(question="昼間人口は何人か", already_in_data=True)])
+    problems = verify_step1(output, {"population", "dental_clinics"})
+    assert any("already_in_data" in p.problem for p in problems), problems
+
+
+def test_a_question_that_moves_nothing_is_rejected():
+    """答えが出ても何も動かない問いは、知識が増えるだけです（§59）。
+
+    検索の上限は決まっているので、そこに使うと動かせる問いに回りません。
+    """
+    from kaigyou_intel.schemas import verify_step1
+
+    output = _step1_with_questions(
+        questions=[_question(question="この地区の区画整理はいつ完了したか",
+                             decision_levers=[])])
+    problems = verify_step1(output, {"population", "dental_clinics"})
+    assert any("decision_levers" in p.problem for p in problems), problems
+
+
+def test_a_question_from_a_single_fact_is_not_a_cross_check():
+    """**1 つの事実からしか出ていない問いは、突き合わせではありません**（§58）。
+
+    「若年人口が多い」だけからは「なぜ若者が多いのか」しか出ず、それは
+    地域紹介の質問です。
+    """
+    from kaigyou_intel.schemas import verify_step1
+
+    output = _step1_with_questions(questions=[_question(
+        trigger={"type": "deviation_from_peers",
+                 "facts": ["20〜39歳が周辺より15ポイント多い"], "reason": "r"})])
+    problems = verify_step1(output, {"population", "dental_clinics"})
+    assert any("突き合わせ" in p.problem for p in problems), problems
+
+
+def test_an_unresearchable_question_must_say_where_it_looked():
+    """`low` は失敗ではありませんが、行き先が要ります（§56）。
+
+    どこに公表されていないのかが、そのまま現地確認の理由になります。
+    """
+    from kaigyou_intel.schemas import verify_step1
+
+    output = _step1_with_questions(questions=[_question(
+        researchability="low", researchability_reason="")])
+    problems = verify_step1(output, {"population", "dental_clinics"})
+    assert any("researchability" in p.problem for p in problems), problems
+
+    ok = _step1_with_questions(questions=[_question(
+        researchability="low",
+        researchability_reason="医師・歯科医師・薬剤師統計は都道府県単位まで")])
+    assert not verify_step1(ok, {"population", "dental_clinics"})
+
+
+def test_the_good_question_passes():
+    """区画整理の例が、そのまま通ること。**これが目標の形です。**"""
+    from kaigyou_intel.schemas import verify_step1
+
+    assert not verify_step1(_step1_with_questions(),
+                            {"population", "dental_clinics"})
+
+
+def test_a_job_from_before_questions_existed_is_not_judged():
+    """古い形（questions が空）に新しい検算を掛けない。
+
+    掛けると、問いを第一級にする前に保存されたジョブが再実行のたびに落ちます。
+    """
+    from kaigyou_intel.schemas import Step1Output, verify_step1
+
+    old = Step1Output(
+        facts=[Fact(id="F001", statement="s", measure_key="population"),
+               Fact(id="F002", statement="s", measure_key="dental_clinics")],
+        patterns=[Pattern(id="P001", title="t", evidence=["F001", "F002"],
+                          evidence_summary="s", importance="medium",
+                          research_questions=["q"])])
+    assert not verify_step1(old, {"population", "dental_clinics"})
+
+
+def test_a_question_known_to_have_no_public_answer_is_never_searched():
+    """**これが「なぜ毎回調べるのか」への答えです。**
+
+    公表されていないと分かっている問いは、検索に回しません。落とすのでも
+    ありません——そのまま「開業前に現地で確かめること」になります（§56）。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    step1 = {
+        "patterns": [{"id": "P001", "title": "t", "evidence_summary": "s",
+                      "importance": "high", "research_questions": ["q"]}],
+        "questions": [
+            _question().model_dump(),
+            _question(id="Q002",
+                      question="市内の歯科衛生士・歯科医師の年齢構成は",
+                      researchability="low",
+                      researchability_reason="医師・歯科医師・薬剤師統計は"
+                                             "都道府県単位までで、市区町村別の"
+                                             "年齢階級は公表されていない",
+                      what_would_answer_it="県の歯科医師会に照会する").model_dump(),
+        ],
+    }
+    payload = step2_research.build_input(step1, {"location": {"name": "沼津"}})
+    # 検索に回るのは researchability が low でないものだけ。
+    assert [q["id"] for q in payload["questions"]] == ["Q001"]
+    assert [q["id"] for q in payload["questions_for_the_field"]] == ["Q002"]
+
+
+def test_the_unsearched_question_still_reaches_the_report(monkeypatch):
+    """検索しなかった問いが、**そのまま現地確認の項目になる**こと。
+
+    黙って消すと、「調べていない」と「調べようがない」の区別がつきません。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    calls: list[dict] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, **kw):
+        calls.append({"schema": schema, "user": user})
+        if schema is None:
+            return llm.Result(
+                parsed=None, text="調査結果。", usage=llm.Usage(web_searches=1),
+                model="m",
+                sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html",
+                          "title": "t", "page_age": None}])
+        return llm.Result(parsed=_step2_output(), usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    step1 = {
+        "patterns": [{"id": "P001", "title": "t", "evidence_summary": "s",
+                      "importance": "high", "research_questions": ["q"]}],
+        "questions": [_question(
+            id="Q002", question="市内の歯科衛生士の年齢構成は",
+            researchability="low",
+            researchability_reason="市区町村別の年齢階級は公表されていない",
+            what_would_answer_it="県の歯科医師会に照会する").model_dump()],
+    }
+    payload = step2_research.build_input(step1, {"location": {"name": "沼津"}})
+    output, _, _ = step2_research.run(payload)
+
+    # 検索の本文に、その問いが混ざっていないこと。
+    research = [c for c in calls if c["schema"] is None]
+    assert all("歯科衛生士の年齢構成" not in c["user"] for c in research), \
+        "調べないと決めた問いを検索に渡している"
+    # それでも記録には残り、決着のさせ方が付いていること。
+    field = {q["question_id"]: q for q in output["open_questions"]}
+    assert "Q002" in field
+    assert "公表されていない" in field["Q002"]["why"]
+    assert "歯科医師会に照会" in field["Q002"]["what_would_settle_it"]
+
+
+def test_the_report_says_which_assumption_the_question_was_doubting(dataset):
+    """問いだけを並べると、なぜそれを訊いたのかが分かりません（§57）。
+
+    **そこが、この文書と地域紹介との違いです。**
+    """
+    from kaigyou_intel.report import to_markdown
+
+    inquiry = {
+        "questions": [_question().model_dump()],
+        "assumptions": [{
+            "id": "A001",
+            "statement": "将来推計人口は、この地区の住宅供給を織り込んでいる",
+            "rests_on": ["F001"],
+            "if_wrong": "人口が増える側に振れ、立地判断が変わる"}],
+        "hypotheses": [], "external_facts": [], "open_questions": [],
+    }
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           [], None, None, inquiry)
+    assert "疑っている前提" in markdown
+    assert "住宅供給を織り込んでいる" in markdown
+    assert "外れていた場合" in markdown
+    # 突き合わせた事実も出ること。1 つの事実からは良い問いは出ません。
+    assert "手元のデータと、外部で見つかった事実が食い違う" in markdown
+    assert "中央工区で土地区画整理事業が進行中" in markdown
+
+
+def test_a_question_sent_to_the_field_is_not_counted_as_a_wasted_search(conn,
+                                                                        dataset):
+    """最初から現地確認へ回した問いを、空振りに数えない。
+
+    **あれは判断であって、失敗ではありません。** 空振りに数えると、正しく
+    判断するほど成績が下がります。
+    """
+    from kaigyou_intel import jobs
+    from kaigyou_intel import question_quality as q
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v"})
+        jobs.finish_step(conn, job_id, 1, {"questions": [
+            _question(id="Q001", researchability="low",
+                      researchability_reason="公表されていない").model_dump(),
+            _question(id="Q002", researchability="high").model_dump()]}, {})
+        jobs.start_step(conn, job_id, 2, {}, {})
+        jobs.finish_step(conn, job_id, 2, {
+            "open_questions": [{"question_id": "Q001", "why": "w",
+                                "what_would_settle_it": "現地で確かめる"}]}, {})
+
+        summary = q.across_jobs(conn)
+        assert summary["searched"] == 1, "現地へ回した問いを検索に数えている"
+        assert summary["wasted_searches"] == 1, "Q002 は検索して空振り"
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_old_string_list_does_not_smuggle_the_question_back_in():
+    """**外したつもりで外れていない、がいちばん質が悪い。**
+
+    `questions` と `research_questions` は同じ問いを別の形で持っています。
+    片方だけ落としても、STEP2 の調査プロンプトは「この PATTERN の
+    research_questions にだけ答えてください」と言うので、そのまま検索されます。
+    画面にもレポートにも何も出ません。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    unsearchable = "市内の歯科衛生士・歯科医師の年齢構成は"
+    step1 = {
+        "patterns": [{"id": "P001", "title": "t", "evidence_summary": "s",
+                      "importance": "high",
+                      "research_questions": [unsearchable, "保留地は残っているか"]}],
+        "questions": [_question(
+            id="Q002", question=unsearchable, researchability="low",
+            researchability_reason="市区町村別の年齢階級は公表されていない",
+        ).model_dump()],
+    }
+    payload = step2_research.build_input(step1, {"location": {"name": "沼津"}})
+    asked = payload["patterns"][0]["research_questions"]
+    assert unsearchable not in asked, "古い文字列の並びから検索に渡っている"
+    assert "保留地は残っているか" in asked

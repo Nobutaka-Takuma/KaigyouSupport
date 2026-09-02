@@ -76,6 +76,12 @@ def outcomes(step1: Mapping[str, Any] | None, step2: Mapping[str, Any] | None,
             "question_id": qid,
             "pattern_id": str(question.get("pattern_id") or ""),
             "question": str(question.get("question") or ""),
+            # **検索に回したかどうか。** low は最初から現地確認へ回すので、
+            # 「答えが出なかった」に数えると、判断が失敗に見えます。
+            "researchability": str(question.get("researchability") or "medium"),
+            # 疑っていた前提。**これがある問いと無い問いは、別の生き物です。**
+            "questioned_an_assumption": bool(question.get("assumption_id")),
+            "trigger_type": str((question.get("trigger") or {}).get("type") or ""),
             "hypotheses": len(answers),
             # 判定が付いたか。UNCERTAIN しか無い問いは「答えが出ていない」。
             "settled": bool(settled),
@@ -151,6 +157,11 @@ def across_jobs(conn: psycopg.Connection, limit: int = 200) -> dict[str, Any]:
 
     settled = [r for r in rows if r["settled"]]
     moved = [r for r in settled if r["levers"]]
+    # **検索に回したのに空振りした問い。** 最初から現地確認へ回した問い
+    # （researchability: low）は数えません。あれは判断であって、空振りでは
+    # ありません。
+    searched = [r for r in rows if r["researchability"] != "low"]
+    wasted = [r for r in searched if not r["settled"]]
     return {
         # 問いを記録していない古いジョブは数に入れません。母数に混ぜると、
         # 「答えが出た割合」が版の違いで下がったように見えます。
@@ -165,8 +176,67 @@ def across_jobs(conn: psycopg.Connection, limit: int = 200) -> dict[str, Any]:
                                       if r["needed_a_second_round"]]),
         "levers": Counter(l for r in moved for l in r["levers"]).most_common(),
         "by_prompt_version": _by_version(rows),
+        # 疑った前提から出た問いと、そうでない問い。**良い問いの定義そのもの
+        # を数えます**（既に持っているデータから見落とされている前提を発見し、
+        # それを外部情報で検証できる問い）。
+        "questioned_an_assumption": len(
+            [r for r in rows if r["questioned_an_assumption"]]),
+        "moved_and_questioned": len(
+            [r for r in moved if r["questioned_an_assumption"]]),
+        "by_trigger": _by_trigger(rows),
+        # 検索に回して空振りした問い。**台帳に足す候補です。**
+        "searched": len(searched),
+        "wasted_searches": len(wasted),
+        "dead_end_candidates": _dead_end_candidates(wasted),
         "rows": rows,
     }
+
+
+def _by_trigger(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """どの生まれ方の問いが、実際に判断を動かしたか。
+
+    **これが「問いのセンス」を測れる唯一の形です。** 手元のデータと外部の
+    事実がぶつかって出た問いと、思いついて出た問いのどちらが効いたのかは、
+    やってみないと分かりません。
+    """
+    kinds: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        kinds.setdefault(row["trigger_type"] or "（記録なし）", []).append(row)
+    out = []
+    for kind, group in sorted(kinds.items(), key=lambda kv: -len(kv[1])):
+        settled = [r for r in group if r["settled"]]
+        out.append({
+            "trigger_type": kind,
+            "questions": len(group),
+            "settled": len(settled),
+            "moved_a_decision": len([r for r in settled if r["levers"]]),
+        })
+    return out
+
+
+def _dead_end_candidates(wasted: Sequence[Mapping[str, Any]],
+                         at_least: int = 2) -> list[dict[str, Any]]:
+    """検索に回したのに、**繰り返し**空振りしている問い。
+
+    `config/dead_ends.yaml` に足す候補です。**足すかどうかは人が決めます。**
+    機械が勝手に塞ぐと、あとから公表され始めたものに永久に気づけません。
+
+    まとめ方は素朴です——問いの文から共通する語を拾うのではなく、**同じ語で
+    始まる問いを数える**だけ。凝った寄せ方をすると、なぜ同じ扱いになったのかが
+    人に説明できなくなり、塞ぐ判断の根拠にできません。
+    """
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for row in wasted:
+        groups.setdefault(_gist(row["question"]), []).append(row)
+    return [{"gist": gist, "times": len(rows),
+             "examples": [r["question"] for r in rows[:3]]}
+            for gist, rows in sorted(groups.items(), key=lambda kv: -len(kv[1]))
+            if len(rows) >= at_least]
+
+
+def _gist(question: str) -> str:
+    """問いの見出し。**同じことを訊いているかの、粗い当たり**にしか使いません。"""
+    return "".join(question.split())[:24] or "（空）"
 
 
 def _by_version(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

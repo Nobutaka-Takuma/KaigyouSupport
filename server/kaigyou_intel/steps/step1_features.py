@@ -96,6 +96,41 @@ def requirement_frame(frame: Mapping[str, Any]) -> str:
     return "\n".join(lines).strip() or "（設定されていません）"
 
 
+def _dead_end_block() -> str:
+    """調べても答えの出ないことを、**問いを立てる前に**渡す。
+
+    実測：沼津の分析で「市内の歯科衛生士・歯科医師の年齢構成」「在宅療養
+    支援歯科診療所の届出数」を問いに立て、検索し、どちらも回答不能でした。
+    **どちらも公表されていないことは分かっています。** それでも毎回検索して
+    いたのは、分かっていることをモデルに渡していなかったからです。
+
+    検索の上限は決まっているので、ここに使ったぶんは答えの出る問いに
+    回りません。台帳は `config/dead_ends.yaml`（人が育てます）。
+
+    **「調べるな」ではありません。** 重要なら `researchability: low` として
+    残り、そのまま「開業前に現地で確かめること」になります。
+    """
+    entries = cfg.dead_ends()
+    if not entries:
+        return ""
+    lines = [
+        "#### 調べても出ないと分かっていること",
+        "",
+        "**次のものは、公表されていないことが実測で分かっています。**",
+        "もう一度問いに立てて検索しないでください。それでも重要なら、",
+        "`researchability: low` として現地確認へ回してください。",
+        "",
+    ]
+    for entry in entries:
+        lines.append(f"- **{entry.get('topic', '')}**")
+        if entry.get("why"):
+            lines.append(f"  - なぜ無いのか：{entry['why']}")
+        if entry.get("instead"):
+            lines.append(f"  - 代わりに：{entry['instead']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _factor_frame(frame: Mapping[str, Any],
                   available: Iterable[str] | None = None) -> str:
     """歯科経営の定性要因を、プロンプトに差し込める形にする。
@@ -333,7 +368,8 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
               .replace("{crossing_examples}", _bullets(
                   (frame.get("crossing") or {}).get("examples")))
               .replace("{qualitative_factors}",
-                       _factor_frame(frame, citable_keys(payload))))
+                       _factor_frame(frame, citable_keys(payload)))
+              .replace("{dead_ends}", _dead_end_block()))
 
     user = (
         "以下が基礎商圏データです。**FACT にできるのはこの中の数字だけです。**\n\n"

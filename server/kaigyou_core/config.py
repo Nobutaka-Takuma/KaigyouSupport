@@ -170,6 +170,22 @@ def prompt_text(name: str, category: str | None = None) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def dead_ends() -> list[dict[str, Any]]:
+    """調べても答えの出ない問いの台帳（config/dead_ends.yaml）。
+
+    **業態をまたいで共有します。** 「市区町村単位の医師の年齢構成が無い」は
+    歯科でも医科でも同じ話で、業態ごとに書き分けると片方だけ古くなります。
+
+    無くても分析は成立するので、見つからないときは空で返します。台帳が
+    無いことで分析全体が落ちるのは割に合いません。
+    """
+    try:
+        data = load_yaml(config_dir() / "dead_ends.yaml")
+    except ConfigNotFound:
+        return []
+    return list(data.get("dead_ends") or [])
+
+
 def insights_config(category: str | None = None) -> dict[str, Any]:
     """複合指標の定義。無くてもデータセットは組み立てられる。
 

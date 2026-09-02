@@ -97,6 +97,95 @@ class Surroundings(BaseModel):
         description="調べたが確認できなかったこと。無ければ空文字")
 
 
+#: 仮説が正しかったときに動きうるもの。**config/<業態>/hypotheses.yaml の
+#: screening.levers と同じ並びにしてください。** 片方だけ足すと、設定に
+#: 書いてあるのにスキーマが受け付けない選択肢ができます。
+#:
+#: なぜ欄にするか。「思いつきの仮説」と「戦略が変わる仮説」を、文章の中で
+#: 区別するのは読み手の仕事になります。欄なら空にできません。
+DecisionLever = Literal["診療コンセプト", "設備投資", "診療時間",
+                        "人員体制", "立地判断", "患者層"]
+
+
+#: どこから問いが生まれたか（指示書 §52・§57）。**問いだけを保存しては
+#: いけません。**なぜその問いが生まれたのかが残らないと、あとから「この AI は
+#: なぜこれを訊いたのか」が誰にも分かりません。
+#:
+#: 型は、実際に効いた発生源を並べたものです。**思いつきではなく、2 つ以上の
+#: 事実の突き合わせから出た問いだけが良い問いになります。**
+TriggerType = Literal[
+    # 手元のデータと外部の状況が食い違う。**いちばん当たりが多い型です。**
+    # 例：将来人口は減少予測、しかし大規模な土地区画整理事業が進行中。
+    "data_external_conflict",
+    # 現在のデータと将来のデータが食い違う。例：人口は減少、しかし駅前で再開発。
+    "present_future_conflict",
+    # 周辺との大きな乖離。ただし「なぜ若者が多い？」で止めないこと。
+    "deviation_from_peers",
+    # 手元の指標同士が噛み合わない。例：人口は多い・昼間人口は少ない・駅は多い。
+    "inconsistent_measures",
+    # 将来の重要な前提を疑う。再開発・区画整理・新駅・大型施設・医療機関の開廃。
+    "future_assumption",
+    "other",
+]
+
+#: 公表情報で確かめられる見込み（指示書 §55）。**この 1 つだけが検索するか
+#: どうかを決めます。**
+#:
+#: 実測でいちばん多い無駄がこれでした：「市区町村単位の歯科医師・歯科衛生士の
+#: 年齢構成」「在宅療養支援歯科診療所の届出数」。**答えが公表されていないと
+#: 既に分かっているのに、毎回検索していました。** 検索の上限は決まっている
+#: ので、そこに使ったぶんは、答えの出る問いに回りません。
+#:
+#: `low` は失敗ではありません。**「重要だが調べられない」は、そのまま
+#: 「開業前に現地で確かめること」になります**（指示書 §56）。
+Researchability = Literal[
+    "high",    # 官公庁・自治体・事業者が公表している見込みが高い
+    "medium",  # あるかもしれないが、粒度や公開範囲が読めない
+    "low",     # 公表されていないと分かっている。**検索しません**
+]
+
+
+class Assumption(BaseModel):
+    """この分析が置いている前提（指示書 §53・§58）。
+
+    **良い問いは、ここを経由して生まれます。**
+
+        FACT → PATTERN → 矛盾・乖離 → **ASSUMPTION** → QUESTION
+
+    この段が無いと、問いは「なぜ若年層が多いのか」で止まります。悪くは
+    ありませんが、**判断は動きません。** 動くのは「この将来人口推計を、
+    そのまま開業判断の前提にしてよいか」のほうです。前者はデータの説明を
+    求め、後者はデータの信用を問うています。
+
+    実測（沼津）：将来推計人口は減少。ところが復興土地区画整理事業の中央工区が
+    進行中でした。**「推計は住宅供給を織り込んでいる」という前提**が、誰にも
+    確かめられないまま分析の土台になっていました。
+    """
+
+    id: str = Field(description="A001 のような通し番号")
+    statement: str = Field(
+        description="この分析が正しいとして扱っている前提を 1 文で。"
+                    "「〜は〜である（と扱ってよい）」の形")
+    rests_on: list[str] = Field(
+        default_factory=list,
+        description="その前提を置いている根拠の FACT / PATTERN の id")
+    if_wrong: str = Field(
+        description="この前提が間違っていたら、どの判断がどう変わるのか")
+
+
+class QuestionTrigger(BaseModel):
+    """その問いを生んだ突き合わせ（指示書 §57）。"""
+
+    type: TriggerType
+    facts: list[str] = Field(
+        default_factory=list,
+        description="突き合わせた事実。**2 つ以上**書いてください。"
+                    "1 つしか書けないなら、それは突き合わせではありません")
+    reason: str = Field(
+        default="",
+        description="なぜこの 2 つを突き合わせると問いになるのか、1 文で")
+
+
 class Question(BaseModel):
     """PATTERN から出た「なぜこうなっているのか」の問い（指示書 §8）。
 
@@ -120,6 +209,35 @@ class Question(BaseModel):
         description="答えが出ると、どの経営判断が変わるのか。1〜2文")
     what_would_answer_it: str = Field(
         description="何を調べれば答えが出るのか。資料の種類・発行者まで具体的に")
+    #: 以下は**空でも受け付けます**——古い形の保存済み出力を読み直せなく
+    #: なるほうが困るためです。新しい出力では埋まります（プロンプトが求め、
+    #: verify_step1 が検算します）。
+    assumption_id: str | None = Field(
+        default=None,
+        description="この問いが疑っている ASSUMPTION の id（A001 など）")
+    trigger: QuestionTrigger | None = Field(
+        default=None, description="この問いを生んだ突き合わせ")
+    researchability: Researchability = Field(
+        default="medium",
+        description="公表情報で確かめられる見込み。low なら**検索しません**")
+    researchability_reason: str = Field(
+        default="",
+        description="なぜその見込みなのか。low なら、どこに無いのかまで")
+    #: 答えが出たとき何が動くか。**Hypothesis と同じ 6 つ**を使います。
+    #: 問いの段で書かせるのは、動かないと分かっている問いに検索を使わせない
+    #: ためです（指示書 §59）。
+    decision_levers: list[DecisionLever] = Field(
+        default_factory=list,
+        description="答えによって動きうるもの。1 つも無いなら問いにしない")
+    importance: Importance = Field(
+        default="medium", description="この意思決定にとっての重さ")
+    #: **手元のデータで既に答えが出ている問いを、外部に訊きに行かせない。**
+    #: 「昼間人口は何人か」「周辺の歯科医院は何件か」は、データセットに
+    #: 書いてあります（指示書 §62）。
+    already_in_data: bool = Field(
+        default=False,
+        description="手元のデータセットだけで答えが出るなら true。"
+                    "true の問いは出力しないでください")
 
 
 class Step1Output(BaseModel):
@@ -132,6 +250,9 @@ class Step1Output(BaseModel):
 
     facts: list[Fact] = Field(min_length=1)
     patterns: list[Pattern] = Field(min_length=1)
+    #: この分析が置いている前提（指示書 §53）。**問いはここから生まれます。**
+    #: 空でも受け付けます（古い形の読み出し互換）。
+    assumptions: list[Assumption] = Field(default_factory=list)
     #: PATTERN から出た問い。**空でも受け付けます**——古い形で保存された
     #: ジョブを読み直せなくなるほうが困るためです（expand → migrate →
     #: contract）。新しい出力では必ず埋まります（プロンプトが求めます）。
@@ -199,6 +320,11 @@ def verify_step1(output: Step1Output, allowed_measure_keys: set[str],
                     where=f"patterns[{pattern.id}].evidence",
                     problem=f"存在しない FACT を参照しています: {ref!r}"))
 
+    # **問いの検算は層の情報に依存しません。** 早期 return より前に置きます。
+    # 後ろに置いていたため、layer_of を渡さない呼び出しでは問いが一切
+    # 検算されませんでした。
+    problems += _verify_questions(output, fact_ids, seen_pattern_ids)
+
     if not layer_of:
         return problems
 
@@ -227,6 +353,69 @@ def verify_step1(output: Step1Output, allowed_measure_keys: set[str],
                      f"（{min_cross_layer} 件以上）。人口動態・産業雇用・競合の"
                      "提供体制・将来推計などを掛け合わせ、データ同士の矛盾や"
                      "構造的なギャップを指摘してください")))
+    return problems
+
+
+def _verify_questions(output: Step1Output, fact_ids: set[str],
+                      pattern_ids: set[str]) -> list[TraceProblem]:
+    """問いが、疑うに足る形をしているか（指示書 §51・§55・§62）。
+
+    **問いを立てた数は成績ではありません。** ここで見るのは、その問いが
+    次の段の検索を使うに値するかどうかです。検索の上限は決まっているので、
+    値しない問いに使ったぶんは、答えの出る問いに回りません。
+
+    古い形（`questions` が空）には掛けません。掛けると、問いを第一級にする
+    前に保存されたジョブが再実行のたびに落ちます。
+    """
+    if not output.questions:
+        return []
+    problems: list[TraceProblem] = []
+    assumption_ids = {a.id for a in output.assumptions}
+
+    for assumption in output.assumptions:
+        for ref in assumption.rests_on:
+            if ref not in fact_ids and ref not in pattern_ids:
+                problems.append(TraceProblem(
+                    where=f"assumptions[{assumption.id}].rests_on",
+                    problem=f"存在しない FACT / PATTERN を参照しています: {ref!r}"))
+
+    for question in output.questions:
+        where = f"questions[{question.id}]"
+        # **手元で答えが出る問いを、外部に訊きに行かせない。**「昼間人口は
+        # 何人か」はデータセットに書いてあります（指示書 §62）。
+        if question.already_in_data:
+            problems.append(TraceProblem(
+                where=where,
+                problem=("手元のデータで答えが出る問いです（already_in_data）。"
+                         "外部調査の問いにはしないでください。データに無い"
+                         "『なぜそうなっているのか』を問いにしてください")))
+        # 答えが出ても何も動かない問いは、知識が増えるだけです（§59）。
+        if not question.decision_levers:
+            problems.append(TraceProblem(
+                where=where,
+                problem=("答えによって動くものが 1 つも挙がっていません"
+                         "（decision_levers）。診療コンセプト・設備投資・"
+                         "診療時間・人員体制・立地判断・患者層のどれも動かない"
+                         "なら、その問いは出さないでください")))
+        # **low は失敗ではありませんが、行き先が要ります**（§56）。
+        if question.researchability == "low" and not question.researchability_reason:
+            problems.append(TraceProblem(
+                where=where,
+                problem=("researchability が low なのに理由がありません。"
+                         "どこに公表されていないのかを書いてください。"
+                         "これは検索せずに現地確認へ回す判断の根拠になります")))
+        if question.assumption_id and question.assumption_id not in assumption_ids:
+            problems.append(TraceProblem(
+                where=where,
+                problem=f"存在しない ASSUMPTION を参照しています: "
+                        f"{question.assumption_id!r}"))
+        # **1 つの事実から出た問いは、突き合わせではありません**（§58・§63）。
+        if question.trigger and len(question.trigger.facts) < 2:
+            problems.append(TraceProblem(
+                where=f"{where}.trigger",
+                problem=("突き合わせた事実が 1 つ以下です。良い問いは 2 つ以上の"
+                         "事実がぶつかるところから出ます（将来人口は減少予測、"
+                         "しかし区画整理事業が進行中、のように）")))
     return problems
 
 
@@ -281,16 +470,6 @@ class ExternalFact(BaseModel):
     #: 出ていた事実とは意味が違います。「調べ直した」という事実そのものが
     #: 記録で、それが消えると読み手には 1 周で出たように見えます。
     round: int = Field(default=1, description="システムが設定します（記入不要）")
-
-
-#: 仮説が正しかったときに動きうるもの。**config/<業態>/hypotheses.yaml の
-#: screening.levers と同じ並びにしてください。** 片方だけ足すと、設定に
-#: 書いてあるのにスキーマが受け付けない選択肢ができます。
-#:
-#: なぜ欄にするか。「思いつきの仮説」と「戦略が変わる仮説」を、文章の中で
-#: 区別するのは読み手の仕事になります。欄なら空にできません。
-DecisionLever = Literal["診療コンセプト", "設備投資", "診療時間",
-                        "人員体制", "立地判断", "患者層"]
 
 
 class EvidenceLink(BaseModel):
