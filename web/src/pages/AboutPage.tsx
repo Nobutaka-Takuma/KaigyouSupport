@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { Misreadings } from "../components/Misreadings";
 import { date, num } from "../lib/format";
 import type { DataStatus, Meta } from "../lib/types";
 
@@ -52,6 +53,12 @@ export function AboutPage() {
             本サービスが行わないこと: {meta.out_of_scope.join(" / ")}
           </p>
         )}
+      </section>
+
+      {/* 全部を開いた状態で出します。地図の脇では上位 3 件に絞っていますが、
+          ここは読みに来る場所なので畳みません。 */}
+      <section>
+        <Misreadings />
       </section>
 
       {meta && meta.caveats?.length > 0 && (

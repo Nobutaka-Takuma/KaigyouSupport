@@ -4736,3 +4736,141 @@ def test_the_report_stays_quiet_when_there_was_no_inquiry_recorded(dataset):
 
     markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
     assert "## 調査の記録" not in markdown
+
+
+# ================================================ 冒頭の調査カバレッジ
+def test_the_report_says_up_front_what_it_could_not_confirm(dataset):
+    """**結論より先に「何を確かめて、何が未確認か」を出す。**
+
+    ここが競合の資料に無いものです。ディーラーの無料商圏調査もコンサルの
+    提案書も、結論だけを載せます——載せない理由があるからで、「調べたが
+    分からなかった」と書くと、勧めている案件が弱く見えます。
+
+    読み手にとっては逆で、どこまで確かめられているかが分からないまま
+    数千万円の判断をすることになります。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    inquiry = {
+        "questions": [
+            {"id": "Q001", "pattern_id": "P001", "question": "なぜ若年が多いのか",
+             "why_it_matters": "夜間需要の見積もりが変わる",
+             "what_would_answer_it": "大学の公式サイト"},
+            {"id": "Q002", "pattern_id": "P002", "question": "昼間人口の中身は何か",
+             "why_it_matters": "診療時間の判断が変わる",
+             "what_would_answer_it": "経済センサス"},
+        ],
+        "hypotheses": [
+            {"id": "H001", "pattern_id": "P001", "question_id": "Q001",
+             "statement": "s", "status": "SUPPORTED", "reasoning": "r",
+             "evidence_links": [{"fact_id": "C001", "stance": "supports", "note": "n"}],
+             "confidence": "high", "changes": ["診療時間"],
+             "decision_impact": "平日夕方ではなく土曜に人員を寄せる。"},
+            {"id": "H002", "pattern_id": "P002", "question_id": "Q002",
+             "statement": "s2", "status": "CONTRADICTED", "reasoning": "r",
+             "evidence_links": [{"fact_id": "C002", "stance": "contradicts", "note": "n"}],
+             "confidence": "medium", "changes": ["患者層"],
+             "decision_impact": "勤務者ではなく居住者を主に据える。"},
+        ],
+        "external_facts": [{"id": "C001", "statement": "f1"},
+                           {"id": "C002", "statement": "f2"}],
+        "open_questions": [
+            {"question_id": "Q002", "why": "資料が無かった",
+             "what_would_settle_it": "平日12時台に現地で歩行者数を数える"}],
+    }
+    sources = [
+        {"url": "https://www.mhlw.go.jp/a", "title": "t", "source_type": "government",
+         "pattern_id": "P001"},
+        {"url": "https://example.com/b", "title": "t", "source_type": "company",
+         "pattern_id": "P001"},
+        # 本文が引用しなかったもの（pattern_id 無し）は数に入れない。
+        {"url": "https://example.com/c", "title": "t", "source_type": "news",
+         "pattern_id": None},
+    ]
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           sources, None, None, inquiry)
+
+    assert "## この分析で確かめたこと" in markdown
+    # 本文（評価・判断）より前にあること。**あとに置くと順番として遅すぎます。**
+    # 判断そのものである「この立地について」を基準にします。免責は末尾なので、
+    # そこと比べても順番を確かめたことになりません。
+    assert markdown.index("## この分析で確かめたこと") < markdown.index("## この立地について")
+
+    assert "問い 2 件" in markdown and "答えが出た **1 件**" in markdown
+    # 「違うと分かった」が数に出ること。埋もれさせない。
+    assert "調べたら違うと分かった 1" in markdown
+    # 引用した資料だけを数え、一次資料の内訳を出すこと。
+    assert "外部資料 2 件" in markdown and "一次資料 1 件" in markdown
+    # 未確認は、そのまま現地確認の項目として出る。
+    assert "確かめられなかったこと" in markdown
+    assert "平日12時台に現地で歩行者数を数える" in markdown
+
+
+def test_the_coverage_summary_is_absent_when_nothing_was_recorded(dataset):
+    """古い形のジョブでは節ごと出さない。空の見出しは誤読させます。"""
+    from kaigyou_intel.report import to_markdown
+
+    assert "## この分析で確かめたこと" not in to_markdown(
+        _report_output().model_dump(), to_jsonable(dataset))
+
+
+# ================================================ やってはいけない読み方
+def test_the_misreadings_are_configuration_not_code():
+    """**注意書きの寄せ集めではなく、この製品の中身です。**
+
+    公表データはどれも正しい値で、間違えるのは読む側です。多くのツールは
+    それを黙って通します——だから誰も「不便だ」と言わず、気づかないまま
+    自信を持ちます。
+
+    実測：国勢調査の「在学者数」メッシュで西早稲田キャンパスを引くと 169 人
+    でした。実際にそのキャンパスに通う学生は 3,000 人規模です。
+    """
+    items = cfg.misreadings("dental_clinic")
+    assert len(items) >= 10
+
+    by_id = {i["id"]: i for i in items}
+    # 実測から入れた項目が残っていること。
+    assert "students_are_residents" in by_id
+    assert "常住地基準" in by_id["students_are_residents"]["why"]
+
+    for item in items:
+        # 誤読・理由・正しい読み方の 3 つが揃っていること。「気をつけて
+        # ください」だけでは、読んだ人は何をすればよいか分かりません。
+        assert item["trap"] and item["why"] and item["instead"], item["id"]
+        assert item["severity"] in ("high", "medium"), item["id"]
+
+
+def test_a_business_specific_misreading_does_not_leak_to_another_business():
+    """歯科の標榜科目の話を、内科の画面に出さない。そこだけ嘘になります。"""
+    dental = {i["id"] for i in cfg.misreadings("dental_clinic")}
+    other = {i["id"] for i in cfg.misreadings("hospital")}
+
+    assert "free_text_as_count" in dental
+    assert "free_text_as_count" not in other
+    # 業態に依らないものは両方に出ること。
+    assert "mixing_population_bases" in dental & other
+
+
+def test_the_screen_and_the_report_use_the_same_words(dataset):
+    """画面とレポートで違うことを言わない。
+
+    地図で見た注意とレポートの注意が食い違うと、どちらが正しいのか読み手には
+    分かりません。だから画面は自分で文を書かず、設定から来たものを出します。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel.report import to_markdown
+
+    served = TestClient(app, raise_server_exceptions=False) \
+        .get("/api/misreadings").json()
+    assert served["items"] == cfg.misreadings("dental_clinic")
+
+    # レポートは判断がひっくり返るものだけを載せます。**長い注意書きは
+    # 読まれません。**
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
+    assert "## この数字で、やってはいけない読み方" in markdown
+    for item in served["high"]:
+        assert item["trap"] in markdown, item["id"]
+    medium = [i for i in served["items"] if i["severity"] == "medium"]
+    assert medium and all(i["trap"] not in markdown for i in medium)

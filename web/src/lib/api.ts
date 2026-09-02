@@ -20,6 +20,7 @@ import type {
   DataStatus,
   GeoJSONResponse,
   Meta,
+  MisreadingList,
   PrefectureList,
   RankingResponse,
   SpecialtyList,
@@ -127,6 +128,9 @@ export const api = {
     year?: number;
     limit?: number;
   } = {}) => get<GeoJSONResponse>("/land-prices", params),
+
+  misreadings: (params: { category?: string } = {}) =>
+    get<MisreadingList>("/misreadings", params),
 
   cityPlanningKinds: (params: { prefecture_code?: string } = {}) =>
     get<CityPlanningKinds>("/city-planning/kinds", params),

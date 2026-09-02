@@ -1903,6 +1903,12 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "note": ("スコアは同一都道府県内のメッシュ分布に対する相対値です。"
                      "暫定モデルであり、実績データによる較正は行っていません。"),
         },
+        # **この画面の数字で、やってはいけない読み方。**
+        # 注意書きの寄せ集めではなく、この製品の中身です。公表データは
+        # どれも正しい値で、取り違えるのは読み方のほう。多くのツールは
+        # それを黙って通します。画面・レポート・このデータセットが同じ文を
+        # 使うように、設定から読みます。
+        "misreadings": cfg.misreadings(category),
         "data_quality": {
             "unavailable_datasets": unavailable,
             "notes": notes,

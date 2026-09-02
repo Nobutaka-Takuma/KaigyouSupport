@@ -285,6 +285,28 @@ export interface CityPlanningResponse extends GeoJSONResponse {
   disclaimer: string | null;
 }
 
+/**
+ * この画面の数字で、やってはいけない読み方。
+ *
+ * **文はサーバが持っています。** 画面が独自に書くと、地図で見た注意と
+ * レポートの注意が食い違い、どちらが正しいのか読み手には分かりません。
+ */
+export interface Misreading {
+  id: string;
+  trap: string;
+  why: string;
+  instead: string;
+  severity: "high" | "medium";
+  applies_to?: string[];
+}
+
+export interface MisreadingList {
+  items: Misreading[];
+  /** 判断がひっくり返るものだけ。画面はまずこれを出す。 */
+  high: Misreading[];
+  note: string;
+}
+
 export interface CandidatePoint {
   id: string;
   lat: number;

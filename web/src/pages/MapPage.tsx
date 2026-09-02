@@ -25,6 +25,7 @@ import { AccessTable, CatchmentNote, LandPriceTable, PopulationOutlookTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
 import { DatasetExport } from "../components/DatasetExport";
 import { AnalysisPanel } from "../components/AnalysisPanel";
+import { Misreadings } from "../components/Misreadings";
 import { SpecialtyPanel, SpecialtyProfiles } from "../components/SpecialtyPanel";
 
 //: Last resort only -- used on a first ever visit, before the API has said
@@ -958,6 +959,10 @@ export function MapPage() {
               <p className="muted">駅名検索でも地点を指定できます。</p>
             </div>
           )}
+
+          {/* **地点を選ぶ前から出します。** 数字を見たあとに注意書きを読むのは
+              順番として遅く、そのころには読み方が決まっています。 */}
+          <Misreadings />
 
           {analysing && <p className="muted">分析中…</p>}
           {error && <p className="notice notice--error">分析に失敗しました: {error}</p>}

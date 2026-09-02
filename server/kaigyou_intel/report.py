@@ -9,6 +9,7 @@ Markdown はここで作ります。LLM に書かせません。免責・出典�
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 import re
 from pathlib import Path
@@ -66,12 +67,23 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
         lines += [f"地点 {where} / 半径 {query['radius_m']:,}m"
                   f" / プロファイル {query.get('active_profile', '-')}", ""]
 
+    # **結論より先に「何を確かめて、何が未確認か」を見せます。**
+    #
+    # ここが競合の資料に無いものです。ディーラーの無料商圏調査もコンサルの
+    # 提案書も、結論だけを載せます。**載せない理由があるからです**——
+    # 「調べたが分からなかった」と書くと、勧めている案件が弱く見えます。
+    #
+    # 読み手にとっては逆で、どこまで確かめられているかが分からないまま
+    # 数千万円の判断をすることになります。
+    lines += _coverage_block(inquiry, sources)
+
     # STEP5（顧客提出用）があればそちらを本文にします。STEP4 の形は根拠を
     # 辿るためのもので、人が読む文書ではありません。
     lines += (_client_body(output, judgement) if _is_client_report(output)
               else _working_body(output))
 
     lines += _legend_block(output)
+    lines += _misreading_block(dataset)
     lines += _inquiry_block(inquiry)
     lines += _surroundings_block(surroundings)
     lines += _figures_block(dataset)
@@ -79,6 +91,118 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
     lines += _provenance_block(dataset)
     return "\n".join(lines).rstrip() + "\n"
 
+
+def _misreading_block(dataset: Mapping[str, Any]) -> list[str]:
+    """この文書の数字で、やってはいけない読み方。
+
+    **画面と同じ文を使います。** 地図で見た注意とレポートの注意が食い違うと、
+    どちらが正しいのか読み手には分かりません。
+
+    判断がひっくり返るもの（high）だけを載せます。全部載せると 15 項目に
+    なり、**長い注意書きは読まれません。**
+    """
+    items = [i for i in (dataset.get("misreadings") or [])
+             if i.get("severity") == "high"]
+    if not items:
+        return []
+    lines = ["## この数字で、やってはいけない読み方", "",
+             "公表データはどれも正しい値です。**取り違えるのは読み方のほうで、"
+             "多くのツールはそれを黙って通します。**", ""]
+    for item in items:
+        lines += [f"**{item.get('trap', '')}**", ""]
+        if item.get("why"):
+            lines.append(f"- なぜ：{item['why']}")
+        if item.get("instead"):
+            lines.append(f"- ではどう読むか：{item['instead']}")
+        lines.append("")
+    return lines
+
+# --------------------------------------------------------------- 冒頭：調査カバレッジ
+#
+# **この節は結論の前に置きます。**
+#
+# 「何を確かめて、何が未確認か」を先に見せると、読み手は本文をその前提で
+# 読めます。あとに置くと、結論を信じたあとで但し書きを読むことになり、
+# 順番として遅すぎます。
+
+#: 一次資料とみなす出典区分。**「23件調べました」だけでは質が分かりません。**
+#: 官公庁の告示と個人ブログを同じ 1 件として数えると、件数が多いほど
+#: 信頼できるように見えてしまいます。
+_PRIMARY_SOURCES = frozenset(
+    {"government", "statistics", "prefecture", "municipality", "public_body"})
+
+#: 判定の並びと表示名。**「違うと分かった」を最後に置きません。**
+#: 末尾は読み飛ばされます。ここは読ませたいところです。
+_VERDICT_COUNTS = (
+    ("SUPPORTED", "支持された"),
+    ("PARTIALLY_SUPPORTED", "一部が支持された"),
+    ("CONTRADICTED", "調べたら違うと分かった"),
+    ("UNCERTAIN", "調べたが分からなかった"),
+    ("UNSUPPORTED", "支持されなかった（旧判定）"),
+)
+
+
+def _coverage_block(inquiry: Mapping[str, Any] | None,
+                    sources: Sequence[Mapping[str, Any]] = ()) -> list[str]:
+    """この分析で何を確かめ、何が未確認か。
+
+    問いが 1 つも無い（古い形の）ジョブでは何も出しません。空の見出しは
+    「調べていない」ではなく「この版では記録していない」なので、出すと
+    誤読させます。
+    """
+    if not inquiry:
+        return []
+    questions = list(inquiry.get("questions") or [])
+    hypotheses = list(inquiry.get("hypotheses") or [])
+    if not questions and not hypotheses:
+        return []
+
+    open_ids = {q.get("question_id") for q in (inquiry.get("open_questions") or [])}
+    answered = {h.get("question_id") for h in hypotheses if h.get("question_id")}
+    settled = len([q for q in questions
+                   if str(q.get("id")) in answered and str(q.get("id")) not in open_ids])
+
+    counts = Counter(str(h.get("status")) for h in hypotheses)
+    cited = [s for s in sources if s.get("pattern_id")]
+    primary = [s for s in cited if (s.get("source_type") or "") in _PRIMARY_SOURCES]
+
+    lines = ["## この分析で確かめたこと", ""]
+    if questions:
+        lines.append(f"- **問い {len(questions)} 件**　"
+                     f"→ 外部情報で答えが出た **{settled} 件**")
+    if hypotheses:
+        breakdown = "／".join(f"{label} {counts[key]}"
+                              for key, label in _VERDICT_COUNTS if counts.get(key))
+        lines.append(f"- **仮説 {len(hypotheses)} 件**　→ {breakdown}")
+    if cited:
+        lines.append(f"- **本文が引用した外部資料 {len(cited)} 件**　"
+                     f"（うち官公庁・政府統計などの一次資料 {len(primary)} 件）")
+    lines.append("")
+
+    lines += _unconfirmed_summary(inquiry.get("open_questions") or [], questions)
+    lines += [
+        "この一覧は、**この分析が何を確かめられなかったかを含めて**示しています。"
+        "確かめられた範囲の外にある判断は、この文書だけでは支えられません。", ""]
+    return lines
+
+
+def _unconfirmed_summary(open_questions: Sequence[Mapping[str, Any]],
+                         questions: Sequence[Mapping[str, Any]]) -> list[str]:
+    """未確認のまま残ったこと。**本文より前に、短く。**
+
+    詳しい経緯は末尾の「調査の記録」にあります。ここは一覧です。
+    """
+    if not open_questions:
+        return []
+    text = {str(q.get("id")): str(q.get("question") or "") for q in questions}
+    lines = ["**確かめられなかったこと（開業前に現地で）**", ""]
+    for item in open_questions:
+        qid = str(item.get("question_id") or "")
+        settle = item.get("what_would_settle_it")
+        lines.append(f"- {text.get(qid, qid)}"
+                     + (f"　→ {settle}" if settle else ""))
+    lines.append("")
+    return lines
 
 # --------------------------------------------------------------- 付録：調査の記録
 #

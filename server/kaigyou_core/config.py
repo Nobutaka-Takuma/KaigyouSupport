@@ -211,3 +211,31 @@ def city_planning_config(category: str | None = None) -> dict[str, Any]:
         return load_yaml(business_file("city_planning.yaml", category))
     except ConfigNotFound:
         return {}
+
+
+def misreadings(category: str | None = None) -> list[dict[str, Any]]:
+    """この画面の数字で、やってはいけない読み方。
+
+    **注意書きの寄せ集めではなく、この製品の中身です。** jSTAT MAP も
+    RESAS も TerraMap も正しい数字を出します。間違えるのは読む側で、
+    ツールは黙って通します——だから誰も「不便だ」と言わず、気づかないまま
+    自信を持ちます。
+
+    実測：国勢調査の「在学者数」メッシュで西早稲田キャンパスを引くと 169 人
+    でした。実際にそのキャンパスに通う学生は 3,000 人規模です。**18 倍**
+    違います（在学者数は常住地基準で、「そこに通ってくる学生」ではない）。
+
+    ``categories`` を持つ項目は、その業態のときだけ返します。歯科の標榜
+    科目の話を内科の画面に出すと、そこだけ嘘になります。
+    """
+    try:
+        raw = load_yaml(config_dir() / "misreadings.yaml").get("misreadings") or []
+    except ConfigNotFound:
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        limited = item.get("categories")
+        if limited and category is not None and category not in limited:
+            continue
+        out.append(dict(item))
+    return out

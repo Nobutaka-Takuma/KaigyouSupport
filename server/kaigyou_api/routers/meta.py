@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 import psycopg
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn
 from kaigyou_core import config as cfg
@@ -16,6 +16,29 @@ from kaigyou_core.scoring import ScoringModel
 from kaigyou_core.status import data_status
 
 router = APIRouter()
+
+
+@router.get("/misreadings", summary="この画面の数字で、やってはいけない読み方")
+def misreadings(category: str = Query(DEFAULT_CATEGORY)) -> dict[str, Any]:
+    """**注意書きの寄せ集めではなく、この製品の中身です。**
+
+    jSTAT MAP も RESAS も TerraMap も正しい数字を出します。間違えるのは
+    読む側で、ツールは黙って通します——だから誰も「不便だ」と言わず、
+    気づかないまま自信を持ちます。
+
+    画面とレポートが同じ文を使うので、ここは設定から返します。画面が
+    独自に書くと、地図で見た注意とレポートの注意が食い違います。
+    """
+    items = cfg.misreadings(category)
+    return {
+        "items": items,
+        # 判断がひっくり返るものだけを別に返します。画面は全部を常時
+        # 出せないので、まずここを出して、残りは開いたときに出します。
+        "high": [i for i in items if i.get("severity") == "high"],
+        "note": ("公表データはどれも正しい値です。取り違えるのは読み方のほうで、"
+                 "多くのツールはそれを黙って通します。この一覧は、この画面の"
+                 "数字で起こりやすい取り違えを先に示すものです。"),
+    }
 
 
 @router.get("/meta", summary="スコアリングモデルと免責事項")
