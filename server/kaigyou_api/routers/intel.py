@@ -30,6 +30,7 @@ from kaigyou_core.dataset import build_dataset
 from kaigyou_core.db import table_exists
 from kaigyou_core.scoring import ScoringModel
 from kaigyou_intel import client as llm
+from kaigyou_intel import coverage
 from kaigyou_intel import jobs
 from kaigyou_intel.pricing import total_cost
 from kaigyou_intel.projection import base_data_hash, to_jsonable
@@ -177,10 +178,21 @@ def get_analysis(job_id: str,
             "SELECT report_json, report_markdown, trace_ok, trace_problems "
             "FROM analysis_reports WHERE job_id = %s", (job_id,))
         report = cur.fetchone()
+        cur.execute(
+            "SELECT url, source_type, pattern_id FROM analysis_sources "
+            "WHERE job_id = %s", (job_id,))
+        source_rows = [dict(r) for r in cur.fetchall()]
 
     return {
         "job": job,
-        "steps": steps,
+        # **output_json は返しません。**どの画面も読んでいないのに、進捗の
+        # 問い合わせは 4 秒ごとに走ります。数分の待ちのあいだ、読まれない
+        # STEP1〜4 の出力を何十回も往復させることになります。段の中身から
+        # 人が見たいものは progress に数えてあり、全文が要るときは
+        # `kaigyou-etl analyze --show` が DB から直接読みます。
+        "steps": [{k: v for k, v in s.items() if k != "output_json"} for s in steps],
+        # 指示書 §25。待っている数分に、**何が分かってきたのかを見せる。**
+        "progress": _progress(steps, source_rows),
         "source_count": sources,
         "report_available": report is not None,
         "trace_ok": report["trace_ok"] if report else None,
@@ -207,6 +219,40 @@ def get_analysis(job_id: str,
         # worker が動いていないと queued のまま止まります。画面で待つ人に、
         # 何を待っているのかが分かるように、状態の意味を添えます。
         "status_note": _STATUS_NOTE.get(job["status"]),
+    }
+
+
+def _progress(steps: list[dict[str, Any]],
+              sources: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """いまの時点で何が分かっているか（指示書 §25）。
+
+    これまで画面に出ていたのは「STEP2 実行中 3分12秒」だけでした。**動いて
+    いるかどうかは分かっても、何かを見つけているのかは分かりません。**
+    ところが STEP1 の出力——パターンと問い——は、その時点で既に DB にあります。
+    レポートが書き上がるまで誰にも見せていなかっただけです。
+
+    数えるのは coverage.tally で、レポート冒頭の「この分析で確かめたこと」と
+    同じ関数です。**待っている間に見た件数と、出来上がった文書の件数が
+    食い違わないようにするため**で、食い違えばどちらが正しいのか読み手には
+    確かめようがありません。
+
+    済んだ段のぶんだけ返します。走っている最中の段は output_json がまだ
+    無いので、勝手に 0 とは数えません（「まだ」と「0 件だった」は違います）。
+    """
+    done = {int(s["step_number"]): (s.get("output_json") or {})
+            for s in steps if s["status"] == "completed"}
+    if not done:
+        return None
+    counts = coverage.tally(
+        coverage.inquiry_from_steps(done.get(1), done.get(2)), sources)
+    if coverage.is_empty(counts):
+        return None
+    return {
+        **counts,
+        # どの段まで数え終わっているか。画面はこれを見て「問い 0 件」と
+        # 「まだ問いを立てていない」を区別します。
+        "through_step": max(done),
+        "researched": 2 in done,
     }
 
 

@@ -4874,3 +4874,185 @@ def test_the_screen_and_the_report_use_the_same_words(dataset):
         assert item["trap"] in markdown, item["id"]
     medium = [i for i in served["items"] if i["severity"] == "medium"]
     assert medium and all(i["trap"] not in markdown for i in medium)
+
+
+# --------------------------------------------------------------- §25 段階表示
+#
+# 待っている数分に「STEP2 実行中 3分12秒」しか出ていませんでした。動いている
+# ことは分かっても、何かを見つけているのかは分かりません。
+
+def test_the_progress_shows_what_has_been_found_not_just_that_it_is_running(
+        conn, dataset):
+    """STEP1 が済んだ時点で、パターンと問いの件数が出ること。
+
+    その数字はもう DB にあります。レポートが書き上がるまで見せていなかった
+    だけでした。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {})
+        jobs.finish_step(conn, job_id, 1, {
+            "facts": [{"id": "F001"}, {"id": "F002"}],
+            "patterns": [{"id": "P001"}, {"id": "P002"}, {"id": "P003"}],
+            "questions": [{"id": "Q001", "question": "なぜ若年層が多いのか"},
+                          {"id": "Q002", "question": "昼間人口の中身は何か"}],
+        }, {})
+
+        progress = TestClient(app).get(f"/api/analysis/{job_id}").json()["progress"]
+        assert progress["patterns"] == 3 and progress["questions"] == 2
+        assert progress["facts"] == 2
+        assert progress["through_step"] == 1
+        # **まだ調べていないことを、0 件という結果にしない。**
+        assert progress["researched"] is False
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_progress_does_not_call_an_unfinished_step_a_zero_result(conn, dataset):
+    """STEP2 が走っている最中に「答えが出た 0 件」と出さないこと。
+
+    「まだ」と「0 件だった」は違います。0 と NULL は違う、と同じ話です。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {})
+        jobs.finish_step(conn, job_id, 1, {"patterns": [{"id": "P001"}],
+                                           "questions": [{"id": "Q001"}]}, {})
+        jobs.start_step(conn, job_id, 2, {}, {})  # 走っている最中
+        body = TestClient(app).get(f"/api/analysis/{job_id}").json()
+        assert body["progress"]["researched"] is False, (
+            "STEP2 の結果をまだ数えてはいけない")
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_progress_counts_the_same_things_the_report_does(conn, dataset):
+    """画面の件数とレポート冒頭の件数が食い違わないこと。
+
+    **これがこの節の要です。** 別々に数えると、待っている間に見た「答えが出た
+    5 件」と出来上がった文書の「4 件」が食い違い、どちらが正しいのかを読み手が
+    確かめる術はありません。確かめられない食い違いは、数字そのものへの信用を
+    落とします。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel import jobs
+    from kaigyou_intel.report import to_markdown
+
+    step1 = {
+        "facts": [{"id": "F001"}],
+        "patterns": [{"id": "P001"}],
+        "questions": [{"id": "Q001", "question": "なぜ若年層が多いのか"},
+                      {"id": "Q002", "question": "昼間人口の中身は何か"}],
+    }
+    step2 = {
+        "hypotheses": [
+            {"id": "H001", "question_id": "Q001", "status": "SUPPORTED"},
+            {"id": "H002", "question_id": "Q002", "status": "CONTRADICTED"},
+        ],
+        "external_facts": [{"id": "C001"}],
+        # Q002 は仮説が付いたが、決着していない。**仮説が付いた＝答えが出た、
+        # ではありません。**
+        "open_questions": [{"question_id": "Q002", "why": "資料が無かった",
+                            "what_would_settle_it": "平日12時台に現地で数える"}],
+    }
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        for number, output in ((1, step1), (2, step2)):
+            jobs.start_step(conn, job_id, number, {}, {})
+            jobs.finish_step(conn, job_id, number, output, {})
+        jobs.save_sources(conn, job_id, 2, "P001", [
+            {"url": "https://www.mhlw.go.jp/a", "title": "t"},
+            {"url": "https://example.com/b", "title": "t"}])
+
+        progress = TestClient(app).get(f"/api/analysis/{job_id}").json()["progress"]
+        assert progress["questions"] == 2 and progress["answered"] == 1
+        assert progress["researched"] is True
+
+        markdown = to_markdown(
+            _report_output().model_dump(), to_jsonable(dataset), [], None, None,
+            {"questions": step1["questions"], "hypotheses": step2["hypotheses"],
+             "external_facts": step2["external_facts"],
+             "open_questions": step2["open_questions"]})
+        assert f"問い {progress['questions']} 件" in markdown
+        assert f"答えが出た **{progress['answered']} 件**" in markdown
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_progress_stays_quiet_for_a_job_from_the_old_shape(conn, dataset):
+    """問いを記録していない頃のジョブに「問い 0 件」と出さないこと。
+
+    それは「調べていない」に見えます。実際は「この版では記録していない」です。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {})
+        jobs.finish_step(conn, job_id, 1, {"facts": [{"id": "F001"}]}, {})
+        body = TestClient(app).get(f"/api/analysis/{job_id}").json()
+        assert body["progress"] is None
+    finally:
+        _drop_job(job_id)
+
+
+def test_the_status_response_does_not_ship_step_outputs(conn, dataset):
+    """4 秒ごとの問い合わせで、誰も読まない段の全文を往復させないこと。
+
+    画面が使うのは件数だけで、全文は `analyze --show` が DB から直接読みます。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+    from kaigyou_intel import jobs
+
+    job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
+                             dataset=to_jsonable(dataset), base_hash="x")
+    try:
+        jobs.start_step(conn, job_id, 1, {}, {})
+        jobs.finish_step(conn, job_id, 1, {"patterns": [{"id": "P001"}],
+                                           "questions": [{"id": "Q001"}]}, {})
+        body = TestClient(app).get(f"/api/analysis/{job_id}").json()
+        assert all("output_json" not in s for s in body["steps"])
+        # それでも段の状態は分かること。進捗表示はこちらを見ています。
+        assert body["steps"][0]["status"] == "completed"
+        # DB からは今までどおり読めること（CLI がここを見ます）。
+        assert jobs.step_output(conn, job_id, 1)["patterns"] == [{"id": "P001"}]
+    finally:
+        _drop_job(job_id)
+
+
+def test_a_verdict_that_did_not_occur_is_not_shown_as_zero(dataset):
+    """出なかった判定を「0 件」として並べないこと。
+
+    「調べたら違うと分かった 0」を並べると、読み手はそれを結果として読みます。
+    0 件は「その判定が出なかった」であって「0 という結果が出た」ではありません。
+    """
+    from kaigyou_intel import coverage
+
+    counts = coverage.tally({
+        "questions": [{"id": "Q001"}],
+        "hypotheses": [{"id": "H001", "question_id": "Q001",
+                        "status": "SUPPORTED"}],
+    })
+    keys = [v["key"] for v in counts["verdicts"]]
+    assert keys == ["SUPPORTED"], keys

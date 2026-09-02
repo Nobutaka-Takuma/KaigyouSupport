@@ -1182,3 +1182,43 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   color: #374151;
 }
 .misread__body p { margin: 0 0 0.4rem; }
+
+/* ------------------------------------------------ ここまでに分かったこと（§25）
+ *
+ * 待っている数分に「STEP2 実行中 3分12秒」しか出ていませんでした。動いて
+ * いることは分かっても、何かを見つけているのかは分かりません。ここは
+ * 進捗ではなく**中身**を出す場所なので、ステップ一覧とは別の面にします。
+ */
+.findings {
+  margin: 0.6rem 0 0.8rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--line, #e5e9ef);
+  border-left: 4px solid #0f766e;
+  border-radius: 6px;
+  background: #f5fbfa;
+}
+.findings__title { margin: 0 0 0.4rem; font-size: 0.85rem; color: #115e59; }
+.findings__list { margin: 0; padding: 0; list-style: none; font-size: 0.82rem; }
+.findings__list > li { padding: 0.18rem 0; line-height: 1.65; }
+.findings__verdict {
+  display: inline-block;
+  margin: 0.1rem 0.3rem 0.1rem 0;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 0.76rem;
+}
+/* 「調べたら違うと分かった」を薄く出しません。**そこがいちばん効く結果です**
+ * ——その筋を追うのをやめられるからで、支持された仮説より判断を動かします。 */
+.findings__verdict.is-contradicted { background: #fee2e2; color: #991b1b; font-weight: 600; }
+.findings__verdict.is-supported { background: #dcfce7; color: #166534; }
+.findings__verdict.is-uncertain { background: #fef3c7; color: #92400e; }
+.findings__open {
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed var(--line, #e5e9ef);
+  font-size: 0.8rem;
+}
+.findings__open ul { margin: 0.25rem 0 0; padding-left: 1.1rem; line-height: 1.6; }
+.findings__settle { display: block; color: #4b5563; font-size: 0.76rem; }

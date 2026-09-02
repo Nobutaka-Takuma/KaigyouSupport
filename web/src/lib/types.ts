@@ -494,6 +494,39 @@ export interface AnalysisStatus {
   /** ホスティング環境では null。APIサーバはLLMを呼ばないので判定できない。 */
   llm_configured: boolean | null;
   status_note?: string | null;
+  /** いまの時点で何が分かっているか。段が1つも終わっていなければ null。 */
+  progress?: AnalysisProgress | null;
+}
+
+/**
+ * 待っている数分に見せる「ここまでに分かったこと」（指示書 §25）。
+ *
+ * **件数はサーバが数えます。** レポート冒頭の「この分析で確かめたこと」と
+ * 同じ関数（coverage.tally）を通っているので、待っている間に見た件数と、
+ * 出来上がった文書の件数が食い違いません。
+ */
+export interface AnalysisProgress {
+  facts: number;
+  patterns: number;
+  questions: number;
+  /** 外部情報で答えが出た問いの数。 */
+  answered: number;
+  hypotheses: number;
+  /** 0 件の判定は入っていません。「違うと分かった 0」は結果ではない。 */
+  verdicts: { key: string; label: string; count: number }[];
+  external_facts: number;
+  /** 本文が引用した資料。検索して開いただけの頁は数えません。 */
+  cited_sources: number;
+  primary_sources: number;
+  open_questions: {
+    question_id: string;
+    question: string;
+    what_would_settle_it: string;
+  }[];
+  /** どの段まで数え終わっているか。 */
+  through_step: number;
+  /** STEP2（外部調査）が済んでいるか。**未了と「0件だった」を分けるため。** */
+  researched: boolean;
 }
 
 /** 根拠つきの1文。§25 の追跡はこの id を辿る。 */

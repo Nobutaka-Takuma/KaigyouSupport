@@ -9,7 +9,6 @@ Markdown はここで作ります。LLM に書かせません。免責・出典�
 """
 from __future__ import annotations
 
-from collections import Counter
 import json
 import re
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Any, Mapping, Sequence
 import psycopg
 from psycopg.types.json import Json
 
+from kaigyou_intel import coverage
 from kaigyou_intel.schemas import Step4Output, TraceProblem
 
 #: 出典の並び順。要件 §9 の優先順位そのまま。
@@ -125,23 +125,6 @@ def _misreading_block(dataset: Mapping[str, Any]) -> list[str]:
 # 読めます。あとに置くと、結論を信じたあとで但し書きを読むことになり、
 # 順番として遅すぎます。
 
-#: 一次資料とみなす出典区分。**「23件調べました」だけでは質が分かりません。**
-#: 官公庁の告示と個人ブログを同じ 1 件として数えると、件数が多いほど
-#: 信頼できるように見えてしまいます。
-_PRIMARY_SOURCES = frozenset(
-    {"government", "statistics", "prefecture", "municipality", "public_body"})
-
-#: 判定の並びと表示名。**「違うと分かった」を最後に置きません。**
-#: 末尾は読み飛ばされます。ここは読ませたいところです。
-_VERDICT_COUNTS = (
-    ("SUPPORTED", "支持された"),
-    ("PARTIALLY_SUPPORTED", "一部が支持された"),
-    ("CONTRADICTED", "調べたら違うと分かった"),
-    ("UNCERTAIN", "調べたが分からなかった"),
-    ("UNSUPPORTED", "支持されなかった（旧判定）"),
-)
-
-
 def _coverage_block(inquiry: Mapping[str, Any] | None,
                     sources: Sequence[Mapping[str, Any]] = ()) -> list[str]:
     """この分析で何を確かめ、何が未確認か。
@@ -149,57 +132,50 @@ def _coverage_block(inquiry: Mapping[str, Any] | None,
     問いが 1 つも無い（古い形の）ジョブでは何も出しません。空の見出しは
     「調べていない」ではなく「この版では記録していない」なので、出すと
     誤読させます。
+
+    **数えるのは coverage.tally です。**待っている間の画面（§25 の段階表示）が
+    同じ関数を通ります。ここで数え直すと、画面で見た件数とレポートの件数が
+    食い違い、読み手にはどちらが正しいか確かめようがありません。
     """
     if not inquiry:
         return []
-    questions = list(inquiry.get("questions") or [])
-    hypotheses = list(inquiry.get("hypotheses") or [])
-    if not questions and not hypotheses:
+    counts = coverage.tally(inquiry, sources)
+    if not (counts["questions"] or counts["hypotheses"]):
         return []
 
-    open_ids = {q.get("question_id") for q in (inquiry.get("open_questions") or [])}
-    answered = {h.get("question_id") for h in hypotheses if h.get("question_id")}
-    settled = len([q for q in questions
-                   if str(q.get("id")) in answered and str(q.get("id")) not in open_ids])
-
-    counts = Counter(str(h.get("status")) for h in hypotheses)
-    cited = [s for s in sources if s.get("pattern_id")]
-    primary = [s for s in cited if (s.get("source_type") or "") in _PRIMARY_SOURCES]
-
     lines = ["## この分析で確かめたこと", ""]
-    if questions:
-        lines.append(f"- **問い {len(questions)} 件**　"
-                     f"→ 外部情報で答えが出た **{settled} 件**")
-    if hypotheses:
-        breakdown = "／".join(f"{label} {counts[key]}"
-                              for key, label in _VERDICT_COUNTS if counts.get(key))
-        lines.append(f"- **仮説 {len(hypotheses)} 件**　→ {breakdown}")
-    if cited:
-        lines.append(f"- **本文が引用した外部資料 {len(cited)} 件**　"
-                     f"（うち官公庁・政府統計などの一次資料 {len(primary)} 件）")
+    if counts["questions"]:
+        lines.append(f"- **問い {counts['questions']} 件**　"
+                     f"→ 外部情報で答えが出た **{counts['answered']} 件**")
+    if counts["hypotheses"]:
+        breakdown = "／".join(f"{v['label']} {v['count']}" for v in counts["verdicts"])
+        lines.append(f"- **仮説 {counts['hypotheses']} 件**　→ {breakdown}")
+    if counts["cited_sources"]:
+        lines.append(f"- **本文が引用した外部資料 {counts['cited_sources']} 件**　"
+                     f"（うち官公庁・政府統計などの一次資料 "
+                     f"{counts['primary_sources']} 件）")
     lines.append("")
 
-    lines += _unconfirmed_summary(inquiry.get("open_questions") or [], questions)
+    lines += _unconfirmed_summary(counts["open_questions"])
     lines += [
         "この一覧は、**この分析が何を確かめられなかったかを含めて**示しています。"
         "確かめられた範囲の外にある判断は、この文書だけでは支えられません。", ""]
     return lines
 
 
-def _unconfirmed_summary(open_questions: Sequence[Mapping[str, Any]],
-                         questions: Sequence[Mapping[str, Any]]) -> list[str]:
+def _unconfirmed_summary(open_questions: Sequence[Mapping[str, Any]]) -> list[str]:
     """未確認のまま残ったこと。**本文より前に、短く。**
 
     詳しい経緯は末尾の「調査の記録」にあります。ここは一覧です。
+    問いの文と決着のさせ方は coverage.tally が組み立て済みで、画面にも
+    同じものが出ます。
     """
     if not open_questions:
         return []
-    text = {str(q.get("id")): str(q.get("question") or "") for q in questions}
     lines = ["**確かめられなかったこと（開業前に現地で）**", ""]
     for item in open_questions:
-        qid = str(item.get("question_id") or "")
         settle = item.get("what_would_settle_it")
-        lines.append(f"- {text.get(qid, qid)}"
+        lines.append(f"- {item.get('question') or item.get('question_id')}"
                      + (f"　→ {settle}" if settle else ""))
     lines.append("")
     return lines

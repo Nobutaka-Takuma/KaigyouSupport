@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../lib/api";
 import { authConfigured, storedSession } from "../lib/auth";
-import type { AnalysisReport, AnalysisStatus, AnalysisStep } from "../lib/types";
+import type {
+  AnalysisProgress, AnalysisReport, AnalysisStatus, AnalysisStep,
+} from "../lib/types";
 import { AnalysisReportView } from "./AnalysisReport";
 
 /**
@@ -289,6 +291,8 @@ export function AnalysisPanel({
             </p>
           )}
 
+          {status.progress && <Findings p={status.progress} />}
+
           {failedStep?.error_message && <FailureNote text={failedStep.error_message} />}
 
           {/* 終わったジョブに「キーがありません」と出しても意味がありません。
@@ -329,6 +333,87 @@ export function AnalysisPanel({
     </section>
   );
 }
+
+/**
+ * ここまでに分かったこと（指示書 §25）。
+ *
+ * これまで待っている人に見えていたのは「STEP2 実行中 3分12秒」だけでした。
+ * **動いていることは分かっても、何かを見つけているのかは分かりません。**
+ * 数分のあいだ、進捗バーを眺めることしかできませんでした。
+ *
+ * ところが STEP1 の出力——パターンと問い——は、その段が終わった時点で
+ * もう DB にあります。レポートが書き上がるまで、誰にも見せていなかった
+ * だけです。
+ *
+ * **件数はサーバが数えます。** レポート冒頭の「この分析で確かめたこと」と
+ * 同じ関数を通るので、待っている間に見た数と、出来上がった文書の数が
+ * 食い違いません。画面が独自に数えると、食い違ったときにどちらが正しいのか
+ * 読み手には確かめようがありません。
+ */
+function Findings({ p }: { p: AnalysisProgress }) {
+  return (
+    <div className="findings">
+      <h4 className="findings__title">ここまでに分かったこと</h4>
+      <ul className="findings__list">
+        {p.patterns > 0 && (
+          <li>
+            統計から<strong>{p.patterns} 件</strong>のパターンを見つけ、
+            <strong>{p.questions} 件</strong>の問いを立てました。
+          </li>
+        )}
+        {/* **STEP2 が済むまで、この行は出しません。**「答えが出た 0 件」は
+            結果に見えますが、実際は「まだ調べていない」です。 */}
+        {p.researched && (
+          <li>
+            {p.patterns > 0
+              // 上の行が「3 件の問いを立てました」と言った直後なので、
+              // 母数を繰り返しません。
+              ? <>そのうち <strong>{p.answered} 件</strong> に、外部情報で答えが出ました。</>
+              : <>問い {p.questions} 件のうち <strong>{p.answered} 件</strong> に、
+                 外部情報で答えが出ました。</>}
+          </li>
+        )}
+        {p.verdicts.length > 0 && (
+          <li>
+            仮説 {p.hypotheses} 件　
+            {p.verdicts.map((v) => (
+              // 「調べたら違うと分かった」を薄く出しません。**そこがいちばん
+              // 効く結果です**——その筋を追うのをやめられます。
+              <span key={v.key}
+                    className={`findings__verdict is-${v.key.toLowerCase()}`}>
+                {v.label} {v.count}
+              </span>
+            ))}
+          </li>
+        )}
+        {p.cited_sources > 0 && (
+          <li>
+            引用した外部資料 <strong>{p.cited_sources} 件</strong>
+            （うち官公庁・政府統計などの一次資料 {p.primary_sources} 件）
+          </li>
+        )}
+      </ul>
+      {p.open_questions.length > 0 && (
+        <div className="findings__open">
+          <strong>確かめられなかったこと（開業前に現地で）</strong>
+          <ul>
+            {p.open_questions.map((q) => (
+              <li key={q.question_id}>
+                {q.question}
+                {q.what_would_settle_it && (
+                  <span className="findings__settle">
+                    → {q.what_would_settle_it}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 /** 「1分23秒」。止まっているのか進んでいるのかが分かればよいので、秒まで。 */
 function since(iso: string | null | undefined, now: number): string | null {
