@@ -6582,3 +6582,46 @@ def test_the_stored_distribution_records_how_it_was_computed(conn):
     assert row["computed_at"]
     assert row["scope_label"], "どの母集団かが読める形で入っていること"
     assert row["sample_count"] > 0
+
+
+def test_the_dry_run_shows_what_is_actually_sent(conn, dataset, tmp_path):
+    """**「課金する前に何が送られるかを見る」道具が、送られないものを見せない。**
+
+    以前は生のプロンプトファイルを書き出していたので、`{max_patterns}` も
+    `{qualitative_factors}` も `{dead_ends}` も置き換わっていませんでした。
+    台帳を入れたのに dry-run に出ず、「効いていない」と誤診できる形でした。
+    """
+    import re
+
+    from kaigyou_intel.steps import step1_features
+
+    payload = step1_features.build_input(to_jsonable(dataset))
+    system = step1_features.system_prompt(payload)
+
+    left = re.findall(r"\{[a-z_]+\}", system)
+    assert not left, f"置き換わっていないプレースホルダ: {left}"
+    # 実際に効く中身が入っていること。
+    assert "あなたは数字を作りません" in system
+    assert "歯科医師・歯科衛生士の年齢構成" in system, "台帳が差し込まれていない"
+
+
+def test_the_run_and_the_dry_run_build_the_same_prompt(monkeypatch, dataset):
+    """組み立てが 1 か所であること。**2 か所にあると必ず食い違います。**"""
+    from kaigyou_intel.steps import step1_features
+
+    payload = step1_features.build_input(to_jsonable(dataset))
+    seen: list[str] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, **kw):
+        seen.append(system)
+        if schema is None:
+            return llm.Result(parsed=None, text="", usage=llm.Usage(), model="m",
+                              sources=[])
+        raise RuntimeError("stop after the system prompt is built")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    with pytest.raises(Exception):
+        step1_features.run(payload)
+
+    built = step1_features.system_prompt(payload)
+    assert seen and seen[-1] == built, "実行と dry-run で違うプロンプトを組んでいる"

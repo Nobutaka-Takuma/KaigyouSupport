@@ -96,6 +96,31 @@ def requirement_frame(frame: Mapping[str, Any]) -> str:
     return "\n".join(lines).strip() or "（設定されていません）"
 
 
+def system_prompt(payload: Mapping[str, Any],
+                  category: str = DEFAULT_CATEGORY) -> str:
+    """STEP1 に送るシステムプロンプト。**組み立ては 1 か所です。**
+
+    以前は実行の中で組み立てていて、`analyze --dry-run` はプロンプトの**生の
+    ファイル**を書き出していました。つまり `{max_patterns}` も
+    `{qualitative_factors}` も `{dead_ends}` も置き換わっていない、**実際に
+    送られるものとは違う文書**を見せていたことになります。
+
+    「課金する前に何が送られるかを見る」ための道具が、送られないものを
+    見せていました。**組み立てを共有すれば、この食い違いは起きません。**
+    """
+    limits = cfg.analysis_config().get("limits") or {}
+    frame = cfg.hypotheses_config(category)
+    settings = llm.step_settings(STEP_NUMBER)
+    return (cfg.prompt_text(settings["prompt"], category)
+            .replace("{max_patterns}", str(limits.get("max_patterns", 5)))
+            .replace("{min_cross_layer_patterns}", str(min_cross_layer(category)))
+            .replace("{crossing_examples}", _bullets(
+                (frame.get("crossing") or {}).get("examples")))
+            .replace("{qualitative_factors}",
+                     _factor_frame(frame, citable_keys(payload)))
+            .replace("{dead_ends}", _dead_end_block()))
+
+
 def _dead_end_block() -> str:
     """調べても答えの出ないことを、**問いを立てる前に**渡す。
 
@@ -361,15 +386,7 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
 
     scan = scan_surroundings(payload, limits, category)
 
-    frame = cfg.hypotheses_config(category)
-    system = (cfg.prompt_text(settings["prompt"], category)
-              .replace("{max_patterns}", str(limits.get("max_patterns", 5)))
-              .replace("{min_cross_layer_patterns}", str(min_cross_layer(category)))
-              .replace("{crossing_examples}", _bullets(
-                  (frame.get("crossing") or {}).get("examples")))
-              .replace("{qualitative_factors}",
-                       _factor_frame(frame, citable_keys(payload)))
-              .replace("{dead_ends}", _dead_end_block()))
+    system = system_prompt(payload, category)
 
     user = (
         "以下が基礎商圏データです。**FACT にできるのはこの中の数字だけです。**\n\n"

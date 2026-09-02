@@ -852,7 +852,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
         payload = step1_features.build_input(job["base_data"])
         settings = llm.step_settings(1)
-        system = cfg.prompt_text(settings["prompt"])
+        # **実行と同じ組み立てを通します。** 生のファイルを書き出していた頃は、
+        # {max_patterns} も {dead_ends} も置き換わっていない、実際には送られない
+        # 文書を見せていました。「課金する前に何が送られるかを見る」道具が
+        # 送られないものを見せていては、確認になりません。
+        system = step1_features.system_prompt(
+            payload, job.get("business_type") or DEFAULT_CATEGORY)
         body = _json.dumps(payload, ensure_ascii=False, indent=1)
 
         if waiting > 1 and not args.job:
