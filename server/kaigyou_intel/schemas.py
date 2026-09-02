@@ -97,6 +97,31 @@ class Surroundings(BaseModel):
         description="調べたが確認できなかったこと。無ければ空文字")
 
 
+class Question(BaseModel):
+    """PATTERN から出た「なぜこうなっているのか」の問い（指示書 §8）。
+
+    **文字列ではなく id を持つ物にしています。** ``research_questions`` は
+    ただの文字列の並びで、下流から参照できませんでした。参照できないと、
+    「H003 は Q002 への答え」と書けず、**どの問いが答えられずに残ったかも
+    数えられません。** 「7つ問いを立て、5つに答えが出た」が言えるかどうかは、
+    このサービスが GIS と違うと言えるかどうかそのものです。
+
+    ``what_would_answer_it`` が「調査すべきことを AI 自身に決めさせる」
+    （§16）の実体です。**問いを立てた段で、調べ方まで決めさせます。**
+    次の段に丸投げすると「〇〇駅について検索してください」になり、§23 が
+    禁じているものになります。
+    """
+
+    id: str = Field(description="Q001 のような通し番号")
+    pattern_id: str = Field(description="どの PATTERN から出た問いか")
+    question: str = Field(
+        description="なぜこの特徴が存在するのか。地域紹介を求める問いにしない")
+    why_it_matters: str = Field(
+        description="答えが出ると、どの経営判断が変わるのか。1〜2文")
+    what_would_answer_it: str = Field(
+        description="何を調べれば答えが出るのか。資料の種類・発行者まで具体的に")
+
+
 class Step1Output(BaseModel):
     """STEP1（商圏特徴抽出）の出力。
 
@@ -107,6 +132,10 @@ class Step1Output(BaseModel):
 
     facts: list[Fact] = Field(min_length=1)
     patterns: list[Pattern] = Field(min_length=1)
+    #: PATTERN から出た問い。**空でも受け付けます**——古い形で保存された
+    #: ジョブを読み直せなくなるほうが困るためです（expand → migrate →
+    #: contract）。新しい出力では必ず埋まります（プロンプトが求めます）。
+    questions: list[Question] = Field(default_factory=list)
     #: 分析できなかったこと。空でも構いませんが、書けるなら書かせます。
     not_determinable: list[str] = Field(
         default_factory=list,
@@ -202,7 +231,33 @@ def verify_step1(output: Step1Output, allowed_measure_keys: set[str],
 
 
 # ------------------------------------------------------------------ STEP2
-HypothesisStatus = Literal["SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED"]
+#: 仮説の判定（指示書 §12）。
+#:
+#: **`UNSUPPORTED` は 2 つの別のことを兼ねていました。**「調べたが支持する
+#: 情報が見つからなかった」と「調べたら違うと分かった」です。経営判断に
+#: とってこの 2 つは正反対で、前者は「現地で確かめる」、後者は「その筋は
+#: 消えたので別を追う」になります。同じ札に入れると、レポートを読んだ人は
+#: どちらなのか判断できません。
+#:
+#: `UNSUPPORTED` は**読み出しのためだけ**に残します。古い保存済みレポートが
+#: そのまま読めなくなるほうが困るので消しません。新しい出力で使わないことは
+#: プロンプトと検算が見張ります。
+HypothesisStatus = Literal[
+    "SUPPORTED",            # 支持する外部事実がある
+    "PARTIALLY_SUPPORTED",  # 一部だけ確かめられた
+    "UNCERTAIN",            # 調べたが、どちらとも言えない
+    "CONTRADICTED",         # 調べたら、違うと分かった
+    "UNSUPPORTED",          # 旧。読み出し互換のためだけ
+]
+
+#: 新しい出力で使ってよい判定。`UNSUPPORTED` を除いたもの。
+CURRENT_HYPOTHESIS_STATUSES = frozenset(
+    {"SUPPORTED", "PARTIALLY_SUPPORTED", "UNCERTAIN", "CONTRADICTED"})
+
+#: 根拠が 1 つも無くてよい判定。**調べて何も出なかったことを、そのまま
+#: 書けるようにするため**です。それ以外は根拠が要ります——「支持されて
+#: いる」と言うなら、何がそう言わせているのかが要ります。
+STATUSES_WITHOUT_EVIDENCE = frozenset({"UNCERTAIN"})
 
 
 class ExternalFact(BaseModel):
@@ -233,15 +288,43 @@ DecisionLever = Literal["診療コンセプト", "設備投資", "診療時間",
                         "人員体制", "立地判断", "患者層"]
 
 
+class EvidenceLink(BaseModel):
+    """外部事実 1 件が、その仮説をどちら向きに動かすか（指示書 §11）。
+
+    **向きが無いと、反証が残りません。** これまで ``evidence`` は id の
+    並びで、支持したのか否定したのかは ``reasoning`` の文章の中にしか
+    ありませんでした。文章の中にあるものは、機械で数えられず、後の段が
+    読み違えます。
+    """
+
+    fact_id: str = Field(description="EXTERNAL FACT の id（C001 など）")
+    stance: Literal["supports", "contradicts", "context"] = Field(
+        description="supports=仮説を支持 / contradicts=否定 / "
+                    "context=関係はあるが判定には効かない")
+    note: str = Field(
+        description="その事実がなぜ支持／反証になるのかを1文で")
+
+
 class Hypothesis(BaseModel):
-    """PATTERN の背景についての仮説と、その判定（要件 §11）。"""
+    """PATTERN の背景についての仮説と、その判定（要件 §11、指示書 §9・§12）。"""
 
     id: str = Field(description="H001 のような通し番号")
     pattern_id: str
+    #: どの問いへの答えか。**空でも受け付けます**——古い形の保存済み出力を
+    #: 読み直せなくなるほうが困るためです。新しい出力では必ず埋まります。
+    question_id: str | None = Field(
+        default=None, description="この仮説が答えている QUESTION の id（Q001 など）")
     statement: str = Field(description="この PATTERN がなぜ存在するのかの説明")
     status: HypothesisStatus
+    #: 旧・id の並び。読み出しのためだけに残します。新しい出力は
+    #: ``evidence_links`` を埋めます。
     evidence: list[str] = Field(
-        description="判定の根拠にした EXTERNAL FACT の id。1 つ以上", min_length=1)
+        default_factory=list,
+        description="判定の根拠にした EXTERNAL FACT の id")
+    #: 向きつきの根拠。**UNCERTAIN 以外では 1 つ以上**（検算が見張ります）。
+    evidence_links: list[EvidenceLink] = Field(
+        default_factory=list,
+        description="根拠にした外部事実と、それが支持か反証か")
     reasoning: str = Field(description="その外部事実からなぜその判定になるのか")
     confidence: Confidence
     #: So What?。ここが埋まらない仮説は、正しくても何も変えません。
@@ -255,6 +338,16 @@ class Hypothesis(BaseModel):
                     "ではなく、「AではなくBにする」の形で書く")
 
 
+class UnansweredQuestion(BaseModel):
+    """答えの出なかった問いと、決着させる道筋（指示書 §12・§15）。"""
+
+    question_id: str = Field(description="QUESTION の id（Q001 など）")
+    why: str = Field(description="なぜ外部情報からは答えが出なかったのか")
+    what_would_settle_it: str = Field(
+        description="何があれば決着するのか。現地確認・自治体照会・"
+                    "統計の取得など、実際に取れる手段で書く")
+
+
 class Step2Output(BaseModel):
     """STEP2（外部コンテクスト調査）の出力。
 
@@ -265,9 +358,14 @@ class Step2Output(BaseModel):
     external_facts: list[ExternalFact] = Field(default_factory=list)
     hypotheses: list[Hypothesis] = Field(default_factory=list)
     #: 調べたが答えが見つからなかった質問。空にしないでほしい欄です。
+    #: 旧・自由文。読み出しのためだけに残します。
     unanswered: list[str] = Field(
         default_factory=list,
         description="調べたが外部情報からは確認できなかった論点")
+    #: どの問いが答えられずに残ったか。**次に何をすればよいかまで書かせます。**
+    #: 自由文だけだと「分かりませんでした」で終わり、開業前に現地で確かめる
+    #: べきこと（§15）に繋がりません。
+    open_questions: list[UnansweredQuestion] = Field(default_factory=list)
 
 
 def normalize_url(url: str) -> str:
@@ -320,7 +418,9 @@ def drop_unverifiable_facilities(output: Step1Output,
 
 
 def verify_step2(output: Step2Output, allowed_pattern_ids: set[str],
-                 retrieved_urls: set[str]) -> list[TraceProblem]:
+                 retrieved_urls: set[str],
+                 allowed_question_ids: set[str] | None = None,
+                 ) -> list[TraceProblem]:
     """参照と出典が実在するか（要件 §25・§29）。
 
     いちばん重要なのは URL の検算です。モデルは「それらしい」URL を書けます
@@ -363,7 +463,91 @@ def verify_step2(output: Step2Output, allowed_pattern_ids: set[str],
                 problems.append(TraceProblem(
                     where=f"hypotheses[{hypothesis.id}].evidence",
                     problem=f"存在しない EXTERNAL FACT を参照しています: {ref!r}"))
+        problems.extend(_verify_verification(hypothesis, fact_ids,
+                                             allowed_question_ids))
         problems.extend(_screen_for_impact(hypothesis))
+
+    # 答えの出なかった問いも、実在する問いを指していること。
+    if allowed_question_ids is not None:
+        for open_q in output.open_questions:
+            if open_q.question_id not in allowed_question_ids:
+                problems.append(TraceProblem(
+                    where=f"open_questions[{open_q.question_id}]",
+                    problem=f"存在しない QUESTION を参照しています: "
+                            f"{open_q.question_id!r}"))
+    return problems
+
+
+def _verify_verification(hypothesis: Hypothesis, fact_ids: set[str],
+                         allowed_question_ids: set[str] | None,
+                         ) -> list[TraceProblem]:
+    """判定と根拠が噛み合っているか（指示書 §11・§12）。
+
+    **「支持されている」と言うなら、支持する根拠が要ります。** これは文章の
+    説得力の話ではなく、機械で確かめられる形の話です。判定が SUPPORTED なのに
+    supports の根拠が 1 つも無い出力は、読んだ人には「調べて確かめた」ように
+    見えて、実際には何も確かめていません。
+
+    ``UNCERTAIN`` だけは根拠が無くてよい判定です。**調べて何も出なかったことを、
+    そのまま書けるようにするため**で、そこを塞ぐと関係のない事実を無理に
+    supports に入れるか、仮説ごと消すかになります。消すと「調べていない」と
+    区別がつかなくなります。
+    """
+    problems: list[TraceProblem] = []
+    where = f"hypotheses[{hypothesis.id}]"
+
+    if hypothesis.status not in CURRENT_HYPOTHESIS_STATUSES:
+        problems.append(TraceProblem(
+            where=where,
+            problem=f"使わなくなった判定です: {hypothesis.status!r}。"
+                    "調べて支持が見つからなかったなら UNCERTAIN、"
+                    "調べて違うと分かったなら CONTRADICTED を使ってください"))
+
+    if (allowed_question_ids is not None and hypothesis.question_id
+            and hypothesis.question_id not in allowed_question_ids):
+        problems.append(TraceProblem(
+            where=where,
+            problem=f"存在しない QUESTION を参照しています: "
+                    f"{hypothesis.question_id!r}"))
+
+    links = hypothesis.evidence_links
+    for link in links:
+        if link.fact_id not in fact_ids:
+            problems.append(TraceProblem(
+                where=f"{where}.evidence_links",
+                problem=f"存在しない EXTERNAL FACT を参照しています: "
+                        f"{link.fact_id!r}"))
+
+    # 古い形（evidence_links が無い）には掛けません。掛けると、保存済みの
+    # レポートを読み直すたびに問題として並びます。
+    if not links:
+        if hypothesis.evidence:
+            return problems
+        if hypothesis.status not in STATUSES_WITHOUT_EVIDENCE:
+            problems.append(TraceProblem(
+                where=where,
+                problem=f"根拠が 1 つもありません。{hypothesis.status} と"
+                        "言うなら、そう言わせている外部事実が要ります"
+                        "（分からなかったなら UNCERTAIN）"))
+        return problems
+
+    supports = [link for link in links if link.stance == "supports"]
+    contradicts = [link for link in links if link.stance == "contradicts"]
+
+    if hypothesis.status in ("SUPPORTED", "PARTIALLY_SUPPORTED") and not supports:
+        problems.append(TraceProblem(
+            where=where,
+            problem=f"{hypothesis.status} なのに、支持する根拠が 1 つも"
+                    "ありません（context だけでは支持になりません）"))
+    if hypothesis.status == "CONTRADICTED" and not contradicts:
+        problems.append(TraceProblem(
+            where=where,
+            problem="CONTRADICTED なのに、否定する根拠が 1 つもありません"))
+    if hypothesis.status == "SUPPORTED" and contradicts:
+        problems.append(TraceProblem(
+            where=where,
+            problem="否定する根拠があるのに SUPPORTED です。"
+                    "PARTIALLY_SUPPORTED か UNCERTAIN のどちらかです"))
     return problems
 
 

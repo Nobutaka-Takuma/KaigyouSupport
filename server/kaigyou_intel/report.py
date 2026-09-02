@@ -33,12 +33,18 @@ _SOURCE_LABEL = {
 def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
                 sources: Sequence[Mapping[str, Any]] = (),
                 judgement: Mapping[str, Any] | None = None,
-                surroundings: Mapping[str, Any] | None = None) -> str:
+                surroundings: Mapping[str, Any] | None = None,
+                inquiry: Mapping[str, Any] | None = None) -> str:
     """レポート 1 本ぶんの Markdown。
 
     ``judgement`` は STEP3 の出力（``decision`` と ``actions``）です。散文は
     最終段が書きますが、開業方針は**欄のまま**載せます。散文に溶かすと
     「誰と競争しないか」が抜けても気づけません。表なら空欄が見えます。
+
+    ``inquiry`` は「何を問い、どう調べ、どう決着したか」です（STEP1 の
+    questions と STEP2 の hypotheses）。**ここがこの文書と、生成 AI が書いた
+    地域紹介との違いです。** 結論だけを読ませると、読み手は「本当に調べたのか」
+    を確かめられません。
 
     ``surroundings`` は STEP1 の周辺施設スキャンです。同じく欄のまま載せます。
     立地類型と施設名は、統計の数字をどう読むかを決める前提なので、本文の
@@ -66,12 +72,121 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
               else _working_body(output))
 
     lines += _legend_block(output)
+    lines += _inquiry_block(inquiry)
     lines += _surroundings_block(surroundings)
     lines += _figures_block(dataset)
     lines += _sources_block(sources)
     lines += _provenance_block(dataset)
     return "\n".join(lines).rstrip() + "\n"
 
+
+# --------------------------------------------------------------- 付録：調査の記録
+#
+# **この節がこの文書と、生成 AI が書いた地域紹介との違いです。**
+#
+# 結論だけを読ませると、読み手は「本当に調べたのか」「調べて分からなかったのか」
+# を確かめられません。問い・仮説・判定・根拠の向きを並べると、どこまでが
+# 確かめられていて、どこから先が未確認なのかが、読んだ人の側で判断できます。
+
+#: 根拠の向きの表示名。
+_STANCE_LABEL = {'supports': '支持', 'contradicts': '反証', 'context': '参考'}
+
+#: 判定の表示名。**「分からなかった」と「違った」を、字面でも分ける**ために
+#: 強調を付けています。同じ調子で並べると読み飛ばされます。
+_VERDICT_LABEL = {'SUPPORTED': '支持された', 'PARTIALLY_SUPPORTED': '一部が支持された', 'UNCERTAIN': '**どちらとも言えなかった**', 'CONTRADICTED': '**違うと分かった**', 'UNSUPPORTED': '支持されなかった'}
+
+
+def _inquiry_block(inquiry: Mapping[str, Any] | None) -> list[str]:
+    """何を問い、どう調べ、どう決着したか。
+
+    問いが 1 つも無い（古い形の）ジョブでは、節ごと出しません。空の見出しは
+    「調べていない」ではなく「この版では記録していない」なので、出すと
+    誤読させます。
+    """
+    if not inquiry:
+        return []
+    questions = list(inquiry.get("questions") or [])
+    hypotheses = list(inquiry.get("hypotheses") or [])
+    if not questions and not hypotheses:
+        return []
+
+    by_question: dict[str, list[Mapping[str, Any]]] = {}
+    orphans: list[Mapping[str, Any]] = []
+    for h in hypotheses:
+        key = h.get("question_id")
+        if key:
+            by_question.setdefault(str(key), []).append(h)
+        else:
+            orphans.append(h)
+
+    facts = {str(f.get("id")): f for f in (inquiry.get("external_facts") or [])}
+    settled = {q.get("question_id") for q in (inquiry.get("open_questions") or [])}
+
+    answered = sum(1 for q in questions
+                   if by_question.get(str(q.get("id")))
+                   and str(q.get("id")) not in settled)
+    lines = ["## 調査の記録", ""]
+    if questions:
+        lines += [f"この商圏について **{len(questions)} 件の問い**を立て、"
+                  f"**{answered} 件**に外部情報で答えが出ました。", ""]
+
+    for question in questions:
+        qid = str(question.get("id") or "")
+        lines += [f"### {qid}　{question.get('question', '')}", ""]
+        if question.get("why_it_matters"):
+            lines += [f"**答えが出ると何が変わるか**　{question['why_it_matters']}", ""]
+        if question.get("what_would_answer_it"):
+            lines += [f"**何を調べれば答えが出るか**　{question['what_would_answer_it']}", ""]
+        lines += _hypothesis_lines(by_question.get(qid, []), facts)
+
+    if orphans:
+        lines += ["### 問いに紐づかない仮説", ""]
+        lines += _hypothesis_lines(orphans, facts)
+
+    lines += _open_question_lines(inquiry.get("open_questions") or [], questions)
+    return lines
+
+
+def _hypothesis_lines(hypotheses: Sequence[Mapping[str, Any]],
+                      facts: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    if not hypotheses:
+        return ["外部情報からは答えが出ませんでした。", ""]
+    lines: list[str] = []
+    for h in hypotheses:
+        verdict = _VERDICT_LABEL.get(str(h.get("status")), str(h.get("status")))
+        lines += [f"- **{h.get('id', '')}** {h.get('statement', '')}  ",
+                  f"  判定：{verdict}"]
+        if h.get("reasoning"):
+            lines.append(f"  　{h['reasoning']}")
+        for link in h.get("evidence_links") or []:
+            stance = _STANCE_LABEL.get(str(link.get("stance")), "")
+            fact = facts.get(str(link.get("fact_id"))) or {}
+            lines.append(
+                f"  - {stance}　{fact.get('statement', link.get('fact_id', ''))}"
+                f"（{link.get('fact_id', '')}）{'：' + link['note'] if link.get('note') else ''}")
+    lines.append("")
+    return lines
+
+
+def _open_question_lines(open_questions: Sequence[Mapping[str, Any]],
+                         questions: Sequence[Mapping[str, Any]]) -> list[str]:
+    """答えの出なかった問いと、決着させる道筋。
+
+    **ここは「分からなかった」の一覧ではなく、現地で確かめることの一覧です。**
+    """
+    if not open_questions:
+        return []
+    text = {str(q.get("id")): str(q.get("question") or "") for q in questions}
+    lines = ["### 答えが出なかった問い（開業前に確かめること）", ""]
+    for item in open_questions:
+        qid = str(item.get("question_id") or "")
+        lines += [f"**{qid}　{text.get(qid, '')}**", ""]
+        if item.get("why"):
+            lines.append(f"- 公表資料では答えが出なかった理由：{item['why']}")
+        if item.get("what_would_settle_it"):
+            lines.append(f"- 決着させるには：{item['what_would_settle_it']}")
+        lines.append("")
+    return lines
 
 # --------------------------------------------------------------- 付録：基礎数値
 #
@@ -886,7 +1001,19 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         cur.execute("SELECT output_json FROM analysis_steps WHERE job_id = %s "
                     "AND step_number = 1 AND status = 'completed'", (job_id,))
         step1 = cur.fetchone()
-        surroundings = ((step1 or {}).get("output_json") or {}).get("surroundings")
+        step1_out = (step1 or {}).get("output_json") or {}
+        surroundings = step1_out.get("surroundings")
+        # 何を問い、どう調べ、どう決着したか。問いは STEP1、答えは STEP2 に
+        # あるので、ここで 1 つに束ねます。
+        cur.execute("SELECT output_json FROM analysis_steps WHERE job_id = %s "
+                    "AND step_number = 2 AND status = 'completed'", (job_id,))
+        step2_out = (cur.fetchone() or {}).get("output_json") or {}
+        inquiry = {
+            "questions": step1_out.get("questions") or [],
+            "hypotheses": step2_out.get("hypotheses") or [],
+            "external_facts": step2_out.get("external_facts") or [],
+            "open_questions": step2_out.get("open_questions") or [],
+        }
 
     named = dict(dataset)
     if row and row["location_name"]:
@@ -894,7 +1021,8 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
                              "name": row["location_name"]}
 
     with conn.cursor() as cur:
-        markdown = to_markdown(output, named, sources, judgement, surroundings)
+        markdown = to_markdown(output, named, sources, judgement, surroundings,
+                               inquiry)
         cur.execute(
             """
             INSERT INTO analysis_reports (job_id, report_json, report_markdown,

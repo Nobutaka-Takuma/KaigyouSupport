@@ -537,7 +537,7 @@ def test_the_step1_schema_does_not_ask_for_benchmarks():
     します。スキーマに benchmarks を戻すと、LLM が数字を作り始めます。
     """
     assert set(Step1Output.model_fields) == {
-        "facts", "patterns", "not_determinable", "surroundings"}
+        "facts", "patterns", "not_determinable", "surroundings", "questions"}
     assert "measure_key" in Fact.model_fields
     # surroundings は外部情報の置き場所で、FACT の材料ではありません。
     # 数字を伴う欄（percentile / rank / benchmark）を足さないこと。
@@ -1530,24 +1530,56 @@ def test_the_qualitative_factors_are_a_frame_not_an_answer():
     assert set(LAYERS) >= {"competition_offer", "future", "economy"}
 
 
-def test_an_unsupported_hypothesis_is_kept():
+def test_a_contradicted_hypothesis_is_kept():
     """要件 §11：否定された仮説も保存する。
 
     「調べたが違った」は、調べていないのとは別の情報です。落とすと STEP3 が
     同じ筋を追い直します。
     """
-    from kaigyou_intel.schemas import Hypothesis, verify_step2
+    from kaigyou_intel.schemas import EvidenceLink, Hypothesis, verify_step2
 
     output = _step2_output(hypotheses=[Hypothesis(
         id="H001", pattern_id="P001", statement="再開発が原因である",
-        status="UNSUPPORTED", evidence=["C001"],
+        status="CONTRADICTED",
+        evidence=["C001"],
+        evidence_links=[EvidenceLink(
+            fact_id="C001", stance="contradicts",
+            note="区の資料では当該期間の大規模開発は確認できなかった")],
         reasoning="区の資料では当該期間の大規模開発は確認できなかった",
         confidence="medium", changes=["立地判断"],
         decision_impact="再開発による流入を前提にせず、現在の居住者だけで"
                         "成り立つ規模で計画する。")])
     assert verify_step2(output, {"P001"},
                         {"https://www.city.chuo.lg.jp/toukei/jinkou.html"}) == []
-    assert output.model_dump()["hypotheses"][0]["status"] == "UNSUPPORTED"
+    assert output.model_dump()["hypotheses"][0]["status"] == "CONTRADICTED"
+
+
+def test_the_old_verdict_still_loads_but_is_not_accepted_from_the_model():
+    """**古い保存済みレポートは読めること。ただし新しい出力では使わせない。**
+
+    `UNSUPPORTED` は「調べたが支持が見つからなかった」と「調べたら違うと
+    分かった」を兼ねていました。経営判断にとってこの 2 つは正反対です
+    （前者は現地で確かめる、後者は別の筋を追う）。語彙は分けましたが、
+    すでに保存されたレポートを読めなくするわけにはいきません。
+    """
+    from kaigyou_intel.schemas import Hypothesis, Step2Output, verify_step2
+
+    # 読み出しは通ること（古いジョブの再表示）。
+    old = Step2Output.model_validate({
+        "hypotheses": [{
+            "id": "H001", "pattern_id": "P001", "statement": "s",
+            "status": "UNSUPPORTED", "evidence": ["C001"], "reasoning": "r",
+            "confidence": "low", "changes": ["立地判断"],
+            "decision_impact": "AではなくBにする"}]})
+    assert old.hypotheses[0].status == "UNSUPPORTED"
+
+    # 新しい出力としては通らないこと。
+    problems = verify_step2(_step2_output(hypotheses=[Hypothesis(
+        id="H001", pattern_id="P001", statement="s", status="UNSUPPORTED",
+        evidence=["C001"], reasoning="r", confidence="low",
+        changes=["立地判断"], decision_impact="AではなくBにする")]),
+        {"P001"}, {"https://www.city.chuo.lg.jp/toukei/jinkou.html"})
+    assert any("使わなくなった判定" in p.problem for p in problems), problems
 
 
 def test_step2_searches_once_and_then_writes_it_down(monkeypatch):
@@ -1914,8 +1946,10 @@ def test_the_prompts_say_where_a_missing_source_belongs():
     text = cfg.prompt_text("step2_structure.md")
     assert "unanswered" in text
     assert "EXTERNAL FACT ではありません" in text
-    # 「何も見つからなかった」は反証ではない、と書いてあること。
-    assert "UNSUPPORTED ではありません" in text
+    # 「何も見つからなかった」と「違うと分かった」を分けてあること。
+    # 前者は現地で確かめる項目、後者は消えた筋で、経営判断では正反対です。
+    assert "UNCERTAIN" in text and "CONTRADICTED" in text
+    assert "`UNSUPPORTED` は使わないでください" in text
 
 
 def test_step1_is_told_which_questions_have_public_answers():
@@ -4537,3 +4571,168 @@ def test_the_markdown_tables_are_shaped_the_way_the_web_view_expects(dataset):
             f"{i + 1} 行目の表に区切り行がありません: {line.strip()[:60]}")
         tables += 1
     assert tables > 0, "表が 1 つも無いなら、この試験は何も見張っていません"
+
+
+# ============================================================ 調査の連鎖（指示書 §8-§12）
+def test_a_question_carries_how_to_answer_it():
+    """**問いを立てた段で、調べ方まで決めさせる。**
+
+    指示書 §16「調査すべきことを AI 自身に決めさせる」の実体がここです。
+    次の段に丸投げすると「〇〇駅について検索してください」になり、§23 が
+    禁じている「AI検索サービス」になります。
+    """
+    from kaigyou_intel.schemas import Question
+
+    assert set(Question.model_fields) == {
+        "id", "pattern_id", "question", "why_it_matters", "what_would_answer_it"}
+
+
+def test_not_knowing_and_being_wrong_are_different_verdicts():
+    """**「調べたが分からなかった」と「調べたら違った」を分ける。**
+
+    経営判断にとってこの 2 つは正反対です。前者は開業前に現地で確かめる
+    項目になり、後者はその筋が消えたので別を追うことになります。同じ札に
+    入れると、レポートを読んだ歯科医師はどちらなのか判断できません。
+    """
+    from kaigyou_intel.schemas import (
+        CURRENT_HYPOTHESIS_STATUSES, STATUSES_WITHOUT_EVIDENCE)
+
+    assert {"UNCERTAIN", "CONTRADICTED"} <= CURRENT_HYPOTHESIS_STATUSES
+    assert "UNSUPPORTED" not in CURRENT_HYPOTHESIS_STATUSES
+    # 「分からなかった」だけが根拠なしでよい。調べて何も出なかったことを、
+    # そのまま書けるようにするため。
+    assert STATUSES_WITHOUT_EVIDENCE == {"UNCERTAIN"}
+
+
+def test_a_verdict_must_match_the_direction_of_its_evidence():
+    """**「支持されている」と言うなら、支持する根拠が要る。**
+
+    文章の説得力の話ではなく、機械で確かめられる形の話です。SUPPORTED なのに
+    supports の根拠が 1 つも無い出力は、読んだ人には「調べて確かめた」ように
+    見えて、実際には何も確かめていません。
+    """
+    from kaigyou_intel.schemas import EvidenceLink, Hypothesis, verify_step2
+
+    def check(status, stances):
+        output = _step2_output(hypotheses=[Hypothesis(
+            id="H001", pattern_id="P001", statement="s", status=status,
+            evidence_links=[EvidenceLink(fact_id="C001", stance=st, note="n")
+                            for st in stances],
+            reasoning="r", confidence="medium", changes=["立地判断"],
+            decision_impact="平日夕方を主戦場にするのではなく、土曜の終日診療に人員を寄せる。")])
+        return verify_step2(output, {"P001"},
+                            {"https://www.city.chuo.lg.jp/toukei/jinkou.html"})
+
+    assert check("SUPPORTED", ["supports"]) == []
+    assert check("CONTRADICTED", ["contradicts"]) == []
+    assert check("UNCERTAIN", []) == []
+
+    # context だけでは支持になりません。
+    assert any("支持する根拠が 1 つも" in p.problem
+               for p in check("SUPPORTED", ["context"]))
+    # 否定する根拠があるのに SUPPORTED は通しません。
+    assert any("否定する根拠があるのに" in p.problem
+               for p in check("SUPPORTED", ["supports", "contradicts"]))
+    # CONTRADICTED なのに否定の根拠が無いのも通しません。
+    assert any("否定する根拠が 1 つも" in p.problem
+               for p in check("CONTRADICTED", ["supports"]))
+
+
+def test_an_old_hypothesis_without_directions_is_not_flagged():
+    """**古い形の保存済みレポートを読み直すたびに問題を並べない。**
+
+    歯科版は商談で使われています。向きの無い（古い）出力に新しい検算を
+    掛けると、再表示のたびに「根拠がありません」が並びます。
+    """
+    from kaigyou_intel.schemas import Hypothesis, verify_step2
+
+    output = _step2_output(hypotheses=[Hypothesis(
+        id="H001", pattern_id="P001", statement="s", status="SUPPORTED",
+        evidence=["C001"], reasoning="r", confidence="high",
+        changes=["立地判断"], decision_impact="平日夕方を主戦場にするのではなく、土曜の終日診療に人員を寄せる。")])
+    assert verify_step2(output, {"P001"},
+                        {"https://www.city.chuo.lg.jp/toukei/jinkou.html"}) == []
+
+
+def test_the_questions_reach_the_step_that_answers_them():
+    """問いが STEP2 に id つきで渡ること。
+
+    渡らないと、どの問いにどの仮説が答えたかを機械で追えません。
+    """
+    from kaigyou_intel.projection import for_step2
+
+    payload = for_step2(
+        {"patterns": [{"id": "P001", "title": "t", "importance": "high"}],
+         "questions": [
+             {"id": "Q001", "pattern_id": "P001", "question": "なぜか",
+              "why_it_matters": "何が変わるか", "what_would_answer_it": "市の資料"},
+             # 渡した PATTERN に紐づかない問いは落とすこと。
+             {"id": "Q009", "pattern_id": "P099", "question": "x",
+              "why_it_matters": "y", "what_would_answer_it": "z"}]},
+        {"location": {}, "competition": {}},
+        {"max_patterns": 5})
+    assert [q["id"] for q in payload["questions"]] == ["Q001"]
+    assert payload["questions"][0]["what_would_answer_it"] == "市の資料"
+
+
+def test_the_report_shows_what_was_asked_and_how_it_was_settled(dataset):
+    """**この節がこの文書と、生成 AI が書いた地域紹介との違いです。**
+
+    結論だけを読ませると、読み手は「本当に調べたのか」「調べて分からなかった
+    のか」を確かめられません。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    inquiry = {
+        "questions": [
+            {"id": "Q001", "pattern_id": "P001",
+             "question": "なぜ若年人口が突出しているのか",
+             "why_it_matters": "夜間需要を住民数から見積もれるかが変わる",
+             "what_would_answer_it": "大学の公式サイトの学部所在地一覧"},
+            {"id": "Q002", "pattern_id": "P002",
+             "question": "なぜ昼間人口が多いのか",
+             "why_it_matters": "平日夕方の診療時間の判断が変わる",
+             "what_would_answer_it": "経済センサスの事業所立地"},
+        ],
+        "external_facts": [
+            {"id": "C001", "statement": "1km圏に大学の校地がある",
+             "source_url": "https://example.ac.jp/campus"},
+        ],
+        "hypotheses": [
+            {"id": "H001", "pattern_id": "P001", "question_id": "Q001",
+             "statement": "大学の学生が通ってきている", "status": "SUPPORTED",
+             "evidence_links": [{"fact_id": "C001", "stance": "supports",
+                                 "note": "校地が商圏内にある"}],
+             "reasoning": "校地の所在が確認できた", "confidence": "high",
+             "changes": ["診療時間"], "decision_impact": "平日夕方を主戦場にするのではなく、土曜の終日診療に人員を寄せる。"},
+        ],
+        "open_questions": [
+            {"question_id": "Q002", "why": "公表資料に該当がなかった",
+             "what_would_settle_it": "平日12時台に現地で歩行者数を数える"},
+        ],
+    }
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           (), None, None, inquiry)
+
+    assert "## 調査の記録" in markdown
+    # 立てた問いと、答えの出た数が出ること（指示書 §25）。
+    assert "2 件の問い" in markdown and "1 件" in markdown
+    # 何を調べれば答えが出るのかが読み手に見えること。
+    assert "大学の公式サイトの学部所在地一覧" in markdown
+    # 根拠に向きが付くこと。
+    assert "支持" in markdown and "C001" in markdown
+    # 答えの出なかった問いが「現地で確かめること」として残ること。
+    assert "開業前に確かめること" in markdown
+    assert "平日12時台に現地で歩行者数を数える" in markdown
+
+
+def test_the_report_stays_quiet_when_there_was_no_inquiry_recorded(dataset):
+    """古い形のジョブでは節ごと出さない。
+
+    空の見出しは「調べていない」ではなく「この版では記録していない」なので、
+    出すと誤読させます。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset))
+    assert "## 調査の記録" not in markdown

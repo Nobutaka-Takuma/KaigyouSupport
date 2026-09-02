@@ -531,6 +531,21 @@ def for_step2(step1: Mapping[str, Any], dataset: Mapping[str, Any],
              "research_questions": p.get("research_questions") or []}
             for p in patterns
         ],
+        # **問いそのもの。** これまで PATTERN の中の文字列としてしか渡って
+        # いませんでした。id を持って渡すと、どの問いにどの仮説が答えたか、
+        # どの問いが残ったかを、あとから機械で数えられます。
+        #
+        # `what_would_answer_it` が効きます。「何を調べるべきか」を STEP1 が
+        # 決めているので、STEP2 は探し方を考えるところから始めずに済みます
+        # （指示書 §10・§16）。
+        "questions": [
+            {"id": q.get("id"), "pattern_id": q.get("pattern_id"),
+             "question": q.get("question"),
+             "why_it_matters": q.get("why_it_matters"),
+             "what_would_answer_it": q.get("what_would_answer_it")}
+            for q in (step1.get("questions") or [])
+            if q.get("pattern_id") in {p.get("id") for p in patterns}
+        ],
         "nearby_clinics": [
             {"name": c.get("name"), "distance_m": c.get("distance_m"),
              "specialties": [s.get("label") for s in (c.get("specialties") or [])],
@@ -578,7 +593,12 @@ def for_step3(step1: Mapping[str, Any], step2: Mapping[str, Any],
                   "surroundings": step1.get("surroundings")},
         "step2": {"external_facts": step2.get("external_facts"),
                   "hypotheses": step2.get("hypotheses"),
-                  "unanswered": step2.get("unanswered")},
+                  "unanswered": step2.get("unanswered"),
+                  # 答えの出なかった問いと、決着させる道筋。**「開業前に
+                  # 現地で確認すべきこと」の材料はここにあります。**
+                  # 自由文の unanswered だけだと、次に何をすればよいかが
+                  # 残りません。
+                  "open_questions": step2.get("open_questions") or []},
         "data_quality": dataset.get("data_quality"),
     }
 

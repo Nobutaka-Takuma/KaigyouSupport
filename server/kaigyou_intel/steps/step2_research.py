@@ -205,7 +205,11 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         for f in failed] + [
         f"{pid} は検索回数の上限に達したため調べていません。" for pid in skipped]
 
-    problems = verify_step2(output, allowed, urls)
+    # 問いが渡っていない古い入力では None（検算を掛けません）。掛けると、
+    # 古い形の再実行が毎回「存在しない QUESTION」で埋まります。
+    question_ids = {str(q.get("id")) for q in (payload.get("questions") or [])
+                    if q.get("id")}
+    problems = verify_step2(output, allowed, urls, question_ids or None)
     if problems:
         raise StepFailed(
             "参照が解決しませんでした: "
