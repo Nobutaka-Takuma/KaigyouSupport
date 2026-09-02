@@ -5056,3 +5056,359 @@ def test_a_verdict_that_did_not_occur_is_not_shown_as_zero(dataset):
     })
     keys = [v["key"] for v in counts["verdicts"]]
     assert keys == ["SUPPORTED"], keys
+
+
+# ------------------------------------------------------- RESEARCH の反復（2周目）
+#
+# 1 周目は STEP1 が立てた問いをそのまま検索に持っていきます。実際の調査は
+# そうではありません。1 回目に何が出てこなかったかを見て、次に何を引くかが
+# 決まります。
+
+def _step2_with_a_dead_end() -> "Step2Output":
+    """1 周目で説明が消え、問いだけが残った状態。"""
+    from kaigyou_intel.schemas import (
+        ExternalFact, Hypothesis, Step2Output, UnansweredQuestion)
+
+    return Step2Output(
+        external_facts=[ExternalFact(
+            id="C001", pattern_id="P001", statement="外部事実1",
+            source_url="https://www.city.chuo.lg.jp/toukei/jinkou.html",
+            source_title="t", confidence="high")],
+        hypotheses=[Hypothesis(
+            id="H001", pattern_id="P001", question_id="Q001",
+            statement="タワーマンション供給が子育て世帯を呼び込んだ",
+            status="CONTRADICTED", evidence=["C001"],
+            evidence_links=[{"fact_id": "C001", "stance": "contradicts",
+                             "note": "供給時期が合わない"}],
+            reasoning="供給は2010年代前半で、増加はそれ以降", confidence="medium",
+            changes=["患者層"],
+            decision_impact="子育て世帯ではなく単身勤務者を主に据える。")],
+        open_questions=[UnansweredQuestion(
+            question_id="Q002", why="公表資料に無かった",
+            what_would_settle_it="市の住宅着工統計を年次で確認する")])
+
+
+def _followup_output() -> "Step2Output":
+    """2 周目の出力。**id は 1 周目と同じ C001 / H001 から始まります。**"""
+    from kaigyou_intel.schemas import ExternalFact, Hypothesis, Step2Output
+
+    return Step2Output(
+        external_facts=[ExternalFact(
+            id="C001", pattern_id="P001",
+            statement="市の住宅着工統計では2018年以降に賃貸共同住宅が増えている",
+            source_url="https://www.city.chuo.lg.jp/kenchiku.html",
+            source_title="建築着工統計", confidence="high")],
+        hypotheses=[Hypothesis(
+            id="H001", pattern_id="P001", question_id="Q002",
+            statement="分譲ではなく賃貸の供給が単身勤務者を呼び込んだ",
+            status="SUPPORTED", evidence=["C001"],
+            evidence_links=[{"fact_id": "C001", "stance": "supports",
+                             "note": "着工統計が賃貸の増加を示す"}],
+            reasoning="着工統計で賃貸共同住宅の増加が確認できる", confidence="high",
+            changes=["患者層"],
+            decision_impact="親子ではなく単身勤務者を一組として獲得する設計にする。")])
+
+
+def _round_two_asks(followup: "Step2Output | None" = None, calls: list | None = None):
+    """1 周目で行き止まり、2 周目で答えが出る、を模したモデル。"""
+    calls = calls if calls is not None else []
+
+    def fake_ask(*, step_number, system, user, schema=None, tools=None,
+                 web_search=None, effort=None, max_uses=None):
+        calls.append({"system": system, "user": user, "schema": schema,
+                      "max_uses": max_uses})
+        research = len([c for c in calls if c["schema"] is None])
+        if schema is None:
+            url = ("https://www.city.chuo.lg.jp/toukei/jinkou.html" if research == 1
+                   else "https://www.city.chuo.lg.jp/kenchiku.html")
+            return llm.Result(
+                parsed=None, text=f"{research}周目の調査結果。",
+                usage=llm.Usage(input_tokens=100, output_tokens=100, web_searches=2),
+                model="claude-sonnet-5",
+                sources=[{"url": url, "title": "t", "page_age": None}])
+        parsed = (_step2_with_a_dead_end()
+                  if len([c for c in calls if c["schema"] is not None]) == 1
+                  else (followup if followup is not None else _followup_output()))
+        return llm.Result(parsed=parsed,
+                          usage=llm.Usage(input_tokens=50, output_tokens=50),
+                          model="claude-sonnet-5")
+
+    return fake_ask, calls
+
+
+def test_a_dead_end_is_researched_again_from_a_different_angle(monkeypatch):
+    """「調べたら違うと分かった」で止めないこと。
+
+    **問いはまだ生きています。** 人がやるなら「では何が本当の理由なのか」と
+    続けるところで、1 周目で止まるとそこで終わりになります。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    fake_ask, calls = _round_two_asks()
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(),
+         "questions": [{"id": "Q001", "question": "なぜ年少人口が増えたのか"},
+                       {"id": "Q002", "question": "供給されたのは分譲か賃貸か"}]},
+        {"location": {"name": "銀座"}})
+    output, usage, sources = step2_research.run(payload)
+
+    assert len(calls) == 4, "調べる×2・写す×2 で 4 回"
+    # 2 周目には、1 周目に消えた説明と残った問いが渡ること。
+    followup = calls[2]["user"]
+    assert "Q002" in followup and "タワーマンション供給" in followup
+    # 1 周目の本文は渡しません（入力が倍になるだけ）。
+    assert "1周目の調査結果。" not in followup
+
+    assert usage.web_searches == 4, "2 周ぶんの検索が数えられていない"
+    assert len(output["external_facts"]) == 2
+    assert len(output["hypotheses"]) == 2
+
+
+def test_the_second_round_does_not_overwrite_the_first_rounds_ids(monkeypatch):
+    """**どちらの周も C001 から採番します。**
+
+    そのまま足すと、2 周目の C001 が 1 周目の C001 を指しているように読め、
+    根拠の追跡が静かに壊れます。見た目には何も起きません——レポートには
+    「C001 による」と出て、別の事実が引かれているだけです。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    fake_ask, _ = _round_two_asks()
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(),
+         "questions": [{"id": "Q001", "question": "q1"},
+                       {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    ids = [f["id"] for f in output["external_facts"]]
+    assert ids == ["C001", "C002"], ids
+    assert [h["id"] for h in output["hypotheses"]] == ["H001", "H002"]
+    # 2 周目の仮説が指す先が、振り直したあとの id になっていること。
+    second = output["hypotheses"][1]
+    assert second["evidence"] == ["C002"]
+    assert second["evidence_links"][0]["fact_id"] == "C002"
+    # そして、その C002 は 2 周目の事実であること（1 周目のを指していない）。
+    assert "着工統計" in output["external_facts"][1]["statement"]
+
+
+def test_what_came_back_in_the_second_round_says_so(monkeypatch):
+    """調べ直して出たことと、最初から出ていたことを、同じ顔で並べない。
+
+    **調べ直したという事実そのものが記録です。**
+    """
+    from kaigyou_intel.report import to_markdown
+    from kaigyou_intel.steps import step2_research
+
+    fake_ask, _ = _round_two_asks()
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(),
+         "questions": [{"id": "Q001", "question": "q1"},
+                       {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    assert output["external_facts"][0]["round"] == 1
+    assert output["external_facts"][1]["round"] == 2
+    assert output["hypotheses"][1]["round"] == 2
+
+
+def test_a_question_answered_in_the_second_round_leaves_the_unconfirmed_list(
+        monkeypatch):
+    """2 周目で答えが出た問いを「開業前に現地で確かめること」に残さない。
+
+    残すと、答えが出ているのに現地確認の項目として並び続けます。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    fake_ask, _ = _round_two_asks()
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(),
+         "questions": [{"id": "Q001", "question": "q1"},
+                       {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    assert [q["question_id"] for q in output["open_questions"]] == [], (
+        "Q002 は 2 周目で答えが出たのに未確認のまま残っている")
+
+
+def test_the_second_round_does_not_run_when_the_first_settled_everything(
+        monkeypatch):
+    """残っているものが無ければ走らせない。**足すものがありません。**
+
+    1 件あたりの費用と時間だけが増えます。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    calls: list[dict] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, **kw):
+        calls.append({"schema": schema})
+        if schema is None:
+            return llm.Result(
+                parsed=None, text="調査結果。", usage=llm.Usage(web_searches=1),
+                model="m",
+                sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html",
+                          "title": "t", "page_age": None}])
+        return llm.Result(parsed=_step2_output(), usage=llm.Usage(), model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(_step1_for_step2(),
+                                         {"location": {"name": "銀座"}})
+    step2_research.run(payload)
+    assert len(calls) == 2, "答えが出ているのに 2 周目を走らせている"
+
+
+def test_the_second_round_can_be_switched_off(monkeypatch):
+    """設定 1 行で 1 周に戻せること。
+
+    費用と時間が惜しいとき、外部に出られない環境で試すとき、挙動を 1 周目
+    だけに固定して比べたいときに要ります。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_intel.steps import step2_research
+
+    base = cfg.analysis_config()
+    tuned = {**base, "limits": {**(base.get("limits") or {}), "research_rounds": 1}}
+    monkeypatch.setattr(cfg, "analysis_config", lambda: tuned)
+
+    fake_ask, calls = _round_two_asks()
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(), "questions": [{"id": "Q001", "question": "q"}]},
+        {"location": {"name": "銀座"}})
+    step2_research.run(payload)
+    assert len(calls) == 2, "research_rounds: 1 でも 2 周目が走っている"
+
+
+def test_a_failed_second_round_does_not_throw_away_the_first(monkeypatch):
+    """**1 周目は既に払った検索と時間の上に立っています。**
+
+    2 周目がしくじったからといって、それを捨てるのは割に合いません。
+    """
+    from kaigyou_intel.steps import step2_research
+
+    calls: list[dict] = []
+
+    def fake_ask(*, step_number, system, user, schema=None, **kw):
+        calls.append({"schema": schema})
+        research = len([c for c in calls if c["schema"] is None])
+        if schema is None:
+            if research == 2:
+                raise RuntimeError("overloaded")
+            return llm.Result(
+                parsed=None, text="1周目。", usage=llm.Usage(web_searches=2),
+                model="m",
+                sources=[{"url": "https://www.city.chuo.lg.jp/toukei/jinkou.html",
+                          "title": "t", "page_age": None}])
+        return llm.Result(parsed=_step2_with_a_dead_end(), usage=llm.Usage(),
+                          model="m")
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(), "questions": [{"id": "Q001", "question": "q"},
+                                             {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    assert len(output["external_facts"]) == 1, "1 周目まで消えている"
+    # 黙って落とさない。何が起きたかを残します。
+    assert any("2 周目" in u for u in output["unanswered"])
+
+
+def test_the_second_round_is_held_to_the_same_verification(monkeypatch):
+    """検算を 2 周目だけ緩めないこと。
+
+    緩めると「支持された」と書いてあるのに支持の根拠が無い仮説が混ざります。
+    かといって落として例外を上げると、既に払った 1 周目まで消えます。
+    **2 周目のほうを捨てます。**
+    """
+    from kaigyou_intel.schemas import ExternalFact, Hypothesis, Step2Output
+    from kaigyou_intel.steps import step2_research
+
+    # 支持されたと言いながら、根拠の向きが反証しかない。
+    bad = Step2Output(
+        external_facts=[ExternalFact(
+            id="C001", pattern_id="P001", statement="f",
+            source_url="https://www.city.chuo.lg.jp/kenchiku.html",
+            source_title="t", confidence="high")],
+        hypotheses=[Hypothesis(
+            id="H001", pattern_id="P001", question_id="Q002", statement="s",
+            status="SUPPORTED", evidence=["C001"],
+            evidence_links=[{"fact_id": "C001", "stance": "contradicts",
+                             "note": "n"}],
+            reasoning="r", confidence="high", changes=["患者層"],
+            decision_impact="親子ではなく単身勤務者を主に据える。")])
+    fake_ask, _ = _round_two_asks(followup=bad)
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    payload = step2_research.build_input(
+        {**_step1_for_step2(), "questions": [{"id": "Q001", "question": "q"},
+                                             {"id": "Q002", "question": "q2"}]},
+        {"location": {"name": "銀座"}})
+    output, _, _ = step2_research.run(payload)
+
+    assert len(output["hypotheses"]) == 1, "検算に落ちた 2 周目を採用している"
+    assert len(output["external_facts"]) == 1
+    assert any("2 周目" in u for u in output["unanswered"])
+
+
+def test_the_report_says_when_it_went_back_and_looked_again(dataset):
+    """調べ直したことを書かないと、1 周で出たように読めます。
+
+    **調べ直したという事実そのものが記録です。**
+    """
+    from kaigyou_intel.report import to_markdown
+
+    inquiry = {
+        "questions": [{"id": "Q001", "question": "q1"},
+                      {"id": "Q002", "question": "q2"}],
+        "hypotheses": [
+            {"id": "H001", "question_id": "Q001", "statement": "s1",
+             "status": "CONTRADICTED", "round": 1,
+             "evidence_links": [{"fact_id": "C001", "stance": "contradicts",
+                                 "note": "n"}],
+             "reasoning": "r", "confidence": "medium", "changes": ["患者層"],
+             "decision_impact": "子育て世帯ではなく単身勤務者を主に据える。"},
+            {"id": "H002", "question_id": "Q002", "statement": "s2",
+             "status": "SUPPORTED", "round": 2,
+             "evidence_links": [{"fact_id": "C002", "stance": "supports",
+                                 "note": "n"}],
+             "reasoning": "r", "confidence": "high", "changes": ["患者層"],
+             "decision_impact": "親子ではなく単身勤務者を一組として獲得する。"},
+        ],
+        "external_facts": [{"id": "C001", "statement": "f1", "round": 1},
+                           {"id": "C002", "statement": "f2", "round": 2}],
+        "open_questions": [],
+    }
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           [], None, None, inquiry)
+    assert "角度を変えて調べ直しました" in markdown
+    assert "2 周目で立てた仮説 1 件" in markdown
+    # 調査の記録でも、1 周目のものと同じ顔で並べない。
+    assert "（調べ直して）" in markdown
+
+
+def test_a_one_round_job_does_not_claim_it_looked_again(dataset):
+    """1 周しか回っていないジョブに「調べ直しました」と書かない。"""
+    from kaigyou_intel.report import to_markdown
+
+    inquiry = {
+        "questions": [{"id": "Q001", "question": "q1"}],
+        "hypotheses": [{"id": "H001", "question_id": "Q001", "statement": "s",
+                        "status": "SUPPORTED", "reasoning": "r",
+                        "evidence_links": [{"fact_id": "C001",
+                                            "stance": "supports", "note": "n"}],
+                        "confidence": "high", "changes": ["患者層"],
+                        "decision_impact": "AではなくBに寄せる。"}],
+        "external_facts": [{"id": "C001", "statement": "f"}],
+        "open_questions": [],
+    }
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           [], None, None, inquiry)
+    assert "調べ直しました" not in markdown
+    assert "（調べ直して）" not in markdown

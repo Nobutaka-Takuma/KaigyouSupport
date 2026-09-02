@@ -112,6 +112,10 @@ def step_settings(step_number: int) -> dict[str, Any]:
         # Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は
         # 「調べる」「書き写す」の 2 回に分かれます。
         "prompt_structure": step.get("prompt_structure"),
+        # STEP2 の 2 周目。1 周目の結果を見て、答えの出なかった問いだけを
+        # 角度を変えて調べ直す呼び出しで使うプロンプト。無ければ 2 周目は
+        # 走りません（limits.research_rounds でも止められます）。
+        "prompt_followup": step.get("prompt_followup"),
         # STEP1 の 1 回目。**その場所に何があるのか**を検索する呼び出しで
         # 使うプロンプト。統計を読む前に立地類型が決まらないと、同じ
         # 「昼間人口5万人」をオフィス街としても大学のそばとしても読めます。

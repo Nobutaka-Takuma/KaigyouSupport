@@ -1222,3 +1222,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .findings__open ul { margin: 0.25rem 0 0; padding-left: 1.1rem; line-height: 1.6; }
 .findings__settle { display: block; color: #4b5563; font-size: 0.76rem; }
+/* 2 周目があったことを、他の行より少しだけ立てます。同じ調子で並べると、
+ * 「調べ直した」という記録そのものが読み飛ばされます。 */
+.findings__again { color: #115e59; }

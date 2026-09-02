@@ -276,6 +276,11 @@ class ExternalFact(BaseModel):
     source_title: str = Field(description="そのページの表題")
     confidence: Confidence = Field(
         description="high=一次資料に明記 / medium=公的資料からの読み取り / low=それ以外")
+    #: 何周目の調査で出てきたか。**モデルの申告ではなく、サーバが上書きします。**
+    #: 1 周目で答えが出ず、2 周目で角度を変えて出てきた事実は、最初から
+    #: 出ていた事実とは意味が違います。「調べ直した」という事実そのものが
+    #: 記録で、それが消えると読み手には 1 周で出たように見えます。
+    round: int = Field(default=1, description="システムが設定します（記入不要）")
 
 
 #: 仮説が正しかったときに動きうるもの。**config/<業態>/hypotheses.yaml の
@@ -336,6 +341,8 @@ class Hypothesis(BaseModel):
     decision_impact: str = Field(
         description="何がどう変わるのかを1〜2文で。「〜を検討する余地がある」"
                     "ではなく、「AではなくBにする」の形で書く")
+    #: 何周目で立てた仮説か。サーバが上書きします（``ExternalFact.round`` と同じ）。
+    round: int = Field(default=1, description="システムが設定します（記入不要）")
 
 
 class UnansweredQuestion(BaseModel):

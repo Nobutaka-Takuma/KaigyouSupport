@@ -523,6 +523,9 @@ export interface AnalysisProgress {
     question: string;
     what_would_settle_it: string;
   }[];
+  /** 何周調べたか。2 なら、1 周目で答えの出なかった問いを調べ直しています。 */
+  rounds: number;
+  second_round_hypotheses: number;
   /** どの段まで数え終わっているか。 */
   through_step: number;
   /** STEP2（外部調査）が済んでいるか。**未了と「0件だった」を分けるため。** */

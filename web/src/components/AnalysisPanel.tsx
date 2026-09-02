@@ -386,6 +386,15 @@ function Findings({ p }: { p: AnalysisProgress }) {
             ))}
           </li>
         )}
+        {/* **調べ直したという事実そのものを見せます。** 1 周目で答えが出な
+            かった問いに角度を変えて答えが出たのなら、最初から出ていた答え
+            とは別の重みを持ちます。 */}
+        {p.rounds > 1 && (
+          <li className="findings__again">
+            1 周目で答えの出なかった問いを<strong>調べ直しました</strong>
+            　→ 2 周目で立てた仮説 {p.second_round_hypotheses} 件
+          </li>
+        )}
         {p.cited_sources > 0 && (
           <li>
             引用した外部資料 <strong>{p.cited_sources} 件</strong>

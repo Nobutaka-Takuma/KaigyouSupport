@@ -231,7 +231,230 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         cache_write_tokens=sum(f.usage.cache_write_tokens for f in findings)
         + structured.usage.cache_write_tokens,
     )
+
+    # 2 周目。**1 周目が何かを残したときだけ**走ります。
+    if _should_iterate(output, limits):
+        extra_usage, extra_sources = _second_round(
+            output, patterns, location, payload, limits, category)
+        usage = _add(usage, extra_usage)
+        retrieved = retrieved + extra_sources
+
     return output.model_dump(), usage, _sources_with_patterns(retrieved, output)
+
+
+# --------------------------------------------------------------- 2 周目
+#
+# 1 周目は STEP1 が立てた問いをそのまま検索に持っていきます。実際の調査は
+# そうではありません。**1 回目に何が出てこなかったかを見て、次に何を引くかが
+# 決まります。**
+#
+# とくに CONTRADICTED——「調べたら違うと分かった」——は、**問いがまだ生きて
+# いるのに 1 周目で止まると、そこで終わりになります。** 人がやるなら
+# 「では何が本当の理由なのか」と続けるところです。
+
+
+def _should_iterate(output: Step2Output, limits: Mapping[str, Any]) -> bool:
+    """2 周目を走らせるか。
+
+    残っているものが無ければ走りません。**走らせても足すものがありません**し、
+    1 件あたりの費用と時間はそのぶん増えます。
+    """
+    if int(limits.get("research_rounds", 1)) < 2:
+        return False
+    if max(1, int(limits.get("followup_searches", 0))) < 1:
+        return False
+    return bool(output.open_questions
+                or any(h.status == "CONTRADICTED" for h in output.hypotheses))
+
+
+def _second_round(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
+                  location: Mapping[str, Any], payload: Mapping[str, Any],
+                  limits: Mapping[str, Any], category: str,
+                  ) -> tuple[llm.Usage, list[dict[str, Any]]]:
+    """答えの出なかった問いを、角度を変えて調べ直す。
+
+    **失敗しても例外を上げません。** 1 周目は既に払った検索と時間の上に
+    立っています。2 周目がしくじったからといってそれを捨てるのは割に
+    合いません。落ちたことは ``unanswered`` に残ります。
+
+    ``output`` をその場で書き換えます（呼び出し側が model_dump します）。
+    """
+    settings = llm.step_settings(STEP_NUMBER)
+    name = settings.get("prompt_followup")
+    if not name:
+        return llm.Usage(), []
+    budget = max(1, int(limits.get("followup_searches", 3)))
+    try:
+        system = cfg.prompt_text(name, category).replace(
+            "{followup_searches}", str(budget))
+        result = llm.ask(
+            step_number=STEP_NUMBER, system=system, max_uses=budget,
+            user=_followup_brief(output, patterns, location, payload))
+    except Exception as exc:  # noqa: BLE001 - 1 周目を捨てない
+        output.unanswered = list(output.unanswered) + [
+            f"2 周目の調べ直しは呼び出しに失敗しました（{type(exc).__name__}: {exc}）。"
+            "1 周目の結果はそのままです。"]
+        return llm.Usage(), []
+
+    sources = [s for s in result.sources if s.get("url")]
+    if not (result.text or "").strip():
+        output.unanswered = list(output.unanswered) + [
+            "2 周目の調べ直しは本文が空でした。1 周目の結果はそのままです。"]
+        return result.usage, sources
+
+    try:
+        merged = _structure_followup(result.text, sources, patterns, category)
+    except Exception as exc:  # noqa: BLE001
+        output.unanswered = list(output.unanswered) + [
+            f"2 周目の結果を JSON に写せませんでした（{type(exc).__name__}: {exc}）。"
+            "1 周目の結果はそのままです。"]
+        return result.usage, sources
+
+    _merge(output, merged, {s["url"] for s in sources},
+           {str(p["id"]) for p in patterns},
+           {str(q.get("id")) for q in (payload.get("questions") or []) if q.get("id")})
+    total = llm.Usage(
+        input_tokens=result.usage.input_tokens + merged.usage.input_tokens,
+        output_tokens=result.usage.output_tokens + merged.usage.output_tokens,
+        web_searches=result.usage.web_searches + merged.usage.web_searches,
+        cache_read_tokens=result.usage.cache_read_tokens
+        + merged.usage.cache_read_tokens,
+        cache_write_tokens=result.usage.cache_write_tokens
+        + merged.usage.cache_write_tokens)
+    return total, sources
+
+
+def _followup_brief(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
+                    location: Mapping[str, Any],
+                    payload: Mapping[str, Any]) -> str:
+    """2 周目に渡すもの。**1 周目の本文は渡しません。**
+
+    渡すと入力が倍になり、そのぶん時間と金がかかります。角度を変えるのに
+    必要なのは「何を調べて何が出なかったか」であって、出た事実の全文では
+    ありません。
+    """
+    questions = {str(q.get("id")): q for q in (payload.get("questions") or [])}
+    unsettled = []
+    for item in output.open_questions:
+        asked = questions.get(str(item.question_id)) or {}
+        unsettled.append({
+            "question_id": item.question_id,
+            "question": asked.get("question"),
+            "1周目に答えが出なかった理由": item.why,
+            "決着させるには": item.what_would_settle_it,
+        })
+    dead_ends = [
+        {"question_id": h.question_id, "pattern_id": h.pattern_id,
+         "1周目に消えた説明": h.statement, "なぜ違うと分かったか": h.reasoning}
+        for h in output.hypotheses if h.status == "CONTRADICTED"]
+    return (
+        "## 地点\n\n```json\n"
+        + json.dumps(location, ensure_ascii=False, indent=1)
+        + "\n```\n\n## まだ答えが出ていない問い\n\n```json\n"
+        + json.dumps(unsettled, ensure_ascii=False, indent=1)
+        + "\n```\n\n## 1 周目に消えた説明（問いはまだ生きています）\n\n```json\n"
+        + json.dumps(dead_ends, ensure_ascii=False, indent=1)
+        + "\n```\n\n## 調べていた PATTERN\n\n```json\n"
+        + json.dumps(list(patterns), ensure_ascii=False, indent=1)
+        + "\n```\n\n## 1 周目に確認できた事実（重複して調べないため）\n\n"
+        + ("\n".join(f"- {f.statement}" for f in output.external_facts)
+           or "（なし）"))
+
+
+def _structure_followup(text: str, sources: Sequence[Mapping[str, Any]],
+                        patterns: Sequence[Mapping[str, Any]],
+                        category: str) -> Any:
+    """2 周目の本文を JSON に写す。1 周目と同じプロンプトを使います。"""
+    settings = llm.step_settings(STEP_NUMBER)
+    catalogue = "\n".join(
+        f"- {s['url']}  {s.get('title') or ''}" for s in sources) or "（なし）"
+    return llm.ask(
+        step_number=STEP_NUMBER,
+        system=cfg.prompt_text(settings["prompt_structure"], category),
+        effort=settings["effort_structure"],
+        user=("## 調査結果（2 周目）\n\n" + text
+              + "\n\n## 今回の検索で取得した URL（source_url はこの中から選ぶこと）"
+                "\n\n" + catalogue
+              + "\n\n## 調べていた PATTERN\n\n```json\n"
+              + json.dumps(list(patterns), ensure_ascii=False, indent=1)
+              + "\n```"),
+        schema=Step2Output, web_search=False)
+
+
+def _merge(first: Step2Output, second: Any, urls: set[str],
+           allowed_patterns: set[str], allowed_questions: set[str]) -> None:
+    """2 周目の結果を 1 周目に足す。**id は振り直します。**
+
+    どちらの周も C001 から採番します。そのまま足すと、2 周目の C001 が
+    1 周目の C001 を指しているように読め、根拠の追跡が静かに壊れます。
+    **見た目には何も起きません**——レポートには「C001 による」と出て、
+    別の事実が引かれているだけです。
+
+    検算は 1 周目とまったく同じものを掛けます。ただし**落ちても例外は上げず、
+    2 周目のほうを捨てます。** 検算を緩めると 2 周目だけ規律が下がり、
+    「支持された」と書いてあるのに支持の根拠が無い仮説が混ざります。
+    かといって落として例外を上げると、既に払った 1 周目まで消えます。
+    """
+    output: Step2Output | None = getattr(second, "parsed", None)
+    if output is None:
+        first.unanswered = list(first.unanswered) + [
+            "2 周目の構造化出力を受け取れませんでした。1 周目の結果はそのままです。"]
+        return
+
+    _drop_unverifiable(output, urls)
+    if not output.external_facts and not output.open_questions:
+        return
+
+    problems = verify_step2(output, allowed_patterns, urls,
+                            allowed_questions or None)
+    if problems:
+        first.unanswered = list(first.unanswered) + [
+            "2 周目の結果は参照が解決しなかったため採用しませんでした（"
+            + "; ".join(f"{p.where}: {p.problem}" for p in problems)
+            + "）。1 周目の結果はそのままです。"]
+        return
+
+    fact_id = {}
+    for offset, fact in enumerate(output.external_facts, 1):
+        fact_id[fact.id] = f"C{len(first.external_facts) + offset:03d}"
+    for fact in output.external_facts:
+        fact.id = fact_id[fact.id]
+        fact.round = 2
+    hyp_id = {}
+    for offset, hypothesis in enumerate(output.hypotheses, 1):
+        hyp_id[hypothesis.id] = f"H{len(first.hypotheses) + offset:03d}"
+    for hypothesis in output.hypotheses:
+        hypothesis.id = hyp_id[hypothesis.id]
+        hypothesis.round = 2
+        hypothesis.evidence = [fact_id.get(e, e) for e in hypothesis.evidence]
+        for link in hypothesis.evidence_links:
+            link.fact_id = fact_id.get(link.fact_id, link.fact_id)
+
+    first.external_facts = list(first.external_facts) + list(output.external_facts)
+    first.hypotheses = list(first.hypotheses) + list(output.hypotheses)
+    # 2 周目で答えが出た問いは、未確認から外します。**残すと、答えが出たのに
+    # 「開業前に現地で確かめること」に並び続けます。**
+    settled = {str(h.question_id) for h in output.hypotheses
+               if h.question_id and h.status != "UNCERTAIN"}
+    first.open_questions = [q for q in first.open_questions
+                            if str(q.question_id) not in settled]
+    # 2 周目でも出なかったものは、2 周目の言い分で置き換えます。1 周目の
+    # 「資料が見つからなかった」より、2 周目の「別の角度でも出なかった」の
+    # ほうが、次に何をすればよいかを言えています。
+    known = {str(q.question_id) for q in first.open_questions}
+    first.open_questions = list(first.open_questions) + [
+        q for q in output.open_questions if str(q.question_id) not in known
+        and str(q.question_id) not in settled]
+    first.unanswered = list(first.unanswered) + list(output.unanswered)
+
+
+def _add(a: llm.Usage, b: llm.Usage) -> llm.Usage:
+    return llm.Usage(
+        input_tokens=a.input_tokens + b.input_tokens,
+        output_tokens=a.output_tokens + b.output_tokens,
+        web_searches=a.web_searches + b.web_searches,
+        cache_read_tokens=a.cache_read_tokens + b.cache_read_tokens,
+        cache_write_tokens=a.cache_write_tokens + b.cache_write_tokens)
 
 
 def _research_all(patterns: Sequence[Mapping[str, Any]],

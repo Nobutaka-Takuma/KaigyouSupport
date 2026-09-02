@@ -154,6 +154,12 @@ def _coverage_block(inquiry: Mapping[str, Any] | None,
         lines.append(f"- **本文が引用した外部資料 {counts['cited_sources']} 件**　"
                      f"（うち官公庁・政府統計などの一次資料 "
                      f"{counts['primary_sources']} 件）")
+    # **調べ直したという事実そのものが記録です。** 1 周目で答えが出なかった
+    # 問いに角度を変えて答えが出たのなら、最初から出ていた答えとは別の重みを
+    # 持ちます。書かないと、1 周で出たように読めます。
+    if counts["rounds"] > 1:
+        lines.append("- **1 周目で答えの出なかった問いを、角度を変えて調べ直しました**　"
+                     f"→ 2 周目で立てた仮説 {counts['second_round_hypotheses']} 件")
     lines.append("")
 
     lines += _unconfirmed_summary(counts["open_questions"])
@@ -254,8 +260,12 @@ def _hypothesis_lines(hypotheses: Sequence[Mapping[str, Any]],
     lines: list[str] = []
     for h in hypotheses:
         verdict = _VERDICT_LABEL.get(str(h.get("status")), str(h.get("status")))
+        # 2 周目で出てきた仮説には、そう書きます。**1 周目で答えが出なかった
+        # ことと、調べ直して出たことは、別の情報です。**同じ顔で並べると、
+        # 調べ直した事実そのものが消えます。
+        again = "（調べ直して）" if int(h.get("round") or 1) > 1 else ""
         lines += [f"- **{h.get('id', '')}** {h.get('statement', '')}  ",
-                  f"  判定：{verdict}"]
+                  f"  判定：{again}{verdict}"]
         if h.get("reasoning"):
             lines.append(f"  　{h['reasoning']}")
         for link in h.get("evidence_links") or []:

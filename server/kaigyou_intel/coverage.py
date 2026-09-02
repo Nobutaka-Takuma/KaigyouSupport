@@ -80,8 +80,15 @@ def tally(inquiry: Mapping[str, Any] | None,
     cited = [s for s in sources if s.get("pattern_id")]
     primary = [s for s in cited if (s.get("source_type") or "") in PRIMARY_SOURCES]
 
+    # 2 周目で出たもの。**調べ直したという事実そのものが記録です。**
+    # 1 周目で答えが出なかった問いに、角度を変えて答えが出たのなら、
+    # それは最初から出ていた答えとは別の重みを持ちます。
+    second = [h for h in hypotheses if int(h.get("round") or 1) > 1]
+
     return {
         "facts": len(inquiry.get("facts") or []),
+        "rounds": 2 if second else 1,
+        "second_round_hypotheses": len(second),
         "patterns": len(inquiry.get("patterns") or []),
         "questions": len(questions),
         "answered": answered,
