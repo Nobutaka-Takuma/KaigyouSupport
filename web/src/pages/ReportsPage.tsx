@@ -70,6 +70,13 @@ export function ReportsPage() {
               {item.trace_ok === false && "（根拠の追跡に未解決あり）"}
             </div>
             <div className="reports__actions">
+              {/* **まず画面で読む。** 落として別のアプリで開くのは、
+                  そのまま渡したいときだけで十分です。 */}
+              {item.report_at && (
+                <Link className="analysis__primary" to={`/reports/${item.id}`}>
+                  画面で読む
+                </Link>
+              )}
               {item.report_at ? (
                 <button className="analysis__ghost" disabled={busy === item.id}
                         onClick={async () => {

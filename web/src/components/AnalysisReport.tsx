@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../lib/api";
+import { renderMarkdown } from "../lib/markdown";
 import type {
   AnalysisReport, AnalysisSource, ClientReportJson, Evidenced, ReportBlock,
   ReportJson,
@@ -57,6 +58,35 @@ export function AnalysisReportView(
   return <WorkingReportView report={report} json={report.report_json} jobId={jobId} />;
 }
 
+/**
+ * 提出用の文書を、画面のまま読めるようにする。
+ *
+ * これまでは「Markdownで保存」しかなく、落として別のアプリで開く必要が
+ * ありました。**提出する文書を確かめるのに、毎回アプリを行き来する必要は
+ * ありません。**
+ *
+ * 隣の「レポート」タブとは別物です。あちらは根拠の id（F001 など）を辿る
+ * ための構造の表示で、こちらは**相手に渡すものそのもの**です。
+ */
+function MarkdownView({ markdown, jobId }: { markdown: string; jobId: string }) {
+  return (
+    <div className="report__markdown">
+      <p className="report__markdown-note">
+        歯科医師に渡す文書そのものです。
+        <button type="button" className="linklike"
+                onClick={() => { void download(jobId); }}>
+          Markdownで保存
+        </button>
+        すると、そのままファイルになります。
+      </p>
+      {/* renderMarkdown はすべてエスケープしてから組み立てるので、ここに
+          渡してよい文字列です（詳しくは lib/markdown.ts）。 */}
+      <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(markdown) }} />
+    </div>
+  );
+}
+
+
 /** 顧客提出用の形で保存されたレポートか。段の構成を変える前の古い
  *  ジョブは、タグ付きの働き用の形のまま残っています。 */
 function isClientReport(json: ClientReportJson | ReportJson): json is ClientReportJson {
@@ -74,7 +104,8 @@ function ClientReportView(
   { report, json, jobId }:
     { report: AnalysisReport; json: ClientReportJson; jobId: string },
 ) {
-  const [open, setOpen] = useState<"report" | "support" | "sources">("report");
+  const [open, setOpen] =
+    useState<"report" | "support" | "sources" | "markdown">("report");
   const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
   const support = list(json.support_needed);
   const research = list(json.further_research);
@@ -94,7 +125,12 @@ function ClientReportView(
 
       <div className="report__tabs" role="tablist">
         {([["report", "レポート"], ["support", `開業に必要なこと (${support.length})`],
-           ["sources", `出典 (${cited.length})`]] as const).map(([key, label]) => (
+           ["sources", `出典 (${cited.length})`],
+           // **提出する文書そのもの。** これまでは保存して別のアプリで開く
+           // しかありませんでした。
+           ...(report.report_markdown
+               ? ([["markdown", "提出用の文書"]] as const) : []),
+          ] as const).map(([key, label]) => (
           <button key={key} role="tab" aria-selected={open === key}
                   className={open === key ? "is-active" : ""}
                   onClick={() => setOpen(key)}>
@@ -107,6 +143,10 @@ function ClientReportView(
           </button>
         )}
       </div>
+
+      {open === "markdown" && report.report_markdown && (
+        <MarkdownView markdown={report.report_markdown} jobId={jobId} />
+      )}
 
       {open === "report" && (
         <div className="report__prose">
@@ -218,7 +258,8 @@ function WorkingReportView(
   { report, json, jobId }:
     { report: AnalysisReport; json: ReportJson; jobId: string },
 ) {
-  const [open, setOpen] = useState<"decision" | "body" | "sources">("decision");
+  const [open, setOpen] =
+    useState<"decision" | "body" | "sources" | "markdown">("decision");
   const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
 
   return (
@@ -227,7 +268,10 @@ function WorkingReportView(
 
       <div className="report__tabs" role="tablist">
         {([["decision", "開業方針"], ["body", "レポート本文"],
-           ["sources", `出典 (${cited.length})`]] as const).map(([key, label]) => (
+           ["sources", `出典 (${cited.length})`],
+           ...(report.report_markdown
+               ? ([["markdown", "提出用の文書"]] as const) : []),
+          ] as const).map(([key, label]) => (
           <button
             key={key}
             role="tab"
@@ -244,6 +288,10 @@ function WorkingReportView(
           </button>
         )}
       </div>
+
+      {open === "markdown" && report.report_markdown && (
+        <MarkdownView markdown={report.report_markdown} jobId={jobId} />
+      )}
 
       {open === "decision" && (
         <div className="report__decision">

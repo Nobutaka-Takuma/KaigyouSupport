@@ -6,6 +6,7 @@ import { MapPage } from "./pages/MapPage";
 import { RankingPage } from "./pages/RankingPage";
 import { ComparePage } from "./pages/ComparePage";
 import { AboutPage } from "./pages/AboutPage";
+import { ReportPage } from "./pages/ReportPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AdminPage } from "./pages/AdminPage";
 import { SignIn } from "./components/SignIn";
@@ -52,6 +53,7 @@ export default function App() {
           <Route path="/ranking" element={<RankingPage />} />
           <Route path="/compare" element={<ComparePage />} />
           <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/reports/:jobId" element={<ReportPage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/about" element={<AboutPage />} />
         </Routes>

@@ -1042,3 +1042,102 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   }
   .zonelegend__note { display: none; }
 }
+
+/* ------------------------------------------------- 提出用の文書（Markdown） */
+/* 画面のまま読める文書として組みます。**読み物であって表ではありません**ので、
+   行間と段落の間を広めに取り、幅は 42em で止めます（1 行が長すぎると、
+   目が次の行の頭に戻れなくなります）。 */
+.report__markdown { padding: 0.75rem 0 0; }
+.report__markdown-note {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: var(--muted-bg, #f4f6f8);
+  color: #4b5563;
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+.md { max-width: 42em; font-size: 0.9rem; line-height: 1.85; color: #1f2937; }
+.md h2 {
+  margin: 0 0 0.8rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 2px solid var(--line, #e5e9ef);
+  font-size: 1.2rem;
+  line-height: 1.5;
+}
+.md h3 {
+  margin: 1.8rem 0 0.6rem;
+  font-size: 1.02rem;
+  /* 節の頭が本文に埋もれないように、左の線で段を示します。 */
+  padding-left: 0.5rem;
+  border-left: 3px solid #2b6cb0;
+}
+.md h4 { margin: 1.3rem 0 0.45rem; font-size: 0.93rem; color: #374151; }
+.md h5, .md h6 { margin: 1rem 0 0.35rem; font-size: 0.88rem; color: #4b5563; }
+.md p { margin: 0 0 0.85rem; }
+.md ul { margin: 0 0 0.9rem; padding-left: 1.3rem; }
+.md li { margin-bottom: 0.35rem; }
+.md hr { margin: 1.6rem 0; border: 0; border-top: 1px solid var(--line, #e5e9ef); }
+.md a { color: #2b6cb0; word-break: break-all; }
+.md strong { color: #111827; }
+
+/* 表は本文より小さく。数字が並ぶので、行の高さも詰めます。 */
+.md__tablewrap { overflow-x: auto; margin: 0 0 1rem; }
+.md table { border-collapse: collapse; font-size: 0.82rem; line-height: 1.6; }
+.md th, .md td {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--line, #e5e9ef);
+  text-align: left;
+  vertical-align: top;
+}
+.md th { background: var(--muted-bg, #f4f6f8); white-space: nowrap; font-size: 0.78rem; }
+
+/* 文中に置くボタンを、リンクの見た目にします。 */
+.linklike {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #2b6cb0;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* 節の「要点」。本文と同じ見た目だと、節の結論が地の文に埋もれます。 */
+.md blockquote {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border-left: 4px solid #2b6cb0;
+  border-radius: 0 6px 6px 0;
+  background: var(--muted-bg, #f4f6f8);
+}
+.md blockquote p { margin: 0; font-weight: 600; color: #1f2937; }
+.md blockquote p + p { margin-top: 0.4rem; }
+
+/* ------------------------------------------------------- レポート単体のページ */
+.page__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+.page__head h2 { margin: 0; font-size: 1.05rem; }
+.reportpage__error {
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--error-border, #f0b4b4);
+  border-radius: 6px;
+  background: var(--error-bg, #fdf2f2);
+  font-size: 0.85rem;
+}
+/* 一覧の主たる行き先。落とすより先に、まず読む。 */
+.analysis__primary {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #2b6cb0;
+  border-radius: 6px;
+  background: #2b6cb0;
+  color: #fff;
+  font-size: 0.8rem;
+  text-decoration: none;
+}
+.analysis__primary:hover { background: #245a96; }

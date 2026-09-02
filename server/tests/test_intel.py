@@ -4470,3 +4470,70 @@ def test_the_growth_horizon_lives_in_one_place():
         growth = profile.get("growth") or {}
         assert "to_year" not in growth, f"{name} に年次が重複している"
     assert growth_years() == {"from_year": 2020, "to_year": 2050}
+
+
+def test_the_markdown_uses_only_the_syntax_the_web_view_can_draw(dataset):
+    """**画面がそのまま読めることを、こちら側で保証します。**
+
+    レポートは画面の「提出用の文書」タブで描かれます。描くのは自分たちの
+    文書だけなので、汎用のパーサではなく、使っている記法だけを扱う小さな
+    描画（``web/src/lib/markdown.ts``）にしてあります——扱う記法は見出し・
+    強調・箇条書き・表・引用・区切り線・裸の URL の 7 つです。
+
+    report.py がそれ以外を使い始めると、**画面には記法が文字のまま出ます。**
+    黙って消えるよりましですが、気づくのは顧客に見せたあとです。だから
+    ここで見張ります。
+
+    増やしたくなったときは、まず描画側に足してから、この一覧を広げること。
+    """
+    import re
+
+    from kaigyou_intel.report import to_markdown
+
+    markdown = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                           (), _step3_output().model_dump())
+
+    unsupported = {
+        "コードブロック（```）": re.compile(r"^\s*```"),
+        "画像（![...](...)）": re.compile(r"!\[[^\]]*\]\("),
+        "リンク（[題名](URL)）": re.compile(r"(?<!!)\[[^\]]+\]\(\s*\S+\s*\)"),
+        "番号つき箇条書き": re.compile(r"^\s*\d+\.\s"),
+        "見出しの下線（===）": re.compile(r"^=+\s*$"),
+    }
+    found: dict[str, str] = {}
+    for line in markdown.splitlines():
+        for label, pattern in unsupported.items():
+            if label not in found and pattern.search(line):
+                found[label] = line.strip()[:60]
+
+    assert not found, (
+        "画面が描けない記法が使われています。web/src/lib/markdown.ts に"
+        f"対応を足してから、この試験を広げてください: {found}")
+
+
+def test_the_markdown_tables_are_shaped_the_way_the_web_view_expects(dataset):
+    """表は「| で始まる行」＋「次の行が |---|」の形であること。
+
+    描画側はこの 2 行組で表を見つけます。区切り行が無い表は、ただの段落に
+    なります（罫線が文字のまま出ます）。
+    """
+    import re
+
+    from kaigyou_intel.report import to_markdown
+
+    lines = to_markdown(_report_output().model_dump(), to_jsonable(dataset),
+                        (), _step3_output().model_dump()).splitlines()
+    rule = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+    tables = 0
+    for i, line in enumerate(lines):
+        if not line.strip().startswith("|") or rule.match(line):
+            continue
+        # 表の中の行か、表の見出し行か。見出し行なら次が区切り行のはず。
+        previous_is_table = i > 0 and lines[i - 1].strip().startswith("|")
+        if previous_is_table:
+            continue
+        assert i + 1 < len(lines) and rule.match(lines[i + 1]), (
+            f"{i + 1} 行目の表に区切り行がありません: {line.strip()[:60]}")
+        tables += 1
+    assert tables > 0, "表が 1 つも無いなら、この試験は何も見張っていません"
