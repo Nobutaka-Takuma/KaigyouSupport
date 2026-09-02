@@ -75,6 +75,11 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
     #
     # 読み手にとっては逆で、どこまで確かめられているかが分からないまま
     # 数千万円の判断をすることになります。
+    # **GIS が計算した位置づけ。LLM が書いた文章ではありません。**
+    # 本文より前に置きます——読み手が本文を「どの数字の上に立った文章か」を
+    # 知った状態で読めるように（指示書 §14・§16）。
+    lines += _positioning_block(dataset)
+
     lines += _coverage_block(inquiry, sources)
 
     # STEP5（顧客提出用）があればそちらを本文にします。STEP4 の形は根拠を
@@ -116,6 +121,126 @@ def _misreading_block(dataset: Mapping[str, Any]) -> list[str]:
             lines.append(f"- ではどう読むか：{item['instead']}")
         lines.append("")
     return lines
+
+# ------------------------------------------------- 冒頭：この地域はどんな場所か
+#
+# **この節は LLM が書いていません。** GIS が計算した値をそのまま並べています。
+#
+# 本文（LLM が書く部分）より前に置くのは、読み手が本文を「どの数字の上に
+# 立った文章か」を知った状態で読めるようにするためです。あとに置くと、
+# 文章を信じたあとで根拠を照合することになり、順番として遅すぎます。
+#
+# 指示書 §14・§16。ランキング → 評価 → 地域の特徴、そして**なぜその評価に
+# なったのかを必ず確認できる**こと。
+
+def _positioning_block(dataset: Mapping[str, Any]) -> list[str]:
+    """周囲と比べてどんな場所か。**計算された値だけ。**
+
+    位置づけが出せない地点（メッシュスコアが未計算、比較できる商圏が無い）
+    では、理由を 1 行書きます。**黙って節ごと消しません**——読み手には
+    「特徴が無かった」に見えます。
+    """
+    positioning = dataset.get("positioning") or {}
+    if not positioning:
+        return []
+    if not positioning.get("available"):
+        return ["## この地域はどんな場所か", "",
+                str(positioning.get("why_not") or "位置づけを算出できませんでした。"),
+                ""]
+
+    scope = positioning.get("compared_with") or {}
+    lines = ["## この地域はどんな場所か", "",
+             "**この節は生成された文章ではありません。**下の数値は GIS が"
+             "計算したもので、本文の記述はこれを解釈したものです。", ""]
+
+    region = positioning.get("region_type") or {}
+    if region.get("label"):
+        lines += [f"### 類型：{region['label']}", ""]
+
+    lines += _axis_table(positioning.get("axes") or [])
+    lines += _gap_lines(positioning.get("gaps") or [])
+
+    # **どれと比べたのか、いつ計算したのか、どの版か**（指示書 §16・§19）。
+    # 書かずに「上位8%」とだけ言えば、それはもう統計ではありません。
+    lines += [
+        "**この評価の前提**", "",
+        f"- 比較した母集団：{scope.get('label', '（不明）')}"
+        f"（{scope.get('sample_count', 0):,} 商圏）",
+        f"- 評価ロジックの版：{positioning.get('benchmark_version', '')}"
+        f"　計算日：{positioning.get('calculated_on', '')}",
+        "",
+        str(positioning.get("note") or ""), "",
+    ]
+    return lines
+
+
+def _axis_table(axes: Sequence[Mapping[str, Any]]) -> list[str]:
+    """軸ごとの位置づけ。**取れなかった軸も行として残します。**
+
+    落とすと、読み手には「その観点では特筆すべきことが無かった」に見えます。
+    実際は測っていません。
+    """
+    if not axes:
+        return []
+    rows = []
+    for axis in axes:
+        if axis.get("score") is None:
+            rows.append([str(axis.get("label", "")), "—", "**未確認**",
+                         str(axis.get("unavailable_reason") or "")])
+            continue
+        rows.append([
+            str(axis.get("label", "")),
+            f"{axis['score']}",
+            str(axis.get("assessment") or ""),
+            str(axis.get("means") or ""),
+        ])
+    return (["### 位置づけ", ""]
+            + _table(["観点", "位置（0〜100）", "評価", "この数字が意味すること"],
+                     rows)
+            + ["", "**0〜100 は順位ではなく、比較母集団の中での位置です。**"
+               "100 に近いほどその母集団の上のほうにいます。", ""])
+
+
+def _gap_lines(gaps: Sequence[Mapping[str, Any]]) -> list[str]:
+    """指標間のアンバランス（指示書 §7・§11）。
+
+    **これが単独指標の羅列と違うところです。** 「人口は上位8%、歯科医院は
+    上位35%」を並べただけでは、読み手が引き算をすることになります。
+    引き算は済ませてあります。
+
+    差が小さかった組み合わせも出します。**「調べたが差は無かった」と
+    「見ていない」は別のこと**で、出さないと読み手には区別がつきません。
+    """
+    if not gaps:
+        return []
+    found = [g for g in gaps if g.get("present")]
+    lines = ["### 指標どうしのバランス", ""]
+    if found:
+        for gap in found:
+            a, b = gap["a"], gap["b"]
+            lines += [f"- **{gap.get('statement') or gap.get('label')}**  ",
+                      f"  {a['label']} {a['percentile']:.0%} 対 "
+                      f"{b['label']} {b['percentile']:.0%}"
+                      f"（差 {abs(float(gap['gap'])) * 100:.0f} ポイント）"]
+            if gap.get("note"):
+                lines.append(f"  　{gap['note']}")
+    else:
+        lines.append("目立ったアンバランスはありませんでした。")
+    lines.append("")
+
+    quiet = [g for g in gaps if g.get("present") is False and g.get("gap") is not None]
+    unknown = [g for g in gaps if g.get("unavailable_reason")]
+    if quiet:
+        lines += ["調べたが、差が小さかった組み合わせ：" + "、".join(
+            f"{g['label']}（差 {abs(float(g['gap'])) * 100:.0f} ポイント）"
+            for g in quiet), ""]
+    if unknown:
+        lines += ["**比較できなかった組み合わせ**（見ていないという意味です）：",
+                  ""]
+        lines += [f"- {g['label']}：{g['unavailable_reason']}" for g in unknown]
+        lines.append("")
+    return lines
+
 
 # --------------------------------------------------------------- 冒頭：調査カバレッジ
 #

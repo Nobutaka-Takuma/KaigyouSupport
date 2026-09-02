@@ -121,6 +121,20 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
     """
     out: list[dict[str, Any]] = []
 
+    # --- 位置づけ：**周囲と比べてどんな場所か** -----------------------------
+    # 他の citable は「そこに何があるか」を言います。ここだけが「他と比べて
+    # どうか」を言います。**percentile どうしの引き算は GIS が済ませて
+    # あります**（kaigyou_core/positioning.py）。LLM はこれを引用するだけで、
+    # 自分で引き算をしません。引き算をさせると、それは Fact ではなく解釈に
+    # なり、検算できない文が 1 つ増えます（指示書 §7・§17）。
+    from kaigyou_core.positioning import citable as positioning_citable
+
+    out += positioning_citable(
+        dataset.get("positioning") or {},
+        {m["key"]: m.get("layer", "residents")
+         for m in ((dataset.get("measures") or {}).get("items") or [])
+         if m.get("key")})
+
     def add(key: str, label: str, value: Any, unit: str, layer: str,
             source: str, note: str | None = None) -> None:
         if value is None:
@@ -388,6 +402,10 @@ def for_step1(dataset: Mapping[str, Any],
         # そもそも作れません（診療時間も標榜科目も measures ではありません）。
         "citable": _citable(dataset),
         "layers": LAYERS,
+        # **この地点が周囲と比べてどんな場所か。GIS が計算した結果です。**
+        # 軸・ギャップ・地域タイプ・比較母集団・評価ロジックの版まで含みます。
+        # LLM はこれを解釈します。作りません。
+        "positioning": dataset.get("positioning"),
         # 組み合わせと「何が確認できていないか」だけ。成分の値は measures に
         # 既にあるので再掲しません（再掲すると 11.7KB が 1.4KB で済むところを
         # 使い、しかも同じ数字が 2 か所にある状態で読ませることになります）。

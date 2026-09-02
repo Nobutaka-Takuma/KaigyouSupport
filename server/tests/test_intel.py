@@ -6172,3 +6172,265 @@ def test_the_old_string_list_does_not_smuggle_the_question_back_in():
     asked = payload["patterns"][0]["research_questions"]
     assert unsearchable not in asked, "古い文字列の並びから検索に渡っている"
     assert "保留地は残っているか" in asked
+
+
+# ================================================= GIS が Fact を確定し、LLM が解釈する
+#
+# 指示書 §7・§17。**引き算で出るものを LLM にやらせない。**
+#
+#   人口：       市街地 上位 8%
+#   歯科医院数： 市街地 上位 35%
+#
+# この 2 行から「人口規模に対して歯科医院が相対的に少ない」を読み取るのは、
+# 以前は LLM の仕事でした。それは Fact ではなく解釈で、検算できません。
+
+def _bench(scope: str, percentile: float, *, discriminating: bool = True):
+    from kaigyou_core.measures import Benchmark
+
+    return Benchmark(type=scope, label=f"{scope}の商圏", value=1.0,
+                     comparison="中央値", sample_count=1000,
+                     # **0〜100（%）です。**0〜1 ではありません。
+                     percentile=percentile, discriminating=discriminating)
+
+
+def _measure(key: str, label: str, layer: str, *benchmarks):
+    from kaigyou_core.measures import Measure
+
+    return Measure(key=key, label=label, value=1.0, unit="", source="s",
+                   layer=layer, benchmarks=list(benchmarks))
+
+
+def _positioning_config():
+    return {
+        "benchmark_version": "v1.0",
+        "prefer_scopes": ["urban", "prefecture"],
+        "axes": {
+            "population_mass": {"label": "人口集積", "measures": ["population"]},
+            "supply": {"label": "歯科の供給", "measures": ["clinics_per_10k"]},
+        },
+        "bands": [{"at_least": 0.90, "label": "非常に高い"},
+                  {"at_least": 0.40, "label": "平均的"},
+                  {"at_least": 0.00, "label": "低い"}],
+        "gaps": {
+            "demand_vs_supply": {
+                "label": "需要と供給", "a": "population", "b": "clinics_per_10k",
+                "threshold": 0.20,
+                "a_over_b": "人口規模に対して、歯科医院が相対的に少ない",
+                "b_over_a": "人口規模に対して、歯科医院が相対的に多い"}},
+        "region_types": [
+            {"label": "住宅集積型",
+             "when": {"population_mass": {"at_least": 0.75},
+                      "supply": {"below": 0.50}}}],
+    }
+
+
+def test_the_imbalance_is_computed_not_inferred():
+    """**引き算は GIS がやります。** LLM が言い直すと検算できません。"""
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0)),
+         _measure("clinics_per_10k", "人口1万人あたり歯科医院数", "competition",
+                  _bench("urban", 35.0))],
+        _positioning_config())
+
+    gap = {g["key"]: g for g in result["gaps"]}["demand_vs_supply"]
+    assert gap["present"] is True
+    assert gap["statement"] == "人口規模に対して、歯科医院が相対的に少ない"
+    # percentile は 0〜100 で入ってきます。**単位を取り違えると落ちずに
+    # それらしい数字が出ます**（実測：軸の点が 9560 になりました）。
+    assert gap["gap"] == pytest.approx(0.57, abs=0.01)
+    assert {a["key"]: a["score"] for a in result["axes"]}["population_mass"] == 92
+
+
+def test_a_small_difference_is_not_sold_as_a_feature():
+    """しきい値に届かない差を「アンバランス」と言わない。
+
+    **「調べたが差は無かった」と「見ていない」は別のこと**なので、行としては
+    残します。
+    """
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 55.0)),
+         _measure("clinics_per_10k", "医院数", "competition", _bench("urban", 48.0))],
+        _positioning_config())
+    gap = {g["key"]: g for g in result["gaps"]}["demand_vs_supply"]
+    assert gap["present"] is False
+    assert gap["statement"] is None
+    assert gap["gap"] is not None, "調べたことは残す"
+
+
+def test_percentiles_from_different_populations_are_never_subtracted():
+    """**母集団が違えば同じ数字の意味が変わります。**
+
+    人口を市街地の中で、医院数を県内全メッシュの中で見て引き算すると、
+    意味のない数字がそれらしい顔で出ます。
+    """
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0)),
+         # 医院数は市街地の分布を持たない（県内全メッシュだけ）。
+         _measure("clinics_per_10k", "医院数", "competition",
+                  _bench("prefecture", 35.0))],
+        _positioning_config())
+    assert result["compared_with"]["type"] == "urban"
+    gap = {g["key"]: g for g in result["gaps"]}["demand_vs_supply"]
+    assert gap.get("present") is False
+    assert "取れませんでした" in gap["unavailable_reason"]
+
+
+def test_a_population_that_cannot_discriminate_is_not_used():
+    """県内全メッシュのように大半が無人の母集団では、上位・下位を語りません。
+
+    町の中心はどこでも上位数%に入り、percentile は「市街地かどうか」しか
+    測っていません。
+    """
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents",
+                  _bench("prefecture", 92.0, discriminating=False))],
+        _positioning_config())
+    assert result["available"] is False
+    assert result["why_not"]
+
+
+def test_a_missing_measure_is_not_scored_as_low():
+    """**0 として扱うと、データが無いことが「低い」になります。**"""
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0))],
+        _positioning_config())
+    supply = {a["key"]: a for a in result["axes"]}["supply"]
+    assert supply["score"] is None
+    assert supply["unavailable_reason"], "黙って落とすと『調べたうえで低い』に見える"
+
+
+def test_the_region_type_is_decided_by_a_rule_not_by_the_model():
+    """指示書 §9。**名称を LLM に決めさせません。**"""
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0)),
+         _measure("clinics_per_10k", "医院数", "competition", _bench("urban", 20.0))],
+        _positioning_config())
+    assert result["region_type"]["label"] == "住宅集積型"
+    assert result["region_type"]["because"], "なぜその型なのかが残ること"
+
+
+def test_no_type_is_better_than_an_invented_one():
+    """どれにも当てはまらないときに、無理に名前を付けない。
+
+    付けた名前は、そのあと読み手の頭の中で事実として働きます。
+    """
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 30.0)),
+         _measure("clinics_per_10k", "医院数", "competition", _bench("urban", 80.0))],
+        _positioning_config())
+    assert result["region_type"]["label"] is None
+    assert result["region_type"]["why_not"]
+
+
+def test_the_model_can_cite_the_computed_position():
+    """**引用できない数字は、LLM が言い直すしかありません。**
+
+    言い直した瞬間に検算できなくなります。
+    """
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0)),
+         _measure("clinics_per_10k", "医院数", "competition", _bench("urban", 35.0))],
+        _positioning_config())
+    citable = positioning.citable(
+        result, {"population": "residents", "clinics_per_10k": "competition"})
+    keys = {c["key"]: c for c in citable}
+    assert "positioning.gap.demand_vs_supply" in keys
+    assert "positioning.axis.population_mass" in keys
+    # **層は元の指標のもの。** positioning という層を新設すると、ギャップを
+    # 2 つ引いた PATTERN が「層を跨いだ」と判定されます。
+    assert keys["positioning.axis.population_mass"]["layer"] == "residents"
+    assert "positioning" not in {c["layer"] for c in citable}
+    # どの母集団と比べたのかが、引用した先にも残ること。
+    assert "urban" in keys["positioning.gap.demand_vs_supply"]["source"]
+
+
+def test_the_computed_position_reaches_the_model_as_a_citable_key(conn):
+    """STEP1 の入力で、実際に measure_key として引ける形になっていること。"""
+    from kaigyou_core.dataset import build_dataset
+    from kaigyou_intel.projection import citable_keys, for_step1
+
+    dataset = build_dataset(conn, 35.6717, 139.7650, 1000)
+    payload = for_step1(dataset, {})
+    keys = citable_keys(payload)
+    assert any(k.startswith("positioning.axis.") for k in keys), sorted(keys)[:5]
+    # 位置づけそのものも渡すこと（軸・ギャップ・母集団・版）。
+    assert payload["positioning"]["compared_with"]["label"]
+    assert payload["positioning"]["benchmark_version"]
+
+
+def test_the_report_shows_the_position_before_the_prose(dataset):
+    """**GIS が計算した節を、LLM が書いた本文より前に置く。**
+
+    あとに置くと、文章を信じたあとで根拠を照合することになります。
+    """
+    from kaigyou_intel.report import to_markdown
+
+    with_position = dict(dataset)
+    with_position["positioning"] = {
+        "available": True,
+        "compared_with": {"type": "urban", "label": "静岡県内の市街地",
+                          "sample_count": 1016},
+        "benchmark_version": "v1.0", "calculated_on": "2026-09-02",
+        "axes": [{"key": "population_mass", "label": "人口集積", "score": 92,
+                  "percentile": 0.92, "assessment": "非常に高い",
+                  "means": "そこに住んでいる人の多さ", "from_measures": ["population"]},
+                 {"key": "cost", "label": "立地コスト", "score": None,
+                  "percentile": None, "assessment": None,
+                  "unavailable_reason": "地価の分布が取れないため未確認です。"}],
+        "gaps": [{"key": "demand_vs_supply", "label": "需要と供給", "present": True,
+                  "gap": 0.57, "threshold": 0.2,
+                  "statement": "人口規模に対して、歯科医院が相対的に少ない",
+                  "a": {"key": "population", "label": "商圏人口", "percentile": 0.92},
+                  "b": {"key": "clinics_per_10k", "label": "医院数",
+                        "percentile": 0.35},
+                  "note": "医院数は施設の数で、ユニット数ではありません。"}],
+        "region_type": {"label": "住宅集積型", "because": ["population_mass=0.92"]},
+        "note": "percentile は相対値です。予測ではありません。",
+    }
+    markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
+                            "executive_summary": "e"}, to_jsonable(with_position))
+
+    assert markdown.index("## この地域はどんな場所か") < markdown.index("## 結論")
+    assert "この節は生成された文章ではありません" in markdown
+    assert "住宅集積型" in markdown
+    assert "人口規模に対して、歯科医院が相対的に少ない" in markdown
+    # **どれと比べたのか・いつ・どの版か**（指示書 §16・§19）。
+    assert "静岡県内の市街地" in markdown and "1,016 商圏" in markdown
+    assert "v1.0" in markdown and "2026-09-02" in markdown
+    # 取れなかった軸を黙って落とさない。
+    assert "未確認" in markdown
+
+
+def test_the_prompts_still_say_the_model_does_not_make_the_numbers():
+    """**この約束が薄まると、このサービスは「地域について書ける生成AI」に戻ります。**
+
+    文章の巧さで差はつきません。差がつくのは、書いてあることが確かめられるか
+    どうかです。
+    """
+    step1 = cfg.prompt_text("step1_features.md")
+    assert "あなたは数字を作りません" in step1
+    assert "暗算しないでください" in step1
+    assert "positioning" in step1
+
+    step3 = cfg.prompt_text("step3_demand.md")
+    assert "数字を確定させるのは GIS です" in step3
+
+    step4 = cfg.prompt_text("step4_client_report.md")
+    assert "数字も作りません" in step4
+    assert "母集団を書かずに" in step4

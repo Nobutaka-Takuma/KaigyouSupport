@@ -198,6 +198,21 @@ def insights_config(category: str | None = None) -> dict[str, Any]:
         return {}
 
 
+def positioning_config(category: str | None = None) -> dict[str, Any]:
+    """地域の位置づけの軸・しきい値・地域タイプ（config/<業態>/positioning.yaml）。
+
+    **重みをコードに書きません。** 変えるのに再デプロイが要り、変えた履歴が
+    git log にしか残らなくなります。
+
+    無くても分析は成立します（位置づけの節が出ないだけ）。設定ファイルの不在で
+    データセット全体が 500 になるのは割に合いません。
+    """
+    try:
+        return load_yaml(business_file("positioning.yaml", category))
+    except ConfigNotFound:
+        return {}
+
+
 def city_planning_labels() -> dict[str, Any]:
     """都市計画の区分の「一言でいうと何か」。**業態に依りません。**
 

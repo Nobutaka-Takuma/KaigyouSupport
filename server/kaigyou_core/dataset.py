@@ -40,6 +40,7 @@ from typing import Any, Mapping
 import psycopg
 
 from kaigyou_core import provenance as prov
+from kaigyou_core.positioning import build as positioning_of
 from kaigyou_core.analysis import (
     DEFAULT_CATCHMENT,
     DEFAULT_CATEGORY,
@@ -1702,6 +1703,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         specialty_label=vocab.label(specialty) if specialty else None,
         config=insights_config.get("benchmarks") or {})
     insights = build_insights(measures, insights_config)
+    # **ここが「GIS が確定する Fact」の要です。** percentile どうしの引き算を
+    # LLM にやらせると解釈になり、ここでやれば Fact になります（指示書 §7・§17）。
+    positioning = positioning_of(measures, cfg.positioning_config(category))
 
     tables = ["population_mesh", "mesh_business", "facilities", "stations",
               # 都市計画が未取得の県では「建てられるか」を判定できません。
@@ -1785,6 +1789,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "items": [m.as_dict() for m in measures],
         },
         # 同時に見るべき指標の組。結論は含まず、揃わなかったものを gaps に出します。
+        # 地域の位置づけ。**単なる数字ではなく、「周囲と比べてどんな場所か」。**
+        # LLM はこれを引用します（作りません）。
+        "positioning": positioning,
         "insight_metrics": insights,
         "demand": {
             # A total hides its own shape; this is how the residents are laid
