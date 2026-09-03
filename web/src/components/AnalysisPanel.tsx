@@ -285,29 +285,13 @@ export function AnalysisPanel({
         </p>
       ) : (
         <p className="analysis__lead">
-          統計から特徴を抽出し（STEP1）、その背景と近隣医院の自費診療をWeb検索で
-          調べ（STEP2）、需要が生まれる筋道と開業方針を組み立て（STEP3）、
-          歯科医師に渡せるレポートに書き直します（STEP4）。
-          数分かかり、1件あたり1ドル前後のAPI費用が発生します。
+          自社DBに入っている統計・施設・駅・地価から<strong>事実を確定させ</strong>
+          （STEP1・API費用なし）、それを読んで10章のレポートに書き起こします
+          （STEP2）。<strong>数字はすべてDBの値</strong>で、LLMが書くのは
+          「その事実が何を意味するか」だけです。
+          これから開業する人の事前調査にも、既存医院を買う人の初期DDにも
+          使える形で出します。
         </p>
-      )}
-
-      {/* サーバが要求したときだけ。保存済みの値があっても、アカウント運用の
-          画面では出しません（使われないので、あるだけ誤解を招く）。 */}
-      {(needsToken || (token && !authConfigured())) && (
-        <label className="analysis__token">
-          <span>分析トークン</span>
-          <input
-            type="password"
-            value={token}
-            placeholder="X-Analysis-Token"
-            onChange={(e) => setToken(e.target.value)}
-          />
-          <small>
-            課金を伴う操作なので、公開URLでは共有シークレットを要求します。
-            この端末にだけ保存されます。
-          </small>
-        </label>
       )}
 
       {/* **節約中であることを、結果より先に出します。** 質を落とした結果を

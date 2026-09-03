@@ -56,7 +56,7 @@ def build_input(step1_output: Mapping[str, Any],
 
 def _prompts(limits: Mapping[str, Any], available: Any = None,
              category: str = DEFAULT_CATEGORY) -> tuple[str, str]:
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     if not settings.get("prompt_structure"):
         raise StepFailed("config/analysis.yaml の steps.2 に prompt_structure がありません")
     total = llm.max_searches(limits)
@@ -183,7 +183,7 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         step_number=STEP_NUMBER, system=structure_prompt,
         # 書き写すだけの呼び出しです。考えさせると、調べていないことを補い
         # 始めます（そして下の出典の検算で落ちます）。
-        effort=llm.step_settings(STEP_NUMBER)["effort_structure"],
+        effort=llm.step_settings(STEP_NUMBER, kind="research")["effort_structure"],
         user=("## 調査結果\n\n" + text
               + "\n\n## 今回の検索で取得した URL（source_url はこの中から選ぶこと）\n\n"
               + catalogue
@@ -339,7 +339,7 @@ def _another_round(output: Step2Output, patterns: Sequence[Mapping[str, Any]],
 
     ``output`` をその場で書き換えます（呼び出し側が model_dump します）。
     """
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     name = settings.get("prompt_followup")
     if not name:
         return llm.Usage(), []
@@ -428,7 +428,7 @@ def _structure_followup(text: str, sources: Sequence[Mapping[str, Any]],
                         patterns: Sequence[Mapping[str, Any]],
                         category: str) -> Any:
     """2 周目の本文を JSON に写す。1 周目と同じプロンプトを使います。"""
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     catalogue = "\n".join(
         f"- {s['url']}  {s.get('title') or ''}" for s in sources) or "（なし）"
     return llm.ask(

@@ -50,8 +50,19 @@ def test_every_step_is_configured_with_its_prompt():
     from kaigyou_intel.worker import RUNNERS
 
     config = cfg.analysis_config()
-    assert set(config["steps"]) == set(STEP_NAMES)
+    from kaigyou_intel.jobs import RESEARCH_STEP_NAMES
+
+    assert set(config["research_steps"]) == set(RESEARCH_STEP_NAMES)
+    # **新しい段構成では、1 段目は LLM を呼びません。** prompt が無いのは
+    # 設定漏れではないので、そこは飛ばします。
     for number, step in config["steps"].items():
+        if step.get("prompt") is None:
+            assert step.get("web_search") is False, (
+                f"STEP{number} は LLM を呼ばないのに web_search が立っています")
+            continue
+        assert (cfg.business_dir() / "prompts" / step["prompt"]).is_file()
+
+    for number, step in config["research_steps"].items():
         assert step["prompt_version"], f"step{number} に prompt_version がありません"
         if number not in RUNNERS:
             continue
@@ -61,18 +72,19 @@ def test_every_step_is_configured_with_its_prompt():
 
 def test_the_searching_step_has_a_second_prompt_for_writing_it_down():
     """Web検索と構造化出力は同じ呼び出しでは併用しないので、STEP2 は 2 本必要。"""
-    step = cfg.analysis_config()["steps"][2]
+    step = cfg.analysis_config()["research_steps"][2]
     assert (cfg.business_dir() / "prompts" / step["prompt_structure"]).is_file()
-    assert llm.step_settings(2)["prompt_structure"] == step["prompt_structure"]
+    assert llm.step_settings(2, kind="research")["prompt_structure"] == step["prompt_structure"]
 
 
 def test_only_step2_may_search_the_web():
+    llm.use_kind("research")
     """要件 §38：外部コンテクスト調査を STEP2 に限定する。
 
     STEP1 で外部情報が混ざると、FACT と EXTERNAL FACT の区別が最初の段階で
     壊れます。STEP4 で足せると、§16 の「新しい外部事実を追加しない」が破れます。
     """
-    steps = cfg.analysis_config()["steps"]
+    steps = cfg.analysis_config()["research_steps"]
     assert steps[2]["web_search"] is True
     for number in (1, 3, 4):
         assert steps[number].get("web_search") is False, (
@@ -635,8 +647,10 @@ def test_retrying_a_step_also_clears_the_steps_after_it(conn, dataset):
     """後続だけ残すと、古い前提の上に新しい結論が乗ります。"""
     from kaigyou_intel import jobs
 
+    # 段の増減そのものを見るテストなので、4 段ある種類で回します。
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
-                             dataset=to_jsonable(dataset), base_hash="x")
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             analysis_kind="research")
     for number in (1, 2, 3):
         jobs.start_step(conn, job_id, number, {}, {"prompt_version": "v", "model": "m"})
         jobs.finish_step(conn, job_id, number, {"n": number}, {})
@@ -1132,6 +1146,7 @@ def test_output_format_must_be_a_type_not_a_dict():
 
 
 def test_step1_sends_no_tools_and_step2_sends_web_search():
+    llm.use_kind("research")
     """要件 §38：外部コンテクスト調査を STEP2 に限定する。
 
     設定だけでなく、組み立てた本体でも確かめます。設定が正しくても
@@ -1796,6 +1811,7 @@ def test_step2_fails_only_when_nothing_survives_verification(monkeypatch):
 
 
 def test_the_search_call_declares_the_web_search_tool_and_the_write_up_does_not():
+    llm.use_kind("research")
     """設定で web_search を切り替えられること。送信する本体で確かめます。"""
     tooled = llm.build_request(2, "s", "u")
     assert tooled["tools"][0]["type"] == llm.WEB_SEARCH_TOOL_TYPE
@@ -2232,7 +2248,8 @@ def test_step3_input_needs_both_earlier_steps(conn, dataset):
     jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
     jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
 
-    job = jobs.get_job(conn, job_id, include_base_data=True)
+    job = {**jobs.get_job(conn, job_id, include_base_data=True),
+               "analysis_kind": "research"}   # 旧 4 段の入力を見るテスト
     with pytest.raises(worker.StepNotImplemented, match="STEP1 と STEP2"):
         worker.build_input(conn, job, 3)
     conn.rollback()
@@ -2418,7 +2435,8 @@ def test_step4_needs_all_three_earlier_steps(conn, dataset):
     jobs.start_step(conn, job_id, 1, {}, {"prompt_version": "v", "model": "m"})
     jobs.finish_step(conn, job_id, 1, _step1_for_step2(), {})
 
-    job = jobs.get_job(conn, job_id, include_base_data=True)
+    job = {**jobs.get_job(conn, job_id, include_base_data=True),
+               "analysis_kind": "research"}   # 旧 4 段の入力を見るテスト
     with pytest.raises(worker.StepNotImplemented, match="STEP2・STEP3"):
         worker.build_input(conn, job, 4)
     conn.rollback()
@@ -2921,7 +2939,8 @@ def test_the_report_needs_the_steps_before_it(conn, dataset):
 
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
                              dataset=to_jsonable(dataset), base_hash="x")
-    job = jobs.get_job(conn, job_id, include_base_data=True)
+    job = {**jobs.get_job(conn, job_id, include_base_data=True),
+               "analysis_kind": "research"}   # 旧 4 段の入力を見るテスト
     with pytest.raises(worker.StepNotImplemented, match="STEP1・STEP2・STEP3"):
         worker.build_input(conn, job, 4)
     conn.rollback()
@@ -2935,8 +2954,10 @@ def test_an_existing_job_gains_a_step_that_was_added(conn, dataset):
     """
     from kaigyou_intel import jobs
 
+    # 段の増減そのものを見るテストなので、4 段ある種類で回します。
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
-                             dataset=to_jsonable(dataset), base_hash="x")
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             analysis_kind="research")
     with conn.cursor() as cur:
         cur.execute("DELETE FROM analysis_steps WHERE job_id = %s AND step_number = 4",
                     (job_id,))
@@ -2963,8 +2984,10 @@ def test_a_job_from_before_a_step_was_removed_does_not_stall(conn, dataset):
     """
     from kaigyou_intel import jobs
 
+    # 段の増減そのものを見るテストなので、4 段ある種類で回します。
     job_id = jobs.create_job(conn, lat=35.0, lng=139.0, radius_m=1000,
-                             dataset=to_jsonable(dataset), base_hash="x")
+                             dataset=to_jsonable(dataset), base_hash="x",
+                             analysis_kind="research")
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO analysis_steps (job_id, step_number, step_name, status) "
@@ -3393,6 +3416,7 @@ def test_the_worker_endpoint_needs_its_own_secret(monkeypatch):
 
 
 def test_the_search_budget_can_be_set_per_deployment(monkeypatch):
+    llm.use_kind("research")
     """ホスティング先で関数の実行時間の上限が違います。
 
     Vercel は Hobby で300秒、Pro で800秒。STEP2 は検索のたびに文脈を読み直すので、

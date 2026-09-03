@@ -1427,7 +1427,43 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
     from kaigyou_intel import jobs as _jobs
     if _jobs.kind_of(conn, job_id) == "competitors":
         return _save_competitor_report(conn, job_id, output, dataset, row, sources)
+    return _save_dd_report(conn, job_id, output, dataset, row, sources)
 
+
+def _save_dd_report(conn: psycopg.Connection, job_id: str,
+                    output: Mapping[str, Any], dataset: Mapping[str, Any],
+                    job_row: Mapping[str, Any] | None,
+                    sources: Sequence[Mapping[str, Any]]) -> str:
+    """プレDD レポート（10 章）。
+
+    **数字は STEP1 が確定させた事実の束から、文章は STEP2 の出力から。**
+    統計データセットからは地点名しか使いません——数え直すと、束の数字と
+    レポートの数字が食い違いえます。
+    """
+    from kaigyou_intel import dd_report
+
+    pack = dict(_jobs_step_output(conn, job_id, 1) or {})
+    if job_row and job_row.get("location_name"):
+        pack["location"] = {**(pack.get("location") or {}),
+                            "name": job_row["location_name"]}
+    markdown = dd_report.to_markdown(
+        output, pack, sources, str(dataset.get("disclaimer") or ""))
+    return _store(conn, job_id, output, markdown)
+
+
+def _jobs_step_output(conn: psycopg.Connection, job_id: str,
+                      number: int) -> dict[str, Any] | None:
+    from kaigyou_intel import jobs as _jobs
+
+    return _jobs.step_output(conn, job_id, number)
+
+
+def _unused_legacy_save(conn, job_id, output, dataset, row, sources):
+    """旧 4 段レポートの組み立て。**いまの経路からは呼ばれません。**
+
+    消していないのは、過去に作られたレポートを読み直す道具（`analyze --show`）
+    がまだこの形の出力を扱うためです。新しい段構成では 10 章のほうを使います。
+    """
     with conn.cursor() as cur:
         # 開業方針は STEP3 が欄のまま出しています。最終段は散文だけを書くので、
         # 表にする材料はここで取りに行きます。

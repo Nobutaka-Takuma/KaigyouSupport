@@ -129,7 +129,9 @@ def is_configured() -> bool:
 #:
 #: **同じ「STEP1」でも、種類が違えば別のプロンプトです。** 周辺一般の STEP1 は
 #: 商圏特徴抽出、競合分析の STEP1 は競合の調査です。
-STEP_CONFIG_KEY = {"area": "steps", "competitors": "competitor_steps"}
+STEP_CONFIG_KEY = {"area": "steps", "competitors": "competitor_steps",
+                   # 旧・4段の探索型。既定からは外したが残してある。
+                   "research": "research_steps"}
 
 #: いま組み立てている分析の種類。worker が段を走らせる前に設定します。
 #:

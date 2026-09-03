@@ -56,14 +56,16 @@ def estimate(category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
 
 def _area(config: Mapping[str, Any], limits: Mapping[str, Any],
           category: str) -> dict[str, Any]:
+    """プレDD レポート。**LLM の呼び出しは 1 回だけです。**
+
+    1 段目（事実の確定）は DB のデータを数えるだけで API を叩きません。
+    数えるのは 2 段目の 1 回きりです。
+    """
     steps = config.get("steps") or {}
-    rounds = max(1, int(limits.get("research_rounds", 1)))
-    searches = int(limits.get("max_searches_total", 0))
-    searches += int(limits.get("surroundings_searches", 0))
-    # STEP1 は 3 回（スキャン・読む・疑う）、STEP2 は調べる + 書き写すで 2 回。
-    calls = {1: 3 if limits.get("surroundings_searches") else 2,
-             2: 2 * rounds, 3: 1, 4: 1}
-    return _rollup("周辺一般の分析", steps, calls, searches, config, category)
+    calls = {number: (0 if (step or {}).get("prompt") is None else 1)
+             for number, step in steps.items()}
+    return _rollup("周辺一般の分析（プレDD）", steps, calls, 0, config, category,
+                   detail="1 段目は DB を数えるだけ（API を叩きません）")
 
 
 def _competitors(config: Mapping[str, Any], survey: Mapping[str, Any],
@@ -82,6 +84,9 @@ def _rollup(label: str, steps: Mapping[Any, Any], calls: Mapping[int, int],
     model = config.get("model") or {}
     total_calls = sum(calls.values())
     out_per_call = int(model.get("max_tokens", 16_000))
+    if not total_calls:
+        return {"label": label, "calls": 0, "searches": 0, "input_tokens": 0,
+                "output_tokens": 0, "detail": detail, "usd": 0.0}
 
     # 入力：system プロンプトは呼び出しごとに送ります（キャッシュに乗れば
     # 1/10 の単価ですが、**乗らない前提で数えます**——上限の見積もりなので）。

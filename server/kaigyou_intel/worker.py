@@ -23,6 +23,8 @@ from kaigyou_intel import report
 from kaigyou_intel.steps import (
     comp1_survey,
     comp2_summary,
+    dd_facts,
+    dd_write,
     step1_features, step2_research, step3_demand, step4_report)
 
 #: 実装済みのステップ。ここに無い番号に来たら止めます。「未実装なので飛ばす」
@@ -35,6 +37,12 @@ from kaigyou_intel.steps import (
 #: プロンプトと KSF の枠をどの業態のものから読むかを決めます。渡さないと、
 #: 医科のジョブが歯科のプロンプトで書かれます——**しかも成功と表示されます。**
 RUNNERS: dict[int, Callable[[Any, str], Any]] = {
+    1: dd_facts.run,
+    2: dd_write.run,
+}
+
+#: 旧・4段の探索型。**消していません**——既定から外しただけです。
+RESEARCH_RUNNERS: dict[int, Callable[[Any, str], Any]] = {
     1: step1_features.run,
     2: step2_research.run,
     3: step3_demand.run,
@@ -50,7 +58,8 @@ COMPETITOR_RUNNERS: dict[int, Callable[[Any, str], Any]] = {
 #: 種類ごとの段の表。**モジュール属性を都度読み直します。**
 #: 表を辞書に畳んで持つと、RUNNERS を差し替えても畳んだ側は古い辞書を
 #: 指したままで、差し替えたつもりの段が動きません（テストが差し替えます）。
-_RUNNER_ATTR_BY_KIND = {"area": "RUNNERS", "competitors": "COMPETITOR_RUNNERS"}
+_RUNNER_ATTR_BY_KIND = {"area": "RUNNERS", "competitors": "COMPETITOR_RUNNERS",
+                        "research": "RESEARCH_RUNNERS"}
 
 
 def runners_for(kind: str | None) -> dict[int, Callable[[Any, str], Any]]:
@@ -235,6 +244,25 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
     kind = job.get("analysis_kind") or jobs.DEFAULT_KIND
     if kind == "competitors":
         return _competitor_input(conn, job, number)
+    if kind == "research":
+        return _research_input(conn, job, number)
+    if number == 1:
+        # **DB のデータを数えるだけ。** 競合の中身は動的なので、別に走らせた
+        # 「周辺の競合を分析する」の結果があれば取り込みます。
+        return dd_facts.build_input(job["base_data"],
+                                    _competitor_survey(conn, job))
+    if number == 2:
+        pack = jobs.step_output(conn, job["id"], 1)
+        if not pack:
+            raise StepNotImplemented(
+                "STEP1 の出力がありません。STEP2 は確定した事実を読む段です。")
+        return dd_write.build_input(pack, _business_type(job))
+    raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
+
+
+def _research_input(conn: psycopg.Connection, job: Mapping[str, Any],
+                    number: int) -> dict[str, Any]:
+    """旧・4 段の探索型に渡すもの。**既定からは外しましたが、動きます。**"""
     if number == 1:
         return step1_features.build_input(job["base_data"])
     if number == 2:
@@ -258,7 +286,39 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
                 f"{'・'.join(missing)} の出力がありません。"
                 "レポートは前 3 段の結論だけで書きます。")
         return step4_report.build_input(*outputs, job["base_data"])
-    raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
+    raise StepNotImplemented(f"探索型に STEP{number} はありません。")
+
+
+def _competitor_survey(conn: psycopg.Connection,
+                       job: Mapping[str, Any]) -> dict[str, Any] | None:
+    """同じ地点で走らせた競合分析があれば、その結果を借りる。
+
+    **無くても成立します。** 競合の件数と距離は施設データベースから出ますが、
+    各院が何を掲げているかは Web を見ないと分かりません。見ていなければ、
+    レポートは「調べていない」と書きます。
+    """
+    def latest(step: int) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.output_json
+                FROM analysis_jobs j
+                JOIN analysis_steps s ON s.job_id = j.id
+                WHERE j.analysis_kind = 'competitors'
+                  AND s.step_number = %s AND s.status = 'completed'
+                  AND abs(j.latitude - %s) < 0.0005
+                  AND abs(j.longitude - %s) < 0.0005
+                ORDER BY j.created_at DESC LIMIT 1
+            """, (step, job["latitude"], job["longitude"]))
+            row = cur.fetchone()
+        return dict(row["output_json"] or {}) if row else None
+
+    survey = latest(1)
+    if survey is None:
+        return None
+    summary = latest(2) or {}
+    if summary.get("tally"):
+        survey["tally"] = summary["tally"]
+    return survey
 
 
 def advance(conn: psycopg.Connection, job_id: str,

@@ -112,7 +112,7 @@ def system_prompt(payload: Mapping[str, Any],
     """
     limits = cfg.analysis_config().get("limits") or {}
     frame = cfg.hypotheses_config(category)
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     return (cfg.prompt_text(settings["prompt"], category)
             .replace("{max_patterns}", str(limits.get("max_patterns", 5)))
             .replace("{min_cross_layer_patterns}", str(min_cross_layer(category)))
@@ -310,7 +310,7 @@ def scan_surroundings(payload: Mapping[str, Any],
     budget = surroundings_searches(limits)
     if not budget:
         return _Scan(error="設定 limits.surroundings_searches が 0 のため実行していません")
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     name = settings.get("prompt_surroundings")
     if not name:
         return _Scan(error="config/analysis.yaml の steps.1 に prompt_surroundings がありません")
@@ -384,7 +384,7 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
     返り値は (出力, 使用量, 出典)。出典はスキャンで取得した URL です。
     """
     limits = cfg.analysis_config().get("limits") or {}
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
 
     scan = scan_surroundings(payload, limits, category)
 
@@ -472,7 +472,7 @@ def _ask_the_questions(output: Step1Output, payload: Mapping[str, Any],
     """
     global _INQUIRY_USAGE
     _INQUIRY_USAGE = llm.Usage()
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     name = settings.get("prompt_inquiry")
     if not name:
         return Step1Inquiry()

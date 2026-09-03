@@ -41,7 +41,7 @@ def build_input(step1_output: Mapping[str, Any], step2_output: Mapping[str, Any]
 
 def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     # 歯科医院として必ず答えることの一覧。商圏データだけを見ていると、
     # 「ユニット何台・床面積・衛生士何人」は永久に出てきません。
     from kaigyou_intel.steps.step1_features import requirement_frame

@@ -353,6 +353,19 @@ def _budget_mode_name(budget: Mapping[str, Any]) -> str | None:
     return budget.get("mode") or None
 
 
+def dd_config(category: str | None = None) -> dict[str, Any]:
+    """プレDD レポートの章立て・リスクの線引き・KSF の枠。
+
+    **しきい値と文言はここ、数え方はコード。** 「人口が何％減ったらリスクか」は
+    事業の判断で、業態と時期で変わります。逆に数え方まで設定に書けるように
+    すると、設定ファイルが小さな言語になって書き間違いが黙って無視されます。
+    """
+    try:
+        return load_yaml(business_file("dd.yaml", category))
+    except ConfigNotFound:
+        return {}
+
+
 def positioning_config(category: str | None = None) -> dict[str, Any]:
     """地域の位置づけの軸・しきい値・地域タイプ（config/<業態>/positioning.yaml）。
 

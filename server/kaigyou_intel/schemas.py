@@ -1352,3 +1352,94 @@ def _forbidden_predictions_in(haystack: str) -> list[TraceProblem]:
                 problem=f"予測にあたる語が含まれています: {word!r}"))
             break
     return problems
+
+
+# ===========================================================================
+# プレDD レポート（10 章）。
+#
+# **LLM が書くのは散文だけです。** 数字も表もリスク判定も、DB のデータから
+# Python が確定させて渡します。ここで受け取るのは「その事実が何を意味するか」
+# の文だけ。仮説を立てて検証させる段はもうありません——**それが本文を
+# 見失わせていました。**
+#
+# スキーマは平らに保ちます（`Schema is too complex.` を実測で踏んでいます）。
+# ===========================================================================
+class ChapterTakeaway(BaseModel):
+    """1 章ぶんの読みどころ。"""
+
+    chapter: str = Field(description="章のキー（trade_area / competition …）")
+    takeaway: str = Field(
+        description="この章の事実が何を意味するか。1〜2 文。"
+                    "**渡した事実にある数字だけ**を使う")
+
+
+class GrowthHypothesis(BaseModel):
+    """成長余地の**仮説**。断定ではありません。"""
+
+    position: str = Field(description="どの方向か")
+    why: str = Field(description="渡した事実のどこからそう言えるか")
+    caveat: str = Field(
+        description="外れるとしたら何が理由か。**空にしないこと**")
+
+
+class Verdict(BaseModel):
+    """総合評価。**開業と承継では読み方が違うので、分けて書きます。**"""
+
+    statement: str = Field(description="この地点をひとことで。2〜3 文")
+    for_opening: str = Field(description="これから開業する人にとっての意味。1〜2 文")
+    for_acquisition: str = Field(
+        description="既存医院を買う人にとっての意味。のれん代の前提に触れる。1〜2 文")
+    counterpoint: str = Field(
+        description="この評価が外れるとしたら何が理由か。1 文")
+
+
+class DDReport(BaseModel):
+    """プレDD レポートの散文部分。
+
+    **数字を作らないでください。** 渡された事実の束にある数字だけを使います。
+    束に無い数字が本文にあれば、それは作られた数字として検算に引っかかります。
+    """
+
+    title: str = Field(description="この地点のレポートの表題")
+    summary: str = Field(
+        description="Executive Summary。3〜5 文。**結論から。**"
+                    "開業を考える人にも、買収を考える人にも読める書き方で")
+    takeaways: list[ChapterTakeaway] = Field(
+        default_factory=list,
+        description="第2章〜第8章それぞれの読みどころ")
+    growth_hypotheses: list[GrowthHypothesis] = Field(default_factory=list)
+    verdict: Verdict
+
+
+def verify_dd_report(report: Mapping[str, Any],
+                     allowed: set[str]) -> list[str]:
+    """本文の数字が、渡した事実の束に実在するか。
+
+    **LLM に数字を作らせないための検算です。** 束に無い数字が本文にあれば、
+    それはどこから来たのか誰にも辿れません。
+
+    年号（4 桁）と 1 桁の数は見逃します。「2020年の国勢調査」「3 つの観点」の
+    ような文中の数まで拾うと、ほぼ全文が引っかかって使い物になりません。
+    """
+    import re
+
+    problems: list[str] = []
+    texts = [str(report.get("summary") or "")]
+    texts += [str(t.get("takeaway") or "") for t in report.get("takeaways") or []]
+    texts += [str(h.get(k) or "") for h in report.get("growth_hypotheses") or []
+              for k in ("why", "caveat")]
+    verdict = report.get("verdict") or {}
+    texts += [str(verdict.get(k) or "")
+              for k in ("statement", "for_opening", "for_acquisition")]
+
+    for text in texts:
+        for raw in re.findall(r"\d[\d,]*\.?\d*", text):
+            token = raw.replace(",", "")
+            if len(token) <= 1 or re.fullmatch(r"(19|20)\d\d", token):
+                continue
+            if token in allowed:
+                continue
+            if token.rstrip("0").rstrip(".") in allowed:
+                continue
+            problems.append(f"本文の数値 {raw} は、渡した事実の中にありません")
+    return problems

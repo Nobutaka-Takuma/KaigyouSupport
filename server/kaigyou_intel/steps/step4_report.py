@@ -71,7 +71,7 @@ def required_categories(frame: Mapping[str, Any] | None = None) -> list[str]:
 
 def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
-    settings = llm.step_settings(STEP_NUMBER)
+    settings = llm.step_settings(STEP_NUMBER, kind="research")
     from kaigyou_intel.steps.step1_features import requirement_frame
 
     frame = cfg.hypotheses_config(category)

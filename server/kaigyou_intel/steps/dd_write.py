@@ -1,0 +1,77 @@
+"""STEP2：確定した事実を読んで、散文を書く。**LLM の出番はここだけ。**
+
+渡すのは事実の束だけです。統計の生データも、問いも、仮説の枠も渡しません。
+以前は「問いを立てて調べて検証する」段を重ねていて、その筋書きがそのまま本文に
+なっていました。**読み手が知りたい「この商圏はどうなのか」がどこにも無い**
+文書になっていた原因がそれです。
+
+書かせるのは 4 つだけ。
+
+    Executive Summary       結論から
+    章ごとの読みどころ       その章の事実が何を意味するか
+    成長余地の仮説           但し書きつき
+    総合評価                 開業する人と、買う人に分けて
+
+**数字は作らせません。** 束にある数値との照合を通します。
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, Mapping
+
+from kaigyou_core import config as cfg
+from kaigyou_core import dd
+from kaigyou_core.analysis import DEFAULT_CATEGORY
+from kaigyou_intel import client as llm
+from kaigyou_intel.schemas import DDReport, verify_dd_report
+
+STEP_NUMBER = 2
+
+
+class StepFailed(RuntimeError):
+    pass
+
+
+def build_input(pack: Mapping[str, Any],
+                category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
+    """LLM に渡すもの。**事実の束そのもの**です。"""
+    return dict(pack)
+
+
+def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
+        ) -> tuple[dict[str, Any], llm.Usage, list[dict[str, Any]]]:
+    settings = llm.step_settings(STEP_NUMBER)
+    if not payload.get("chapters"):
+        raise StepFailed("章立てが空です。config/<業態>/dd.yaml を確認してください。")
+
+    result = llm.ask(
+        step_number=STEP_NUMBER,
+        system=cfg.prompt_text(settings["prompt"], category),
+        user=("## 確定した事実（**この中の数字だけを使ってください**）\n\n"
+              "```json\n"
+              + json.dumps(_for_prompt(payload), ensure_ascii=False, indent=1)
+              + "\n```"),
+        schema=DDReport, web_search=False)
+
+    report: DDReport | None = result.parsed
+    if report is None:
+        raise StepFailed("構造化出力を受け取れませんでした")
+
+    written = report.model_dump()
+    problems = verify_dd_report(written, dd.numbers_in(payload))
+    if problems:
+        raise StepFailed("；".join(problems[:6]))
+    return written, result.usage, []
+
+
+def _for_prompt(pack: Mapping[str, Any]) -> dict[str, Any]:
+    """束から、**プロンプトに載せる必要のないもの**を落とす。
+
+    定義文や注記は本文の言い回しに使ってほしいものではありません。載せると
+    そのまま写された文が返ってきます。
+    """
+    trimmed = dict(pack)
+    trade = dict(trimmed.get("trade_area") or {})
+    trade.pop("shape_note", None)
+    trimmed["trade_area"] = trade
+    return trimmed
