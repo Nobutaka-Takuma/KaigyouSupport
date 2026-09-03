@@ -100,6 +100,16 @@ def _coverage_block(coverage: Mapping[str, Any], tally: Mapping[str, Any],
             f"- 調べていない：**{not_surveyed:,} 件**"
             "（近い順に上限で切りました。**その地域に存在しない"
             "という意味ではありません**）")
+    # **時間切れは、上限で切ったのとは理由が違います。** 上限は決めた方針で、
+    # 時間切れは事故です。同じ「調べていない」でも、もう一度走らせれば結果が
+    # 変わりうるのはこちらだけなので、区別して書きます。
+    out_of_time = list(coverage.get("out_of_time") or [])
+    if out_of_time:
+        lines.append(
+            f"- うち時間切れで手を付けられなかった：**{len(out_of_time):,} 件**"
+            f"（{'、'.join(str(n) for n in out_of_time[:6])}"
+            f"{' ほか' if len(out_of_time) > 6 else ''}）"
+            "　→ もう一度実行すると調べられることがあります")
     if failed:
         lines.append(f"- 調べたが構造化できなかった：**{len(failed):,} 件**")
         lines += [f"    - {f.get('name')}：{f.get('why')}" for f in failed]

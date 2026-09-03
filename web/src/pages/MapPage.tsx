@@ -37,6 +37,21 @@ const FALLBACK_CENTER: [number, number] = [139.7671, 35.6812];
 // あたりから出します。
 const MIN_ZOOM = { meshes: 10, clinics: 11, stations: 10, cityPlanning: 11 };
 
+/**
+ * 落ちた層の名前を、エラーに残す。
+ *
+ * 6 本を `Promise.all` でまとめて待つと、落ちたときに残るのはサーバの文言
+ * だけです。本番ではそれが「サーバ内部エラー」なので、地図の左下に
+ * 「サーバ内部エラー」とだけ出ます。**どの層を直せばよいのかが、利用者にも
+ * 運営者にも分かりません。** 実際にそれで手が止まりました。
+ */
+function named<T>(layer: string, request: Promise<T>): Promise<T> {
+  return request.catch((e: unknown) => {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`${layer}を読み込めませんでした: ${detail}`);
+  });
+}
+
 const EMPTY_RESPONSE = {
   type: "FeatureCollection" as const,
   features: [],
@@ -431,33 +446,37 @@ export function MapPage() {
 
     const request = ++viewportRequest.current;
     try {
+      // **どの層が落ちたのかを言います。** これまでは 6 本まとめて待って、
+      // 落ちたときはサーバの文言（本番では「サーバ内部エラー」）だけを
+      // 出していました。地図の左下にそれだけ出ても、利用者にも運営者にも
+      // 何を直せばよいのか分かりません。実際にそれで手が止まりました。
       const [muni, mesh, clinics, stations, landPrices, cityPlanning] = await Promise.all([
         // Most of the boundary payload is Izu and Ogasawara coastline, a
         // thousand kilometres from anything the user is looking at. The bbox
         // already excludes it; the prefecture keeps a neighbouring one from
         // being drawn as though it were in scope.
-        api.municipalities({ prefecture_code: prefecture ?? undefined, bbox }),
+        named("境界", api.municipalities({ prefecture_code: prefecture ?? undefined, bbox })),
         zoom >= MIN_ZOOM.meshes
-          ? api.meshes({ bbox, profile: profile || undefined, limit: 4000 })
+          ? named("メッシュ", api.meshes({ bbox, profile: profile || undefined, limit: 4000 }))
           : Promise.resolve(EMPTY_RESPONSE),
         zoom >= MIN_ZOOM.clinics
-          ? api.clinics({ bbox, fields: "points", limit: 5000,
-                          specialty: clinicSpecialty || undefined })
+          ? named("歯科医院", api.clinics({ bbox, fields: "points", limit: 5000,
+                                          specialty: clinicSpecialty || undefined }))
           : Promise.resolve(EMPTY_RESPONSE),
         zoom >= MIN_ZOOM.stations
-          ? api.stations({ bbox, limit: 2000 })
+          ? named("駅", api.stations({ bbox, limit: 2000 }))
           : Promise.resolve(EMPTY_RESPONSE),
         showLandPrices && zoom >= MIN_ZOOM.clinics
-          ? api.landPrices({ bbox, limit: 2000 })
+          ? named("地価", api.landPrices({ bbox, limit: 2000 }))
           : Promise.resolve(EMPTY_RESPONSE),
         // 選ばれた層だけを取りに行きます。選ばれていなければ通信もしません。
         planKind && zoom >= MIN_ZOOM.cityPlanning
-          ? api.cityPlanning({
+          ? named("都市計画", api.cityPlanning({
               kind: planKind, bbox, limit: 3000,
               // 引きの画面ほど粗く。区域区分や誘導区域は市域ほどの大きさが
               // あり、細かいまま送ると 1 面で数十KB になります。
               simplify_deg: zoom >= 14 ? 0.00005 : zoom >= 12 ? 0.0001 : 0.0003,
-            })
+            }))
           : Promise.resolve(EMPTY_RESPONSE),
       ]);
       // A slow response for an older viewport must not overwrite a newer one.

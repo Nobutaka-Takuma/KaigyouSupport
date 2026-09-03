@@ -87,7 +87,21 @@ def _client():
     # SDK は ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / ant auth login の
     # プロファイルを順に見ます。キーが未設定でもプロファイルがあれば動くので、
     # ここで環境変数の有無を判定して弾いたりはしません。
-    return anthropic.Anthropic()
+    #
+    # **上限は明示します。** SDK の既定は 600 秒 × やり直し 2 回で、1 回の
+    # 呼び出しが最大 1,800 秒かかりえます。ホスティングされた関数の上限は
+    # 800 秒なので、呼び出しが 1 本詰まるだけでその段はまるごと失われ、
+    # 調べ終えていたぶんも一緒に消えます（実測：競合の調査が 2 回連続で
+    # そうなりました）。**早く諦めるほうが安い。**
+    timeout, retries = _request_limits()
+    return anthropic.Anthropic(timeout=timeout, max_retries=retries)
+
+
+def _request_limits() -> tuple[float, int]:
+    """(1 回の呼び出しの上限秒, SDK に任せるやり直し回数)。"""
+    worker = cfg.analysis_config().get("worker") or {}
+    return (float(worker.get("request_timeout_seconds", 210)),
+            int(worker.get("request_max_retries", 1)))
 
 
 def is_configured() -> bool:
@@ -299,7 +313,8 @@ def ask(*, step_number: int, system: str, user: str,
         tools: Sequence[Mapping[str, Any]] | None = None,
         web_search: bool | None = None,
         effort: str | None = None,
-        max_uses: int | None = None) -> Result:
+        max_uses: int | None = None,
+        timeout: float | None = None) -> Result:
     """1 ステップぶんの呼び出し。
 
     ``schema`` を渡すと構造化出力で受け取り、Pydantic で検証します。
@@ -308,6 +323,12 @@ def ask(*, step_number: int, system: str, user: str,
     """
     settings = step_settings(step_number)
     client = _client()
+    # **この呼び出しだけ、もっと短く切る。** 呼ぶ側がこの段に残っている時間を
+    # 知っていることがあります（競合の調査は 1 院ずつで、残り時間はそのつど
+    # 変わります）。設定の上限より長くはしません——短くするだけです。
+    if timeout is not None:
+        client = client.with_options(timeout=max(1.0, min(timeout,
+                                                          _request_limits()[0])))
     request = build_request(step_number, system, user, tools=tools,
                             web_search=web_search, effort=effort,
                             max_uses=max_uses)

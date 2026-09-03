@@ -451,3 +451,136 @@ def test_the_progress_shown_while_waiting_is_the_competitor_one(conn):
     second = _competitor_progress(steps)
     assert second["within_near"] == 1
     assert second["placed"] == 2 and second["undecided"] == 1
+
+
+# --------------------------------------------------- 時間切れの扱い（実測）
+def test_a_slow_competitor_does_not_take_the_whole_step_down(monkeypatch):
+    """**区切りを越えたら、まだ始めていない医院には手を付けません。**
+
+    実測：12 院の調査が関数の上限（800秒）を越えて殺され、調べ終えていた
+    ぶんも一緒に消えました。やり直してまた同じところで殺されました。画面には
+    「STEP1 実行中 12分11秒 ／ やり直し 1回」とだけ出ていて、止まっているのか
+    進んでいるのか分かりません。
+
+    8 院調べて「4 院は時間切れ」と書くほうが、12 院ぶんの費用を捨てるより
+    良い、という判断です。
+    """
+    import time
+
+    from kaigyou_intel.steps import comp1_survey
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(comp1_survey.time, "monotonic", lambda: clock["now"])
+
+    def slow(target, payload, system, per, category, deadline=None):
+        if comp1_survey._out_of_time(deadline):
+            return comp1_survey._Surveyed(str(target["name"]), skipped=True)
+        clock["now"] += 40.0          # 1 院 40 秒かかることにする
+        return comp1_survey._Surveyed(str(target["name"]),
+                                      competitor=_competitor(target["name"]))
+
+    monkeypatch.setattr(comp1_survey, "_survey_one", slow)
+    targets = [{"name": f"第{i}歯科", "distance_m": i * 50} for i in range(6)]
+    # 100 秒しかない → 2 院で打ち切り。
+    results = comp1_survey._survey_all(targets, {}, "sys", 2, 1, "dental_clinic",
+                                       deadline=1100.0)
+    assert sum(1 for r in results if r.competitor) == 3
+    assert [r.name for r in results if r.skipped] == ["第3歯科", "第4歯科", "第5歯科"]
+
+
+def test_running_out_of_time_before_the_first_one_is_not_a_failure(monkeypatch):
+    """1 件も始められなかったのは**失敗ではありません。**
+
+    失敗として記録すると、やり直し回数を 1 つ食います。上限に当たれば打ち切り
+    です。つまり**いちばん時間のかかる商圏が、いちばん試行回数を使えない**
+    ことになります。
+    """
+    from kaigyou_intel.steps import comp1_survey
+
+    monkeypatch.setattr(comp1_survey, "_survey_one",
+                        lambda t, *a, **k: comp1_survey._Surveyed(
+                            str(t["name"]), skipped=True))
+    payload = {"competitors": [{"name": "A歯科", "distance_m": 100}],
+               "radius_m": 1000, "vocabulary": {}, "_残り秒": 0.0}
+    with pytest.raises(comp1_survey.OutOfTime):
+        comp1_survey.run(payload)
+
+
+def test_the_competitors_it_ran_out_of_time_on_are_named(monkeypatch):
+    """時間切れは、上限で切ったのとは**理由が違います。**
+
+    上限は決めた方針、時間切れは事故です。もう一度走らせれば結果が変わり
+    うるのは後者だけなので、レポートで区別します。
+    """
+    from kaigyou_intel.competitor_report import to_markdown
+    from kaigyou_intel.steps import comp1_survey
+
+    done = {"A歯科"}
+
+    def one(target, *a, **k):
+        name = str(target["name"])
+        return (comp1_survey._Surveyed(name, competitor=_competitor(name))
+                if name in done else comp1_survey._Surveyed(name, skipped=True))
+
+    monkeypatch.setattr(comp1_survey, "_survey_one", one)
+    payload = {"competitors": [{"name": n, "distance_m": 100}
+                               for n in ("A歯科", "B歯科", "C歯科")],
+               "radius_m": 1000, "vocabulary": {}, "not_surveyed": 2,
+               "total_in_radius": 7}
+    output, _usage, _sources = comp1_survey.run(payload)
+    assert output["surveyed"] == 1
+    assert output["out_of_time"] == ["B歯科", "C歯科"]
+    # 上限で切った 2 件に、時間切れの 2 件を足して 4 件。
+    assert output["not_surveyed"] == 4
+
+    markdown = to_markdown(
+        {**_summary_output(),
+         "coverage": {"surveyed": 1, "not_surveyed": 4, "total_in_radius": 7,
+                      "radius_m": 1000, "out_of_time": ["B歯科", "C歯科"]}},
+        DATASET)
+    assert "時間切れで手を付けられなかった：**2 件**" in markdown
+    assert "もう一度実行すると調べられることがあります" in markdown
+
+
+def _competitor(name: str):
+    from kaigyou_intel.schemas import Competitor
+
+    return Competitor(name=name)
+
+
+def test_every_call_has_a_ceiling_shorter_than_the_function_limit():
+    """**SDK の既定に任せません。**
+
+    anthropic SDK の既定は 600 秒 × やり直し 2 回で、1 回の呼び出しが最大
+    1,800 秒かかりえます。関数の上限は 800 秒です。呼び出しが 1 本詰まる
+    だけで、その段はまるごと失われます。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_intel.client import _request_limits
+
+    timeout, retries = _request_limits()
+    invocation = float((cfg.analysis_config().get("worker") or {})
+                       .get("invocation_seconds", 800))
+    assert timeout * (retries + 1) < invocation, (
+        f"1 呼び出しの最悪 {timeout * (retries + 1):.0f} 秒 "
+        f"≥ 関数の上限 {invocation:.0f} 秒")
+
+
+def test_the_survey_fits_the_invocation_in_waves():
+    """波の数 × 1 波の最悪が、関数の上限に収まること。
+
+    12 院を 4 本ずつだと 3 波です。1 波の長さはその波のいちばん遅い医院で
+    決まり、1 院あたり 2 呼び出しかかります。
+    """
+    import math
+
+    from kaigyou_core import config as cfg
+    from kaigyou_intel.client import _request_limits
+
+    survey = cfg.competitors_config("dental_clinic")["survey"]
+    worker = cfg.analysis_config().get("worker") or {}
+    timeout, retries = _request_limits()
+    waves = math.ceil(survey["max_competitors"] / survey["parallel"])
+    worst = waves * 2 * timeout * (retries + 1)     # 1 院 = 調査 + 構造化
+    assert worst < float(worker.get("invocation_seconds", 800)) * 3, (
+        f"最悪 {worst:.0f} 秒。波 {waves} 回では、区切りが無いと収まりません")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 from pathlib import Path
 
@@ -77,14 +78,26 @@ async def unhandled(request: Request, exc: Exception) -> JSONResponse:
     exception is worth more than hiding it. Deployed, it is not: see
     :func:`expose_error_detail`. Either way the full traceback goes to the log.
     """
-    log.exception("unhandled error on %s %s", request.method, request.url.path)
+    # **画面のエラーとログの行を、突き合わせられるようにします。**
+    #
+    # 本番では詳細を出しません（利用者に見せるものではないので）。ところが
+    # 出さないと、運営者は「サーバ内部エラー」という報告だけを受け取ります。
+    # その時刻の前後に何十本もリクエストがあるログから、どれがその 1 本
+    # なのかを当てることになります。実際にそれで手が止まりました。
+    #
+    # 短い符号を 1 つ、応答とログの両方に入れます。利用者が読み上げられる
+    # 長さで、かつ中身は何も漏らしません。
+    ref = uuid.uuid4().hex[:8]
+    log.exception("unhandled error [%s] on %s %s",
+                  ref, request.method, request.url.path)
     if expose_error_detail():
         detail = f"{type(exc).__name__}: {exc}"
         hint = "kaigyou-etl doctor を実行すると原因と対処が表示されます。"
     else:
-        detail = "サーバ内部エラー"
-        hint = "サーバのログに詳細が記録されています。"
-    return JSONResponse(status_code=500, content={"detail": detail, "hint": hint})
+        detail = f"サーバ内部エラー（{ref}）"
+        hint = f"サーバのログに詳細が記録されています（符号 {ref}）。"
+    return JSONResponse(status_code=500,
+                        content={"detail": detail, "hint": hint, "ref": ref})
 
 
 # Both paths, because only one of them is reachable in each setting: run

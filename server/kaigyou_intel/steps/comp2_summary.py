@@ -46,6 +46,10 @@ def build_input(survey: Mapping[str, Any],
             "requested": survey.get("requested"),
             "failed": survey.get("failed") or [],
             "not_surveyed": survey.get("not_surveyed", 0),
+            # 時間切れで手を付けられなかった医院。上限で切ったのとは理由が
+            # 違うので、分けて持ちます（やり直せば結果が変わりうるのは
+            # こちらだけです）。
+            "out_of_time": survey.get("out_of_time") or [],
             "total_in_radius": survey.get("total_in_radius"),
             # レポートは「半径◯m の中の件数」と書きます。半径を落とすと、
             # 件数だけが残って範囲が消えます。

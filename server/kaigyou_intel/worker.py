@@ -68,6 +68,26 @@ class StepNotImplemented(RuntimeError):
     pass
 
 
+#: この呼び出しが始まった時刻。tick が入れます。手元の worker では None。
+_INVOCATION_STARTED: float | None = None
+
+
+def _seconds_left() -> float | None:
+    """この呼び出しに残っている秒数。上限の無い環境では None。
+
+    段そのものに区切りを渡すためのものです。段と段の間で見るだけでは、
+    **1 つの段が上限を越えるとき**に何もできません。
+    """
+    if _INVOCATION_STARTED is None:
+        return None
+    budget, _reserve = time_budget()
+    if budget == float("inf"):
+        return None
+    # 保存と後片付けのぶんを残します。ぎりぎりまで使うと、調べ終えた結果を
+    # 書き込む前に殺されます。
+    return max(0.0, budget - (time.monotonic() - _INVOCATION_STARTED) - 60.0)
+
+
 def _business_type(job: Mapping[str, Any]) -> str:
     """このジョブがどの業態のものか。**設定を読み分ける鍵です。**
 
@@ -184,7 +204,18 @@ def _competitor_input(conn: psycopg.Connection, job: Mapping[str, Any],
     """
     category = _business_type(job)
     if number == 1:
-        return comp1_survey.build_input(job["base_data"], category)
+        payload = comp1_survey.build_input(job["base_data"], category)
+        # **この呼び出しに残っている秒数を渡します。**
+        #
+        # 競合の調査は医院ごとに Web を引くので、商圏によって所要時間が
+        # 何倍も違います。関数の上限を越えると段まるごとが失われ、調べ終えて
+        # いたぶんも一緒に消えます。実測：12 院の調査が上限（800秒）で殺され、
+        # やり直してまた同じところで殺されました。**8 院調べて「4 院は時間
+        # 切れ」と書くほうが、12 院ぶんの費用を捨てるより良い。**
+        remaining = _seconds_left()
+        if remaining is not None:
+            payload = {**payload, "_残り秒": remaining}
+        return payload
     if number == 2:
         survey = jobs.step_output(conn, job["id"], 1)
         if not survey:
@@ -248,7 +279,10 @@ def advance(conn: psycopg.Connection, job_id: str,
         jobs.release_job(conn, job_id, "completed")
         return {"job_id": job_id, "status": "completed", "step": None}
 
-    settings = llm.step_settings(number)
+    # **段の名前も種類ごとに違います。** ここで種類を渡さないと、競合分析の
+    # ジョブの進捗に「商圏特徴抽出」と出ます。動きはしますが、読む人には
+    # どちらの分析が走っているのか分かりません。
+    settings = llm.step_settings(number, kind=jobs.kind_of(conn, job_id))
 
     # 走らせる前に回数を見ます。_handle_failure は例外を捕まえたときにしか
     # 通らないので、関数が強制終了された場合そこを通りません。ここで見ないと、
@@ -272,6 +306,15 @@ def advance(conn: psycopg.Connection, job_id: str,
         jobs.release_job(conn, job_id, "blocked", str(exc))
         return {"job_id": job_id, "status": "blocked", "step": number,
                 "error": str(exc)}
+    except comp1_survey.OutOfTime as exc:
+        # **失敗ではありません。** この呼び出しに時間が残っていなかっただけ
+        # です。やり直し回数を食わせると、いちばん時間のかかる商圏が、
+        # いちばん試行回数を使えないことになります。
+        say(f"    時間切れ: {exc}")
+        jobs.reset_step(conn, job_id, number)
+        jobs.release_job(conn, job_id, "queued")
+        return {"job_id": job_id, "status": "queued", "step": None,
+                "waiting": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return _handle_failure(conn, job_id, number, exc, say)
 
@@ -381,6 +424,10 @@ def tick(conn: psycopg.Connection, *, stale_after_minutes: float | None = None,
 
     budget, reserve = time_budget()
     started = time.monotonic()
+    # 段そのものに区切りを渡せるようにします。段と段の間で見るだけでは、
+    # **1 つの段が上限を越えるとき**に手の打ちようがありません。
+    global _INVOCATION_STARTED
+    _INVOCATION_STARTED = started
     steps_done: list[int] = []
     outcome: dict[str, Any] = {}
 
@@ -402,6 +449,7 @@ def tick(conn: psycopg.Connection, *, stale_after_minutes: float | None = None,
         if jobs.claim_specific(conn, job_id) is None:
             break
 
+    _INVOCATION_STARTED = None
     return {**outcome, "claimed": job_id, "recovered": recovered,
             "steps_completed": steps_done}
 
