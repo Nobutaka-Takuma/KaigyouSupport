@@ -55,6 +55,7 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
 
     lines += _coverage_block(coverage, tally, label)
     lines += _landscape_block(output, tally, label)
+    lines += _per_competitor_block(output.get("competitors") or [], label)
     lines += _tally_block(tally, label)
     lines += _map_block(output.get("positioning_map") or {}, label)
     lines += _opportunity_block(output, label)
@@ -138,6 +139,64 @@ def _landscape_block(output: Mapping[str, Any], tally: Mapping[str, Any],
         if items:
             lines += [f"### {heading}", ""] + [f"- {x}" for x in items] + [""]
     return lines
+
+
+def _per_competitor_block(competitors: Sequence[Mapping[str, Any]],
+                          label: str) -> list[str]:
+    """1 件ずつ、**何を読んで、何が分かったか。**
+
+    これがいちばん効く節です。集計表は「この地域には矯正が 1 件」としか
+    言いませんが、読む人が知りたいのは「その 1 件は何で稼いでいるのか」で、
+    それは 1 件ずつの中身にしかありません。
+
+    **開いた頁を並べます。** 実測：出典が文書の末尾に 20 件まとめて並んで
+    いるだけで、どの医院についてどれを見たのかが分かりませんでした。読んだ
+    コンサルタントは、結局ゼロから同じサイトを開き直すことになります。
+    """
+    listed = [c for c in competitors if c.get("name")]
+    if not listed:
+        return []
+    lines = [f"## 調べた{label}（1 件ずつ）", ""]
+    for c in sorted(listed, key=_by_distance):
+        lines += _one_competitor(c, label)
+    return lines
+
+
+def _one_competitor(c: Mapping[str, Any], label: str) -> list[str]:
+    where = _metres(c.get("distance_m"))
+    lines = [f"### {c.get('name')}（{where}）", ""]
+    if c.get("homepage"):
+        lines.append(f"- 公式サイト：{c['homepage']}")
+
+    for key, heading in (("products", "扱っている領域"),
+                         ("positioning", "掲げている強み"),
+                         ("target", "訴求している層"),
+                         ("segments", "主な客層")):
+        values = [str(v) for v in (c.get(key) or []) if str(v).strip()]
+        if values:
+            lines.append(f"- {heading}：{'、'.join(values)}")
+    for key, heading in (("price_note", "価格"),
+                         ("place_note", "立地・診療時間"),
+                         ("promotion_note", "Web での訴求")):
+        if str(c.get(key) or "").strip():
+            lines.append(f"- {heading}：{c[key]}")
+    if c.get("map_placed"):
+        lines.append(f"- ポジション判定：{c.get('map_basis') or '—'}")
+    elif c.get("map_basis"):
+        lines.append(f"- ポジション判定：**していません** — {c['map_basis']}")
+
+    # **開いて読んだ頁。** 検索で名前が出ただけの頁とは別に出します。
+    read = list(c.get("read") or [])
+    if read:
+        lines += ["", "調べたところ（実際に開いた頁）:", ""]
+        lines += [f"- {r.get('title') or r.get('url')}  \n  {r.get('url')}"
+                  for r in read]
+    else:
+        lines += ["", "**開いて読んだ頁はありません。** 検索結果の抜粋だけで"
+                  "書かれているので、内容は確かめられていません。"]
+    if str(c.get("not_confirmed") or "").strip():
+        lines += ["", f"確認できなかったこと：{c['not_confirmed']}"]
+    return lines + [""]
 
 
 def _tally_block(tally: Mapping[str, Any], label: str) -> list[str]:

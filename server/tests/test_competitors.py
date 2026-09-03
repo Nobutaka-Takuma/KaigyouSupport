@@ -500,7 +500,7 @@ def test_a_slow_competitor_does_not_take_the_whole_step_down(monkeypatch):
     clock = {"now": 1000.0}
     monkeypatch.setattr(comp1_survey.time, "monotonic", lambda: clock["now"])
 
-    def slow(target, payload, system, per, category, deadline=None):
+    def slow(target, payload, system, per, category, deadline=None, fetches=3):
         if comp1_survey._out_of_time(deadline):
             return comp1_survey._Surveyed(str(target["name"]), skipped=True)
         clock["now"] += 40.0          # 1 院 40 秒かかることにする
@@ -511,7 +511,7 @@ def test_a_slow_competitor_does_not_take_the_whole_step_down(monkeypatch):
     targets = [{"name": f"第{i}歯科", "distance_m": i * 50} for i in range(6)]
     # 100 秒しかない → 2 院で打ち切り。
     results = comp1_survey._survey_all(targets, {}, "sys", 2, 1, "dental_clinic",
-                                       deadline=1100.0)
+                                       deadline=1100.0, fetches=3)
     assert sum(1 for r in results if r.competitor) == 3
     assert [r.name for r in results if r.skipped] == ["第3歯科", "第4歯科", "第5歯科"]
 
@@ -734,3 +734,165 @@ def test_the_screen_is_told_that_the_analysis_was_cheapened(budgeting):
              / "web" / "src" / "components" / "AnalysisPanel.tsx").read_text()
     assert "budget_mode" in panel
     assert "本来のものより落ちます" in panel
+
+
+# ============================== 実際のレポートで起きたこと（回帰）
+#
+# 沼津市の競合分析が返したもの：
+#
+#   - 山本矯正歯科 …… 「**医院名が**矯正歯科専門であることから…推定」を根拠に
+#     ポジショニングマップへ配置されていた
+#   - 中野歯科医院 …… 「検索ツールの利用制限によりアクセスできず」。ところが
+#     公式サイト（super-c.co.jp/nakano/）は出典一覧に載っている
+#   - 出典は文書の末尾に 20 件まとめて並ぶだけで、**どの医院についてどれを
+#     見たのか分からない**
+#
+# 原因は 1 つでした。**ページを開く手段を渡していなかった。** 検索の抜粋しか
+# 見られないので、名前から推測するか「アクセスできず」と書くしかありません。
+
+def test_the_search_step_can_open_pages_not_only_search():
+    """**検索だけでは、その医院が何で稼いでいるかは分かりません。**
+
+    インプラント専門も自費の価格表も診療時間も、医院のサイトの中にあって
+    検索結果の抜粋には出ません。
+    """
+    from kaigyou_intel import client as llm
+
+    llm.use_kind("competitors")
+    tools = llm.build_request(1, "s", "u", max_uses=2, fetch_uses=3)["tools"]
+    by_name = {t["name"]: t for t in tools}
+    assert "web_search" in by_name, "検索がありません"
+    assert "web_fetch" in by_name, "**ページを開く手段がありません**"
+    assert by_name["web_fetch"]["max_uses"] == 3
+    # 1 ページの取り込み量は切ってあること（費用は入力トークンに比例します）。
+    assert by_name["web_fetch"]["max_content_tokens"] <= 10_000
+    llm.use_kind("area")
+
+
+def test_the_dental_config_pays_for_opening_pages():
+    """節約中でも、**1 件あたりの調べ方は削らない。**
+
+    削ったところ、医院名だけを根拠に判定したレポートが出ました。少ない件数を
+    きちんと調べるのが目的なので、節約は件数で効かせます。
+    """
+    from kaigyou_core import config as cfg
+
+    survey = cfg.competitors_config("dental_clinic")["survey"]
+    assert survey["fetches_per_competitor"] >= 2, "公式サイトを開く回数"
+    assert survey["searches_per_competitor"] >= 2, "公式サイトを見つける回数"
+
+
+def test_a_page_that_was_opened_is_told_apart_from_one_merely_found():
+    """**見つけただけと、中を読んだのは別です。**
+
+    実測：公式サイトが検索結果に出ていたのに「アクセスできず」と書かれました。
+    読んだ頁がどれかを残さないと、読み手は「調べたが分からなかった」のか
+    「開いてすらいない」のかを区別できません。
+    """
+    import types
+
+    from kaigyou_intel.client import extract_sources
+
+    def block(kind, **kw):
+        return types.SimpleNamespace(type=kind, **kw)
+
+    message = types.SimpleNamespace(content=[
+        block("web_search_tool_result", content=[
+            types.SimpleNamespace(url="https://portal.example/a",
+                                  title="ポータル", page_age=None)]),
+        block("web_fetch_tool_result", content=types.SimpleNamespace(
+            url="https://clinic.example/", retrieved_at="2026-09-03",
+            document=types.SimpleNamespace(title="診療案内"))),
+    ])
+    found = extract_sources(message)
+    assert [s.get("fetched") for s in found] == [None, True]
+    assert [s["url"] for s in found if s.get("fetched")] \
+        == ["https://clinic.example/"]
+
+
+def test_a_search_tool_error_is_still_not_an_exception():
+    """サーバ側ツールの失敗は HTTP 200 で来ます。落とさずに数だけ残すこと。"""
+    import types
+
+    from kaigyou_intel.client import extract_sources
+
+    message = types.SimpleNamespace(content=[
+        types.SimpleNamespace(type="web_fetch_tool_result",
+                              content=types.SimpleNamespace(
+                                  error_code="max_uses_exceeded")),
+    ])
+    assert extract_sources(message) == [{"error": "max_uses_exceeded"}]
+
+
+def test_a_judgement_made_from_the_name_alone_is_not_placed():
+    """**プロンプトでのお願いでは足りませんでした。**
+
+    「推測しないでください」と書いてあるプロンプトで、名前から推測した判定が
+    返り、マップに置かれました。守らせられるものは仕組みで守らせます。
+    """
+    from kaigyou_intel.schemas import Competitor
+    from kaigyou_intel.steps.comp1_survey import _unplace_if_only_the_name
+
+    read = [{"url": "https://a.example/", "title": "診療案内"}]
+    # 実際に返ってきた根拠そのもの。
+    named = Competitor(
+        name="山本矯正歯科", map_placed=True, map_x=1, map_y=2,
+        map_basis="医院名が矯正歯科専門であることから、専門診療中心・"
+                  "やや自費診療寄りと推定。")
+    _unplace_if_only_the_name(named, read)
+    assert named.map_placed is False
+    # **理由は消しません。**「名前からしか判断できなかった」も情報です。
+    assert "医院名が矯正歯科専門" in named.map_basis
+    assert "採用していません" in named.map_basis
+
+    # 頁を 1 つも開いていなければ、何を書いてあっても根拠は抜粋だけです。
+    unread = Competitor(name="B", map_placed=True, map_x=2, map_y=1,
+                        map_basis="インプラント専門ページがある")
+    _unplace_if_only_the_name(unread, [])
+    assert unread.map_placed is False
+
+    # 開いた頁を根拠にした判定は残ること。
+    proper = Competitor(
+        name="C", map_placed=True, map_x=2, map_y=1,
+        map_basis="診療案内にインプラント1本38万円と記載、保険診療の記載なし")
+    _unplace_if_only_the_name(proper, read)
+    assert proper.map_placed is True
+
+
+def test_the_report_says_per_clinic_what_was_read_and_found():
+    """**どこをどう調べたかが書いていないと、読んだ人はゼロからやり直します。**
+
+    実測：出典が末尾に 20 件まとめて並ぶだけで、どの医院についてどれを見たのか
+    が分かりませんでした。集計表は「矯正が 1 件」としか言わず、読む人が知り
+    たい「その 1 件は何で稼いでいるのか」はどこにもありませんでした。
+    """
+    from kaigyou_intel.competitor_report import to_markdown
+
+    output = {
+        **_summary_output(),
+        "competitors": [
+            {"name": "しぶやデンタルクリニック", "distance_m": 240,
+             "homepage": "https://s.example/",
+             "products": ["インプラント"], "positioning": ["インプラント専門"],
+             "price_note": "インプラント 1 本 38.5 万円と料金ページに記載",
+             "map_placed": True, "map_x": 2, "map_y": 2,
+             "map_basis": "料金ページに自費の価格表",
+             "read": [{"url": "https://s.example/implant/",
+                       "title": "インプラント"}]},
+            {"name": "中野歯科医院", "distance_m": 520, "read": [],
+             "map_placed": False, "map_basis": "医院名からの推測でした"},
+        ],
+    }
+    markdown = to_markdown(output, DATASET)
+
+    # 1 件ずつの節が、集計表より前にあること。
+    assert markdown.index("## 調べた歯科医院（1 件ずつ）") \
+        < markdown.index("## この地域では何が多く")
+    # 何で稼いでいるかが、そのまま読めること。
+    assert "インプラント 1 本 38.5 万円" in markdown
+    # **開いた頁が、その医院の下に並ぶこと。**
+    assert "https://s.example/implant/" in markdown
+    assert "実際に開いた頁" in markdown
+    # 開いていない医院は、そう言うこと。「調べたが分からなかった」と混ぜない。
+    assert "**開いて読んだ頁はありません。**" in markdown
+    assert "ポジション判定：**していません**" in markdown

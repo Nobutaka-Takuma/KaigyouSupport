@@ -28,6 +28,15 @@ T = TypeVar("T", bound=BaseModel)
 #: ここも確認してください。
 WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
 
+#: ページを**実際に開いて読む**ためのツール。
+#:
+#: 検索だけでは、返ってくるのは結果ページの抜粋です。抜粋には「インプラント
+#: 専門」も「自費の価格表」も載りません——それは医院のサイトの中にあります。
+#: 実測：中野歯科医院の公式サイト（super-c.co.jp/nakano/）は検索結果に出て
+#: いたのに、レポートには「検索ツールの利用制限によりアクセスできず」と
+#: 書かれました。**開く手段を渡していなかったからです。**
+WEB_FETCH_TOOL_TYPE = "web_fetch_20260209"
+
 #: このプロジェクトが送らないもの。
 #:
 #: Sonnet 5 / Opus 5 系では ``budget_tokens`` と ``temperature`` などの
@@ -233,6 +242,32 @@ def _web_search_tool(limits: Mapping[str, Any], search: Mapping[str, Any],
     return tool
 
 
+def _web_fetch_tool(search: Mapping[str, Any], max_uses: int) -> dict[str, Any]:
+    """会話に出ている URL を開いて読む。
+
+    **検索の抜粋と、ページの中身は別物です。** 「インプラント専門」も自費の
+    価格表も診療時間も、医院のサイトの中にあります。抜粋には出ません。
+
+    ``max_content_tokens`` で 1 ページの取り込み量を切ります。切らないと、
+    長いページ 1 本で入力が跳ね上がります（費用は入力トークンに比例します）。
+    """
+    tool: dict[str, Any] = {
+        "type": WEB_FETCH_TOOL_TYPE,
+        "name": "web_fetch",
+        "max_uses": int(max_uses),
+        "max_content_tokens": int(search.get("max_content_tokens", 8_000)),
+        # 出典として引くので、引用を有効にします。
+        "citations": {"enabled": True},
+    }
+    allowed = [d for d in (search.get("allowed_domains") or []) if d]
+    blocked = [d for d in (search.get("blocked_domains") or []) if d]
+    if allowed:
+        tool["allowed_domains"] = allowed
+    elif blocked:
+        tool["blocked_domains"] = blocked
+    return tool
+
+
 #: キャッシュの保持時間。既定の 5 分か、`1h`。
 #:
 #: 5 分は**応答の開始から**数えます。レポート 1 本が 12 分かかるなら、次の
@@ -253,7 +288,8 @@ def build_request(step_number: int, system: str, user: str, *,
                   tools: Sequence[Mapping[str, Any]] | None = None,
                   web_search: bool | None = None,
                   effort: str | None = None,
-                  max_uses: int | None = None) -> dict[str, Any]:
+                  max_uses: int | None = None,
+                  fetch_uses: int | None = None) -> dict[str, Any]:
     """送信する本体を組み立てる。呼び出しとは分けてあります。
 
     分けているのは検算のためです。API キーの無い環境でも、この戻り値が
@@ -303,6 +339,13 @@ def build_request(step_number: int, system: str, user: str, *,
     if searching:
         declared.append(_web_search_tool(config.get("limits") or {},
                                          config.get("search") or {}, max_uses))
+        # **検索したら、開けるようにします。** 検索結果の抜粋だけでは、
+        # 医院が何を専門にしているかは分かりません。web_fetch は会話に既に
+        # 出ている URL しか開かないので、検索とセットでなければ意味が
+        # ありません（だから searching の中に置いています）。
+        if fetch_uses:
+            declared.append(_web_fetch_tool(config.get("search") or {},
+                                            fetch_uses))
     if declared:
         request["tools"] = declared
     return request
@@ -314,6 +357,7 @@ def ask(*, step_number: int, system: str, user: str,
         web_search: bool | None = None,
         effort: str | None = None,
         max_uses: int | None = None,
+        fetch_uses: int | None = None,
         timeout: float | None = None) -> Result:
     """1 ステップぶんの呼び出し。
 
@@ -331,7 +375,7 @@ def ask(*, step_number: int, system: str, user: str,
                                                           _request_limits()[0])))
     request = build_request(step_number, system, user, tools=tools,
                             web_search=web_search, effort=effort,
-                            max_uses=max_uses)
+                            max_uses=max_uses, fetch_uses=fetch_uses)
 
     # 常にストリームで受けます。SDK は「10 分を超えうる操作」を非ストリームで
     # 呼ぶと送信前に ValueError を投げ、その境目は max_tokens で決まります。
@@ -518,25 +562,50 @@ def _count_searches(message: Any) -> int:
 
 
 def extract_sources(message: Any) -> list[dict[str, Any]]:
-    """web_search_tool_result から出典を拾う。
+    """検索で見つけた頁と、**実際に開いて読んだ頁**を拾う。
 
     サーバ側ツールはエラーを例外にせず、content にエラーオブジェクトを入れて
     HTTP 200 を返します。成功時の content は**リスト**、失敗時は**オブジェクト**
     なので、添字を取る前に分岐します。
+
+    ``fetched`` を立てるのは、**見つけただけと、中を読んだのは別だから**です。
+    実測：中野歯科医院は公式サイトが検索結果に出ていたのに、レポートには
+    「アクセスできず」と書かれました。読んだ頁がどれかを残しておかないと、
+    読み手は「調べたのに分からなかった」のか「開いてすらいない」のかを
+    区別できません。
     """
     out: list[dict[str, Any]] = []
     for block in getattr(message, "content", []):
-        if getattr(block, "type", "") != "web_search_tool_result":
-            continue
-        content = getattr(block, "content", None)
-        if not isinstance(content, list):
-            # {"error_code": "max_uses_exceeded"} のような形。件数だけ残します。
-            out.append({"error": getattr(content, "error_code", str(content))})
-            continue
-        for item in content:
+        kind = getattr(block, "type", "")
+        if kind == "web_search_tool_result":
+            content = getattr(block, "content", None)
+            if not isinstance(content, list):
+                # {"error_code": "max_uses_exceeded"} のような形。件数だけ残します。
+                out.append({"error": getattr(content, "error_code", str(content))})
+                continue
+            for item in content:
+                out.append({
+                    "url": getattr(item, "url", None),
+                    "title": getattr(item, "title", None),
+                    "page_age": getattr(item, "page_age", None),
+                })
+        elif kind == "web_fetch_tool_result":
+            content = getattr(block, "content", None)
+            url = getattr(content, "url", None)
+            if url is None:
+                out.append({"error": getattr(content, "error_code", str(content))})
+                continue
+            document = getattr(content, "document", None)
             out.append({
-                "url": getattr(item, "url", None),
-                "title": getattr(item, "title", None),
-                "page_age": getattr(item, "page_age", None),
+                "url": url,
+                "title": getattr(document, "title", None),
+                "retrieved_at": getattr(content, "retrieved_at", None),
+                # **開いて読んだ頁。** 検索で名前を見ただけの頁と区別します。
+                "fetched": True,
             })
     return out
+
+
+def _count_fetches(message: Any) -> int:
+    return sum(1 for b in getattr(message, "content", [])
+               if getattr(b, "type", "") == "web_fetch_tool_result")

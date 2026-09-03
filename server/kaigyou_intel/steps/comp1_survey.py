@@ -89,6 +89,10 @@ class _Surveyed:
     #: 時間切れで**手を付けなかった**。失敗とは別に数えます——調べて分から
     #: なかったのと、調べていないのとでは、読み手のすることが違います。
     skipped: bool = False
+    #: **実際に開いて読んだ頁。** 検索で名前を見ただけの頁とは別です。
+    #: レポートに載せます——「どこをどう調べたか」が書いていないと、読んだ
+    #: コンサルタントは同じことをゼロからやり直すことになります。
+    read: list[dict[str, Any]] = field(default_factory=list)
 
 
 def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
@@ -110,9 +114,12 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
     settings = llm.step_settings(STEP_NUMBER)
     system = system_prompt(payload, category)
     per_competitor = max(1, int(survey.get("searches_per_competitor", 2)))
+    # **開いて読む回数。** 検索の抜粋だけでは、その医院が何を専門にして
+    # いるかは分かりません。公式サイトを開かないかぎり出てこない情報です。
+    fetches = max(0, int(survey.get("fetches_per_competitor", 3)))
     results = _survey_all(targets, payload, system, per_competitor,
                           max(1, int(survey.get("parallel", 4))), category,
-                          _deadline(payload))
+                          _deadline(payload), fetches)
 
     found = [r for r in results if r.competitor is not None]
     skipped = [r for r in results if r.skipped]
@@ -131,12 +138,14 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
 
     return (
         {
-            "competitors": [_with_distance(r.competitor, targets)
+            "competitors": [_with_distance(r.competitor, targets, r.read)
                             for r in found],
             "surveyed": len(found),
             "requested": len(targets),
             # 調べられなかった医院。**黙って消しません。**
-            "failed": [{"name": r.name, "why": r.error}
+            "failed": [{"name": r.name, "why": r.error,
+                        # 落ちた医院についても、**どこまで読んだかは残します。**
+                        "read": r.read}
                        for r in results if r.competitor is None and not r.skipped],
             # 時間切れで手を付けられなかった医院。上限で切ったぶんに足します
             # ——読み手にとっては同じ「調べていない」で、理由だけが違います。
@@ -163,7 +172,8 @@ def _deadline(payload: Mapping[str, Any]) -> float | None:
 
 def _survey_all(targets: Sequence[Mapping[str, Any]], payload: Mapping[str, Any],
                 system: str, per_competitor: int, parallel: int,
-                category: str, deadline: float | None = None) -> list[_Surveyed]:
+                category: str, deadline: float | None = None,
+                fetches: int = 3) -> list[_Surveyed]:
     """医院ごとの調査を同時に走らせる。順序は入力どおりに揃えます。
 
     ``deadline`` を過ぎたら、**まだ始めていない医院には手を付けません。**
@@ -181,11 +191,12 @@ def _survey_all(targets: Sequence[Mapping[str, Any]], payload: Mapping[str, Any]
             if _out_of_time(deadline):
                 out.append(_Surveyed(str(t.get("name") or ""), skipped=True))
                 continue
-            out.append(_survey_one(t, payload, system, per_competitor, category))
+            out.append(_survey_one(t, payload, system, per_competitor, category,
+                                   deadline, fetches))
         return out
     with ThreadPoolExecutor(max_workers=min(parallel, len(targets))) as pool:
         futures = [pool.submit(_survey_one, t, payload, system, per_competitor,
-                               category, deadline) for t in targets]
+                               category, deadline, fetches) for t in targets]
         return [f.result() for f in futures]
 
 
@@ -200,7 +211,7 @@ def _left(deadline: float | None) -> float | None:
 
 def _survey_one(target: Mapping[str, Any], payload: Mapping[str, Any],
                 system: str, per_competitor: int, category: str,
-                deadline: float | None = None) -> _Surveyed:
+                deadline: float | None = None, fetches: int = 3) -> _Surveyed:
     """1 医院を調べて、構造化する。検索と構造化は別の呼び出しです。
 
     Web検索（サーバ側ツール）と構造化出力は同じ呼び出しでは併用しません。
@@ -222,14 +233,18 @@ def _survey_one(target: Mapping[str, Any], payload: Mapping[str, Any],
         # **区切りより長く待ちません。** 待っても、返ってきた頃には関数が
         # 殺されています。1 院が詰まっても、他の医院の結果は残ります。
         found = llm.ask(step_number=STEP_NUMBER, system=system, user=asked,
-                        max_uses=per_competitor, timeout=_left(deadline))
+                        max_uses=per_competitor, fetch_uses=fetches,
+                        timeout=_left(deadline))
     except Exception as exc:  # noqa: BLE001 - 1 件の失敗で全部を捨てない
         return _Surveyed(name, error=f"{type(exc).__name__}: {exc}")
 
     sources = [s for s in found.sources if s.get("url")]
+    # 開いて読んだ頁だけ。**検索で名前が出ただけの頁と分けます。**
+    read = [{"url": s["url"], "title": s.get("title") or ""}
+            for s in sources if s.get("fetched")]
     if not (found.text or "").strip():
         return _Surveyed(name, usage=found.usage, sources=_tagged(sources, name),
-                         error="調査の本文が空でした")
+                         read=read, error="調査の本文が空でした")
 
     settings = llm.step_settings(STEP_NUMBER)
     catalogue = "\n".join(f"- {s['url']}  {s.get('title') or ''}"
@@ -247,20 +262,21 @@ def _survey_one(target: Mapping[str, Any], payload: Mapping[str, Any],
             schema=CompetitorSurvey, web_search=False, timeout=_left(deadline))
     except Exception as exc:  # noqa: BLE001
         return _Surveyed(name, usage=found.usage, sources=_tagged(sources, name),
-                         error=f"構造化に失敗: {type(exc).__name__}: {exc}")
+                         read=read, error=f"構造化に失敗: {type(exc).__name__}: {exc}")
 
     survey: CompetitorSurvey | None = structured.parsed
     if survey is None:
         return _Surveyed(name, usage=_add(found.usage, structured.usage),
-                         sources=_tagged(sources, name),
+                         sources=_tagged(sources, name), read=read,
                          error="構造化出力を受け取れませんでした")
 
     competitor = survey.competitor
     competitor.name = name          # モデルの書き換えを許さない
     _drop_unverifiable(competitor, {s["url"] for s in sources})
+    _unplace_if_only_the_name(competitor, read)
     return _Surveyed(name, competitor=competitor,
                      usage=_add(found.usage, structured.usage),
-                     sources=_tagged(sources, name))
+                     sources=_tagged(sources, name), read=read)
 
 
 def _drop_unverifiable(competitor: Competitor, urls: set[str]) -> None:
@@ -286,6 +302,42 @@ def _drop_unverifiable(competitor: Competitor, urls: set[str]) -> None:
             else note)
 
 
+#: 「名前を見ただけ」の判定に出てくる言い回し。
+#:
+#: 実測：山本矯正歯科が「**医院名が**矯正歯科専門であることから、専門診療
+#: 中心・やや自費診療寄りと**推定**」という根拠でマップに置かれていました。
+#: 名前は看板であって、診療の実態ではありません。矯正を掲げていても一般歯科が
+#: 主かもしれず、それはサイトを開かなければ分かりません。
+_NAME_ONLY = ("医院名", "院名から", "名称から", "名前から", "屋号")
+
+
+def _unplace_if_only_the_name(competitor: Competitor,
+                              read: Sequence[Mapping[str, Any]]) -> None:
+    """医院名だけを根拠にした配置を、マップから外す。
+
+    **プロンプトでのお願いでは足りませんでした。** 「推測しないでください」と
+    書いてあるプロンプトで、名前から推測した判定が返ってきました。守らせ
+    られるものは仕組みで守らせます。
+
+    外すのは配置だけです。**判定の理由は残します**——「名前からしか判断
+    できなかった」も、読み手にとっては情報です。
+    """
+    if not competitor.map_placed:
+        return
+    basis = competitor.map_basis or ""
+    named_only = any(word in basis for word in _NAME_ONLY)
+    # 頁を 1 つも開いていないなら、何を書いてあっても根拠は名前と抜粋だけです。
+    if not (named_only or not read):
+        return
+    competitor.map_placed = False
+    why = ("医院名からの推測でした" if named_only
+           else "ページを 1 つも開けていません")
+    competitor.map_basis = (
+        f"{basis} ／ **この判定は採用していません**（{why}）。"
+        "看板ではなく、サイトに書いてある診療内容で判定する必要があります。"
+    ).strip(" ／")
+
+
 def system_prompt(payload: Mapping[str, Any],
                   category: str = DEFAULT_CATEGORY) -> str:
     """実際に送られる system プロンプト。
@@ -306,12 +358,17 @@ def _vocabulary_block(payload: Mapping[str, Any]) -> str:
     return json.dumps(vocabulary, ensure_ascii=False, indent=1)
 
 
-def _with_distance(competitor: Competitor,
-                   targets: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """距離は GIS の値を付け直す。**モデルに書かせません。**"""
+def _with_distance(competitor: Competitor, targets: Sequence[Mapping[str, Any]],
+                   read: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """距離は GIS の値を付け直し、読んだ頁を添える。
+
+    距離を**モデルに書かせません。** 読んだ頁も同じで、モデルの自己申告では
+    なく、API が返した web_fetch の結果から取ります。
+    """
     by_name = {t.get("name"): t for t in targets}
     out = competitor.model_dump()
     out["distance_m"] = (by_name.get(competitor.name) or {}).get("distance_m")
+    out["read"] = list(read)
     return out
 
 

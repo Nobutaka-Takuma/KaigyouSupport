@@ -39,6 +39,9 @@ def build_input(survey: Mapping[str, Any],
         "label": conf.get("label") or "競合",
         "radius_m": survey.get("radius_m"),
         "tally": competition.tally(competitors, conf, near_radius_m=near),
+        # **1 件ずつ、何を読んで何が分かったか。** これが無いと、読んだ人は
+        # 同じことをゼロからやり直すことになります。
+        "competitors": competitors,
         "positioning_map": competition.positioning_map(competitors, conf),
         # 調べられなかったぶん。**「この地域には少ない」と読ませないため。**
         "coverage": {
@@ -78,6 +81,9 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
     # 集計値はそのまま持ち回します。**レポートは LLM の文ではなく、
     # この数字を出します。**
     return ({**summary.model_dump(),
+             # 1 件ずつの中身は、要約とは別に持ち回します。**要約に溶かすと、
+             # どの医院の話なのかが消えます。**
+             "competitors": payload.get("competitors") or [],
              # 何を競合と呼ぶかは設定の語です。レポートで「競合」と書き直すと、
              # 画面（歯科医院）と文書（競合）で呼び方が食い違います。
              "label": payload.get("label"),
