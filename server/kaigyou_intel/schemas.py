@@ -493,18 +493,19 @@ class Competitor(BaseModel):
     promotion_note: str = Field(
         default="", description="Web での主な訴求・SNS・キャンペーンを 1〜2 文で")
     # --- ポジショニングマップ（指示書 §5）---
-    #: **判定根拠が弱ければ配置しません。** 無理に置くと、地図の上では他の点と
-    #: 同じ確かさに見えます。map_placed=false が「判定困難」です。
+    #: **位置は書かせません。観測できた事実だけを挙げさせます。**
     #:
-    #: 真偽値を別に持つのは、0 が「どちらとも言えない」という**意味のある値**
-    #: だからです。0 を「判定できなかった」に使うと、その 2 つが混ざります。
-    map_placed: bool = Field(
-        default=False,
-        description="公開情報から位置を判定できたか。できなければ false")
-    map_x: int = Field(default=0, description="-2〜+2。map_placed=false なら無視")
-    map_y: int = Field(default=0, description="-2〜+2。map_placed=false なら無視")
+    #: 「保険中心か自費中心か」は売上の構成比で、Web からは見えません。見えない
+    #: 量を judgement で当てさせると、名前から推測するか全件「判定不能」に
+    #: なります（両方とも実測しました）。位置は competition.py が、この
+    #: signals と設定の重みから計算します。
+    signals: list[str] = Field(
+        default_factory=list,
+        description="サイトで**実際に確認できた**観測のキーだけを列挙。"
+                    "確認できなかったものは入れない")
     map_basis: str = Field(
-        default="", description="その位置に置いた根拠。置けないならその理由")
+        default="",
+        description="観測の裏づけ。どの頁の何を見てそのキーを挙げたか")
     not_confirmed: str = Field(
         default="", description="調べたが確認できなかったこと。空にしないでください")
     sources: list[str] = Field(

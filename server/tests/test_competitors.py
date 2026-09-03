@@ -41,6 +41,22 @@ CONFIG = {
         "y": {"key": "scope", "label": "診療の幅",
               "low": "一般診療中心", "high": "専門診療中心"},
         "scale": [-2, -1, 0, 1, 2],
+        "min_signals": 1,
+        # **位置は観測から計算します。** 重みはここに（設定に）あります。
+        "signals": [
+            {"key": "jihi_page", "label": "自費の専用ページ",
+             "axis": "payment", "weight": 1},
+            {"key": "price_list", "label": "自費の価格を掲載",
+             "axis": "payment", "weight": 1},
+            {"key": "free_access", "label": "予約不要",
+             "axis": "payment", "weight": -1},
+            {"key": "dedicated_site", "label": "特定領域の専用ページ群",
+             "axis": "scope", "weight": 1},
+            {"key": "specialist_cert", "label": "学会の専門医",
+             "axis": "scope", "weight": 1},
+            {"key": "family_clinic", "label": "かかりつけ訴求",
+             "axis": "scope", "weight": -1},
+        ],
     },
 }
 
@@ -48,17 +64,17 @@ COMPETITORS = [
     {"name": "A歯科", "distance_m": 220, "products": ["一般歯科", "小児歯科"],
      "target": ["小児"], "positioning": ["小児対応"],
      "place_confirmed": ["parking"],
-     "map_placed": True, "map_x": -1, "map_y": -1, "map_basis": "保険中心・一般"},
+     "signals": ["free_access", "family_clinic"], "map_basis": "予約不要と記載"},
     {"name": "B歯科", "distance_m": 640, "products": ["インプラント", "一般歯科"],
      "target": ["成人"], "positioning": ["インプラント"],
      "place_confirmed": [],
-     "map_placed": True, "map_x": 2, "map_y": 2, "map_basis": "自費専門を掲げる"},
+     "signals": ["jihi_page", "price_list", "dedicated_site"],
+     "map_basis": "料金ページにインプラント38万円"},
     {"name": "C歯科", "distance_m": 880, "products": ["一般歯科"],
      "target": ["高齢者"], "positioning": [],
      "place_confirmed": ["weekend"],
-     # 判定できなかった。**0 ではなく map_placed=False で表します**——0 は
-     # 「どちらとも言えない」という意味のある値なので、混ぜられません。
-     "map_placed": False, "map_basis": "サイトに診療方針の記載なし"},
+     # 観測が 1 つも取れなかった。**0（どちらとも言えない）とは別**です。
+     "signals": [], "map_basis": "サイトに診療方針の記載なし"},
 ]
 
 
@@ -114,7 +130,10 @@ def test_a_clinic_that_could_not_be_placed_is_not_placed():
     pmap = competition.positioning_map(COMPETITORS, CONFIG)
     assert [p["name"] for p in pmap["placed"]] == ["A歯科", "B歯科"]
     assert [u["name"] for u in pmap["undecided"]] == ["C歯科"]
-    assert pmap["undecided"][0]["why"] == "サイトに診療方針の記載なし"
+    # **何は観測できたのかを残します。**「判定不能」だけだと、調べていないのか
+    # 決め手が無かったのかが分かりません。
+    assert pmap["undecided"][0]["observed"] == []
+    assert "サイトに診療方針の記載なし" in pmap["undecided"][0]["note"]
 
 
 def test_the_quadrants_are_named_from_the_config_not_from_dentistry():
@@ -142,9 +161,10 @@ def test_the_quadrants_are_named_from_the_config_not_from_dentistry():
 
 def test_a_clinic_on_the_axis_is_not_pushed_into_a_quadrant():
     """0 は「どちらとも言えない」で、判定できなかったのとは別です。"""
-    middle = [{"name": "E歯科", "map_placed": True, "map_x": 0, "map_y": 1}]
+    middle = [{"name": "E歯科",
+               "signals": ["jihi_page", "free_access", "specialist_cert"]}]
     counts = {q["label"]: q["count"]
-              for q in competition.positioning_map(middle, CONFIG)["quadrants"]}
+              for q in competition.positioning_map(middle, _dental())["quadrants"]}
     assert counts["どちらとも言えない（軸上）"] == 1
     assert sum(v for k, v in counts.items() if "×" in k) == 0
 
@@ -287,7 +307,9 @@ def test_the_document_does_not_place_what_could_not_be_judged():
     body = markdown[markdown.index("### 各歯科医院の位置"):]
     assert "A歯科" in body and "B歯科" in body
     assert "位置を判定できなかった歯科医院" in markdown
-    assert "C歯科：サイトに診療方針の記載なし" in markdown
+    # 理由は「観測が取れなかった」。裏づけの文はその下に添えます。
+    assert "C歯科：" in markdown
+    assert "サイトに診療方針の記載なし" in markdown
 
 
 def test_the_document_uses_the_word_from_the_config():
@@ -358,12 +380,16 @@ def test_the_vocabulary_lives_in_config_not_in_code():
         "segments": ["学生", "勤務者"],
         "place_attributes": [{"key": "parking", "label": "駐車場"}],
         "positioning_map": {
-            "x": {"label": "価格帯", "low": "低価格帯", "high": "高価格帯"},
-            "y": {"label": "品揃え", "low": "総合", "high": "専門店"},
-            "scale": [-2, -1, 0, 1, 2]},
+            "x": {"key": "price", "label": "価格帯",
+                  "low": "低価格帯", "high": "高価格帯"},
+            "y": {"key": "range", "label": "品揃え",
+                  "low": "総合", "high": "専門店"},
+            "scale": [-2, -1, 0, 1, 2], "min_signals": 1,
+            "signals": [{"key": "course_menu", "label": "コース料理がある",
+                         "axis": "price", "weight": 1}]},
     }
     shops = [{"name": "麺屋A", "distance_m": 120, "products": ["ラーメン"],
-              "target": ["学生"], "map_placed": True, "map_x": -1, "map_y": 1,
+              "target": ["学生"], "signals": ["course_menu"],
               "map_basis": "券売機"}]
     out = json.dumps({"tally": competition.tally(shops, ramen),
                       "map": competition.positioning_map(shops, ramen)},
@@ -824,39 +850,76 @@ def test_a_search_tool_error_is_still_not_an_exception():
     assert extract_sources(message) == [{"error": "max_uses_exceeded"}]
 
 
-def test_a_judgement_made_from_the_name_alone_is_not_placed():
-    """**プロンプトでのお願いでは足りませんでした。**
+def test_the_position_is_computed_not_judged_by_the_model():
+    """**見えない量を LLM に当てさせません。**
 
-    「推測しないでください」と書いてあるプロンプトで、名前から推測した判定が
-    返り、マップに置かれました。守らせられるものは仕組みで守らせます。
+    「保険中心か自費中心か」は売上の構成比で、Web からは見えません。見えない
+    量を 1 回の判断で当てさせると、こうなりました。
+
+        1 回目 …… 医院名から推測した（「山本矯正歯科だから自費・専門」）
+        2 回目 …… 全件「判定不能」を返した（価格表が無いから決められない）
+
+    どちらもプロンプトの書き方の問題ではありません。だから LLM には**見える
+    ものだけ**を挙げさせ、位置は設定の重みで足し算します。
+
+    実測の 2 院で確かめます。裾野の 2 院は、片方が自費の専用ページと設備を
+    掲げ、もう片方がフリーアクセスと学会専門医を掲げる**対照的な**組でした。
+    ところが前回のレポートは、**両方とも「判定不能」**でした。
+    """
+    from kaigyou_core import competition
+
+    shibuya = {"name": "しぶやデンタルクリニック", "distance_m": 52,
+               "signals": ["jihi_page", "dedicated_site", "advanced_equipment"]}
+    shiomi = {"name": "しおみ歯科医院", "distance_m": 144,
+              "signals": ["specialist_cert", "training_facility",
+                          "free_access", "family_clinic"]}
+    conf = _dental()
+    a = competition.position_of(shibuya, conf["positioning_map"])
+    b = competition.position_of(shiomi, conf["positioning_map"])
+    assert a["placed"] and b["placed"], "対照的な 2 院が、どちらも置けない"
+    # **支払いの軸で反対側に出ること。** ここが分かれないなら意味がありません。
+    assert a["x"] > 0 > b["x"], f"支払い軸で分かれていません: {a['x']} / {b['x']}"
+
+    # なぜその位置なのかを 1 行ずつ遡れること。
+    labels = {o["label"] for o in a["observed"]}
+    assert any("自費" in x for x in labels)
+    assert all("weight" in o and "label" in o for o in a["observed"])
+
+
+def test_an_observation_nobody_could_have_seen_is_dropped():
+    """頁を 1 つも開けていないなら、観測は名乗れません。
+
+    検索結果の抜粋に「専門医」も「価格表」も出ません。開いていないのに
+    観測が挙がっていたら、それは抜粋からの推測です。
     """
     from kaigyou_intel.schemas import Competitor
-    from kaigyou_intel.steps.comp1_survey import _unplace_if_only_the_name
+    from kaigyou_intel.steps.comp1_survey import _drop_unobservable
 
-    read = [{"url": "https://a.example/", "title": "診療案内"}]
-    # 実際に返ってきた根拠そのもの。
-    named = Competitor(
-        name="山本矯正歯科", map_placed=True, map_x=1, map_y=2,
-        map_basis="医院名が矯正歯科専門であることから、専門診療中心・"
-                  "やや自費診療寄りと推定。")
-    _unplace_if_only_the_name(named, read)
-    assert named.map_placed is False
-    # **理由は消しません。**「名前からしか判断できなかった」も情報です。
-    assert "医院名が矯正歯科専門" in named.map_basis
-    assert "採用していません" in named.map_basis
+    unread = Competitor(name="B", signals=["jihi_page", "price_list"])
+    _drop_unobservable(unread, [])
+    assert unread.signals == []
+    # **黙って落としません。** 何が落ちたかは残します。
+    assert "jihi_page" in unread.map_basis and "採用していません" in unread.map_basis
 
-    # 頁を 1 つも開いていなければ、何を書いてあっても根拠は抜粋だけです。
-    unread = Competitor(name="B", map_placed=True, map_x=2, map_y=1,
-                        map_basis="インプラント専門ページがある")
-    _unplace_if_only_the_name(unread, [])
-    assert unread.map_placed is False
+    read = Competitor(name="C", signals=["jihi_page"])
+    _drop_unobservable(read, [{"url": "https://a.example/", "title": "料金"}])
+    assert read.signals == ["jihi_page"]
 
-    # 開いた頁を根拠にした判定は残ること。
-    proper = Competitor(
-        name="C", map_placed=True, map_x=2, map_y=1,
-        map_basis="診療案内にインプラント1本38万円と記載、保険診療の記載なし")
-    _unplace_if_only_the_name(proper, read)
-    assert proper.map_placed is True
+
+def test_a_signal_that_every_clinic_shows_is_not_used():
+    """**全件に立つ観測は、区別の役に立ちません。**
+
+    実測：「診療科目を網羅的に並べている」を -1 で入れたところ、裾野の 2 院は
+    どちらもそれに当たり、専門側の観測と打ち消し合って両方 0 になりました。
+    """
+    keys = {s["key"] for s in _dental()["positioning_map"]["signals"]}
+    assert "broad_menu" not in keys
+
+
+def _dental():
+    from kaigyou_core import config as cfg
+
+    return cfg.competitors_config("dental_clinic")
 
 
 def test_the_report_says_per_clinic_what_was_read_and_found():
@@ -875,12 +938,12 @@ def test_the_report_says_per_clinic_what_was_read_and_found():
              "homepage": "https://s.example/",
              "products": ["インプラント"], "positioning": ["インプラント専門"],
              "price_note": "インプラント 1 本 38.5 万円と料金ページに記載",
-             "map_placed": True, "map_x": 2, "map_y": 2,
+             "signals": ["jihi_page", "price_list"],
              "map_basis": "料金ページに自費の価格表",
              "read": [{"url": "https://s.example/implant/",
                        "title": "インプラント"}]},
             {"name": "中野歯科医院", "distance_m": 520, "read": [],
-             "map_placed": False, "map_basis": "医院名からの推測でした"},
+             "signals": [], "map_basis": ""},
         ],
     }
     markdown = to_markdown(output, DATASET)
@@ -895,4 +958,4 @@ def test_the_report_says_per_clinic_what_was_read_and_found():
     assert "実際に開いた頁" in markdown
     # 開いていない医院は、そう言うこと。「調べたが分からなかった」と混ぜない。
     assert "**開いて読んだ頁はありません。**" in markdown
-    assert "ポジション判定：**していません**" in markdown
+    assert "観測の裏づけ：料金ページに自費の価格表" in markdown

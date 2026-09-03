@@ -180,10 +180,8 @@ def _one_competitor(c: Mapping[str, Any], label: str) -> list[str]:
                          ("promotion_note", "Web での訴求")):
         if str(c.get(key) or "").strip():
             lines.append(f"- {heading}：{c[key]}")
-    if c.get("map_placed"):
-        lines.append(f"- ポジション判定：{c.get('map_basis') or '—'}")
-    elif c.get("map_basis"):
-        lines.append(f"- ポジション判定：**していません** — {c['map_basis']}")
+    if c.get("map_basis"):
+        lines.append(f"- 観測の裏づけ：{c['map_basis']}")
 
     # **開いて読んだ頁。** 検索で名前が出ただけの頁とは別に出します。
     read = list(c.get("read") or [])
@@ -264,15 +262,31 @@ def _map_block(pmap: Mapping[str, Any], label: str) -> list[str]:
                   ""]
 
     if placed:
-        lines += [f"### 各{label}の位置", ""]
-        lines += _table([label, "横", "縦", "距離", "判定の根拠"],
-                        [[p.get("name"), _signed(p.get("x")), _signed(p.get("y")),
-                          _metres(p.get("distance_m")), p.get("basis") or "—"]
-                         for p in sorted(placed, key=_by_distance)])
+        lines += [f"### 各{label}の位置", "",
+                  "**位置は観測から計算しています。** どの観測がどちらへ何点"
+                  "動かしたかを添えます——同じ観測なら誰が計算しても同じ位置に"
+                  "なり、なぜそこなのかを 1 行ずつ遡れます。", ""]
+        for p in sorted(placed, key=_by_distance):
+            lines.append(f"**{p.get('name')}**（{_metres(p.get('distance_m'))}）"
+                         f"　横 {_signed(p.get('x'))} / 縦 {_signed(p.get('y'))}")
+            lines.append("")
+            lines += [f"- `{o['weight']:+d}` {o['label']}"
+                      for o in (p.get("observed") or [])] or ["- （観測なし）"]
+            if p.get("basis"):
+                lines.append(f"- 裏づけ：{p['basis']}")
+            lines.append("")
     if undecided:
         lines += [f"### 位置を判定できなかった{label}"
                   f"（{len(undecided)} 件）", ""]
-        lines += [f"- {u.get('name')}：{u.get('why')}" for u in undecided] + [""]
+        for u in undecided:
+            lines.append(f"- {u.get('name')}：{u.get('why')}")
+            # **何は観測できたのかを残します。**「判定不能」だけだと、調べて
+            # いないのか、調べたが決め手が無かったのかが分かりません。
+            lines += [f"    - `{o['weight']:+d}` {o['label']}"
+                      for o in (u.get("observed") or [])]
+            if u.get("note"):
+                lines.append(f"    - 裏づけ：{u['note']}")
+        lines.append("")
     if pmap.get("note"):
         lines += [str(pmap["note"]), ""]
     return lines

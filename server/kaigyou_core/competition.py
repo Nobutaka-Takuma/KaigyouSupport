@@ -56,8 +56,9 @@ def tally(competitors: Sequence[Mapping[str, Any]],
         # 「高価格帯」、学習塾なら「受験対応」です。判定は位置から。
         # **置けなかった医院は数えません。** map_x の既定は 0 ですが、それは
         # 「どちらとも言えない」であって「判定していない」ではありません。
-        "leaning_x_high": len([c for c in surveyed
-                               if c.get("map_placed") and (c.get("map_x") or 0) > 0]),
+        "leaning_x_high": len([
+            c for c in surveyed
+            if (position_of(c, config.get("positioning_map") or {}).get("x") or 0) > 0]),
         "leaning_x_high_label": str(
             ((config.get("positioning_map") or {}).get("x") or {}).get("high") or ""),
         "note": (f"件数は**公開情報から確認できたもの**です。"
@@ -76,6 +77,45 @@ def _counted(vocabulary: Sequence[str],
     return sorted(known + extra, key=lambda r: -r["count"])
 
 
+def position_of(competitor: Mapping[str, Any],
+                axes: Mapping[str, Any]) -> dict[str, Any]:
+    """観測できた事実から、この 1 件の位置を**計算する**。
+
+    **LLM に判定させません。** 「保険中心か自費中心か」は売上の構成比で、
+    Web サイトからは見えません。見えない量を 1 回の判断で当てさせると、
+    名前から推測するか（実測）、全件「判定不能」になるか（実測）です。
+
+    ここでやるのは足し算だけです。同じ観測なら誰が計算しても同じ位置になり、
+    **なぜその位置なのかを 1 行ずつ遡れます。**
+
+    軸ごとに `min_signals` 件を下回れば、その軸は判定しません。0 件を
+    「どちらとも言えない（0）」と書くと、**調べなかったのと真ん中だったのが
+    混ざります。**
+    """
+    weights = {s.get("key"): s for s in (axes.get("signals") or []) if s.get("key")}
+    scale = axes.get("scale") or [-2, -1, 0, 1, 2]
+    low, high = min(scale), max(scale)
+    minimum = int(axes.get("min_signals", 1))
+
+    observed = [weights[k] for k in (competitor.get("signals") or []) if k in weights]
+    unknown = [k for k in (competitor.get("signals") or []) if k not in weights]
+
+    out: dict[str, Any] = {"observed": [], "unknown_signals": unknown}
+    for name, key in (("x", (axes.get("x") or {}).get("key", "payment")),
+                      ("y", (axes.get("y") or {}).get("key", "scope"))):
+        hits = [s for s in observed if s.get("axis") == key]
+        out[f"{name}_signals"] = [
+            {"key": s["key"], "label": s.get("label") or s["key"],
+             "weight": int(s.get("weight", 0))} for s in hits]
+        if len(hits) < minimum:
+            out[name] = None
+            continue
+        out[name] = max(low, min(high, sum(int(s.get("weight", 0)) for s in hits)))
+    out["observed"] = out["x_signals"] + out["y_signals"]
+    out["placed"] = out["x"] is not None and out["y"] is not None
+    return out
+
+
 def positioning_map(competitors: Sequence[Mapping[str, Any]],
                     config: Mapping[str, Any]) -> dict[str, Any]:
     """2 軸に並べる（指示書 §5）。
@@ -89,15 +129,21 @@ def positioning_map(competitors: Sequence[Mapping[str, Any]],
     for c in competitors:
         if not c.get("name"):
             continue
-        # 判定できたかは真偽値で来ます。**0 を「判定できなかった」に使いません**
-        # ——0 は「どちらとも言えない」という意味のある値です。
-        x, y = c.get("map_x"), c.get("map_y")
-        if not c.get("map_placed") or x is None or y is None:
-            undecided.append({"name": c["name"],
-                              "why": c.get("map_basis") or "公開情報から判定できず"})
+        # **位置はここで計算します。** LLM が書いた座標は使いません。
+        where = position_of(c, axes)
+        if not where["placed"]:
+            missing = [n for n in ("x", "y") if where[n] is None]
+            names = "・".join((axes.get(n) or {}).get("label") or n for n in missing)
+            undecided.append({
+                "name": c["name"],
+                "why": f"{names}を判定できる観測がサイトから取れませんでした",
+                # **何は観測できたのかを残します。** 「判定不能」だけだと、
+                # 調べていないのか、調べたが決め手が無かったのかが分かりません。
+                "observed": where["observed"], "note": c.get("map_basis") or ""})
             continue
-        placed.append({"name": c["name"], "x": int(x), "y": int(y),
+        placed.append({"name": c["name"], "x": where["x"], "y": where["y"],
                        "distance_m": _distance(c),
+                       "observed": where["observed"],
                        "basis": c.get("map_basis") or ""})
     return {
         "x": axes.get("x") or {},

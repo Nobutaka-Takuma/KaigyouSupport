@@ -273,7 +273,7 @@ def _survey_one(target: Mapping[str, Any], payload: Mapping[str, Any],
     competitor = survey.competitor
     competitor.name = name          # モデルの書き換えを許さない
     _drop_unverifiable(competitor, {s["url"] for s in sources})
-    _unplace_if_only_the_name(competitor, read)
+    _drop_unobservable(competitor, read)
     return _Surveyed(name, competitor=competitor,
                      usage=_add(found.usage, structured.usage),
                      sources=_tagged(sources, name), read=read)
@@ -302,40 +302,21 @@ def _drop_unverifiable(competitor: Competitor, urls: set[str]) -> None:
             else note)
 
 
-#: 「名前を見ただけ」の判定に出てくる言い回し。
-#:
-#: 実測：山本矯正歯科が「**医院名が**矯正歯科専門であることから、専門診療
-#: 中心・やや自費診療寄りと**推定**」という根拠でマップに置かれていました。
-#: 名前は看板であって、診療の実態ではありません。矯正を掲げていても一般歯科が
-#: 主かもしれず、それはサイトを開かなければ分かりません。
-_NAME_ONLY = ("医院名", "院名から", "名称から", "名前から", "屋号")
+def _drop_unobservable(competitor: Competitor, read: Sequence[Mapping[str, Any]]) -> None:
+    """頁を 1 つも開けていないなら、観測は名乗れません。
 
-
-def _unplace_if_only_the_name(competitor: Competitor,
-                              read: Sequence[Mapping[str, Any]]) -> None:
-    """医院名だけを根拠にした配置を、マップから外す。
-
-    **プロンプトでのお願いでは足りませんでした。** 「推測しないでください」と
-    書いてあるプロンプトで、名前から推測した判定が返ってきました。守らせ
-    られるものは仕組みで守らせます。
-
-    外すのは配置だけです。**判定の理由は残します**——「名前からしか判断
-    できなかった」も、読み手にとっては情報です。
+    **座標を書かせるのをやめたので、「名前から推測した位置」は入り得ません。**
+    残る危うさは、検索結果の抜粋だけを見て観測を挙げることです。抜粋には
+    「専門医」も「価格表」も出ないので、開いていないなら観測とは呼べません。
     """
-    if not competitor.map_placed:
+    if read or not competitor.signals:
         return
-    basis = competitor.map_basis or ""
-    named_only = any(word in basis for word in _NAME_ONLY)
-    # 頁を 1 つも開いていないなら、何を書いてあっても根拠は名前と抜粋だけです。
-    if not (named_only or not read):
-        return
-    competitor.map_placed = False
-    why = ("医院名からの推測でした" if named_only
-           else "ページを 1 つも開けていません")
-    competitor.map_basis = (
-        f"{basis} ／ **この判定は採用していません**（{why}）。"
-        "看板ではなく、サイトに書いてある診療内容で判定する必要があります。"
-    ).strip(" ／")
+    dropped = "、".join(competitor.signals)
+    competitor.signals = []
+    note = (f"観測として挙がっていた {dropped} は採用していません"
+            "（ページを 1 つも開けていないため）")
+    competitor.map_basis = (f"{competitor.map_basis} ／ {note}"
+                            if competitor.map_basis else note)
 
 
 def system_prompt(payload: Mapping[str, Any],
@@ -349,7 +330,19 @@ def system_prompt(payload: Mapping[str, Any],
     """
     settings = llm.step_settings(STEP_NUMBER, kind="competitors")
     return (cfg.prompt_text(settings["prompt"], category)
-            .replace("{vocabulary}", _vocabulary_block(payload)))
+            .replace("{vocabulary}", _vocabulary_block(payload))
+            .replace("{signals}", _signals_block(category)))
+
+
+def _signals_block(category: str) -> str:
+    """挙げてよい観測の一覧。**設定から出します。**
+
+    プロンプトに書き写すと、設定の重みと文言がずれます。ずれても動くので、
+    気づくのは「なぜこの位置なのか」を追ったときです。
+    """
+    axes = cfg.competitors_config(category).get("positioning_map") or {}
+    return "\n".join(f"{s['key']:20s} {s.get('label', '')}"
+                      for s in (axes.get("signals") or []) if s.get("key")) or "（なし）"
 
 
 def _vocabulary_block(payload: Mapping[str, Any]) -> str:
