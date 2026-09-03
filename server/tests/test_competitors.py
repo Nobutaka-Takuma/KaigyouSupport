@@ -20,6 +20,8 @@ LLM は呼びません。数え上げと組み立ては全部 Python 側にあ�
 """
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from kaigyou_core import competition
@@ -304,15 +306,38 @@ def test_the_document_carries_its_own_disclaimer():
 
 # ------------------------------------------------------------ 設定と枠
 def test_the_dental_config_spends_the_search_budget_on_competitors():
-    """検索の振り分け。**周辺一般から競合へ移した分がここにあります。**"""
+    """検索の振り分け。**周辺一般から競合へ移した分がここにあります。**
+
+    見るのは**設定ファイルの値**です。節約中は budget が上から重なって
+    もっと小さくなりますが、それは一時的な措置で、この設定ファイルが持って
+    いる意図とは別のものです。budget.mode を消したときに戻る先を見張ります。
+    """
     from kaigyou_core import config as cfg
 
-    survey = cfg.competitors_config("dental_clinic")["survey"]
+    survey = cfg.load_yaml(
+        cfg.business_file("competitors.yaml", "dental_clinic"))["survey"]
     assert survey["radius_m"] == 1000
     assert survey["near_radius_m"] == 500
     # 1 医院あたり × 上限。周辺一般の合計 8 回より多くなければ、振り替えた
     # ことになりません。
     assert survey["searches_per_competitor"] * survey["max_competitors"] > 8
+
+
+def test_the_budget_never_edits_the_business_config(budgeting):
+    """節約設定は**設定ファイルを書き換えません。**
+
+    書き換えてしまうと、budget.mode を消しても元に戻りません。「1 つの
+    スイッチで戻せる」がこの仕組みの要点なので、そこを見張ります。
+    """
+    from kaigyou_core import config as cfg
+
+    on_disk = cfg.load_yaml(
+        cfg.business_file("competitors.yaml", "dental_clinic"))["survey"]
+    effective = cfg.competitors_config("dental_clinic")["survey"]
+    assert on_disk["max_competitors"] == 12          # ファイルは本来の値のまま
+    assert effective["max_competitors"] == 2         # 効いている値は節約後
+    # 節約設定に無い項目は素通しであること。
+    assert effective["radius_m"] == on_disk["radius_m"]
 
 
 def test_the_vocabulary_lives_in_config_not_in_code():
@@ -584,3 +609,125 @@ def test_the_survey_fits_the_invocation_in_waves():
     worst = waves * 2 * timeout * (retries + 1)     # 1 院 = 調査 + 構造化
     assert worst < float(worker.get("invocation_seconds", 800)) * 3, (
         f"最悪 {worst:.0f} 秒。波 {waves} 回では、区切りが無いと収まりません")
+
+
+# ------------------------------------------------------------ 使う量の上限
+@pytest.fixture
+def budgeting(monkeypatch):
+    """この節のテストだけ、節約設定を**明示的に効かせます。**
+
+    conftest がセッション全体で切っています（他のテストが見たいのは本来の
+    設定なので）。ここで見たいのは切り替えの仕組みそのものなので、入れ直します。
+    """
+    from kaigyou_core import config as cfg
+
+    monkeypatch.delenv("KAIGYOU_BUDGET_MODE", raising=False)
+    cfg._CACHE.clear()
+    yield cfg.budget_mode()
+    cfg._CACHE.clear()
+
+
+def test_the_budget_profile_actually_lowers_every_step(budgeting):
+    """節約設定は**全段に効くこと。**
+
+    段に `effort: high` と書いてあるので、モデル既定を下げるだけでは効きません
+    ——段の指定が勝ちます。節約中は段の指定ごと外します。
+    """
+    from kaigyou_core import config as cfg
+    from kaigyou_intel import client as llm
+
+    assert cfg.budget_mode() == "mvp", "config/analysis.yaml の budget.mode"
+    for kind, numbers in (("area", (1, 2, 3, 4)), ("competitors", (1, 2))):
+        llm.use_kind(kind)
+        for number in numbers:
+            settings = llm.step_settings(number)
+            assert settings["effort"] == "low", f"{kind} STEP{number}"
+            assert settings["effort_structure"] == "low", f"{kind} STEP{number}"
+            assert settings["max_tokens"] <= 8_000, f"{kind} STEP{number}"
+    llm.use_kind("area")
+
+
+def test_turning_the_budget_off_restores_the_real_settings(monkeypatch):
+    """**mode を消せば元に戻ること。** 書き換えではなく重ねる作りの要点です。"""
+    from kaigyou_core.config import _with_budget
+
+    monkeypatch.delenv("KAIGYOU_BUDGET_MODE", raising=False)
+
+    raw = {
+        "model": {"id": "m", "effort": "high", "max_tokens": 64000},
+        "limits": {"max_patterns": 4, "research_rounds": 2},
+        "steps": {1: {"effort": "medium", "web_search": False},
+                  2: {"effort": "high", "web_search": True}},
+        "budget": {"mode": "mvp",
+                   "mvp": {"effort": "low", "max_tokens": 6000,
+                           "max_patterns": 2, "research_rounds": 1}},
+    }
+    saving = _with_budget(raw)
+    assert saving["model"]["effort"] == "low"
+    assert saving["limits"] == {"max_patterns": 2, "research_rounds": 1}
+    assert "effort" not in saving["steps"][2]      # 段の指定ごと外す
+    assert saving["steps"][2]["web_search"] is True   # 検索の有無は触らない
+
+    # 環境変数でも切れること。**設定ファイルを編集させない口**が要ります。
+    monkeypatch.setenv("KAIGYOU_BUDGET_MODE", "")
+    assert _with_budget(raw)["model"]["effort"] == "high"
+    monkeypatch.delenv("KAIGYOU_BUDGET_MODE")
+
+    off = _with_budget({**raw, "budget": {**raw["budget"], "mode": None}})
+    assert off["model"]["effort"] == "high"
+    assert off["limits"]["max_patterns"] == 4
+    assert off["steps"][1]["effort"] == "medium"
+
+
+def test_a_typo_in_the_budget_profile_cannot_silently_do_nothing(budgeting):
+    """**白紙委任にしません。**
+
+    budget の下に何を書いても効く作りにすると、打ち間違えた項目が黙って
+    無視され、節約したつもりで満額請求されます。効く項目は決めてあります。
+    """
+    from kaigyou_core import config as cfg
+
+    assert not set(_config_budget_profile()) - cfg.BUDGET_KEYS
+
+    # 打ち間違いは**黙って無視されず、起動時に分かる**こと。
+    with pytest.raises(cfg.UnknownBudgetKey) as caught:
+        cfg._with_budget({"budget": {"mode": "m", "m": {"efort": "low"}}})
+    assert "efort" in str(caught.value)
+
+
+def _config_budget_profile() -> dict:
+    from kaigyou_core import config as cfg
+
+    budget = cfg.load_yaml(cfg.config_dir() / "analysis.yaml").get("budget") or {}
+    return budget.get(budget.get("mode")) or {}
+
+
+def test_the_estimate_says_it_is_a_ceiling_not_a_measurement(budgeting):
+    """見積もりを実測に見せないこと。**実際にはこれより安く済みます。**"""
+    from kaigyou_intel import budget
+
+    est = budget.estimate("dental_clinic")
+    assert est["budget_mode"] == "mvp"
+    assert "上限の見積もり" in est["note"]
+    area, competitors = est["runs"]
+    # 節約中は、どちらも 1 ドル未満に収まっていること。
+    assert area["usd"] < 1.0 and competitors["usd"] < 1.0
+    # 競合は 1 院 2 呼び出し。設定の院数と噛み合っていること。
+    from kaigyou_core import config as cfg
+
+    n = cfg.competitors_config("dental_clinic")["survey"]["max_competitors"]
+    assert competitors["calls"] == 2 * n + 1
+
+
+def test_the_screen_is_told_that_the_analysis_was_cheapened(budgeting):
+    """**黙って質を落としません。**
+
+    質を落とした結果を本来の結果として読まれるのが、いちばん困ります。
+    """
+    from kaigyou_core import config as cfg
+
+    assert cfg.budget_mode() == "mvp"
+    panel = (pathlib.Path(__file__).resolve().parents[2]
+             / "web" / "src" / "components" / "AnalysisPanel.tsx").read_text()
+    assert "budget_mode" in panel
+    assert "本来のものより落ちます" in panel

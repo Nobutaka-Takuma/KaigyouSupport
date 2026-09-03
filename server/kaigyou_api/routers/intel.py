@@ -155,6 +155,9 @@ def create_analysis(
         "steps": [{"step_number": n, "step_name": name, "status": "pending"}
                   for n, name in jobs.steps_for(kind).items()],
         # worker が動いていないと、いつまでも queued のままです。黙って待たせない。
+        # **節約中であることを黙っていません。** 質が落ちた結果を、本来の
+        # 結果として読まれるのがいちばん困ります。
+        "budget_mode": cfg.budget_mode(),
         "worker_required": True,
         "note": ("分析は worker が実行します。`kaigyou-etl analyze --worker` を"
                  "起動してください。進捗は GET /api/analysis/{job_id} で取得できます。"),
@@ -278,6 +281,7 @@ def get_analysis(job_id: str,
         # worker が動いていないと queued のまま止まります。画面で待つ人に、
         # 何を待っているのかが分かるように、状態の意味を添えます。
         "status_note": _STATUS_NOTE.get(job["status"]),
+        "budget_mode": cfg.budget_mode(),
     }
 
 

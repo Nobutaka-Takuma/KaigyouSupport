@@ -310,6 +310,17 @@ export function AnalysisPanel({
         </label>
       )}
 
+      {/* **節約中であることを、結果より先に出します。** 質を落とした結果を
+          本来の結果として読まれるのがいちばん困ります。 */}
+      {status?.budget_mode && (
+        <p className="warn-inline">
+          いまは<strong>節約設定（{status.budget_mode}）</strong>で動いています。
+          思考を浅く、Web検索を少なく、競合を数件に絞っています——
+          <strong>分析の質は本来のものより落ちます。</strong>
+          動作の確認用です。config/analysis.yaml の budget.mode を消すと戻ります。
+        </p>
+      )}
+
       {error && <p className="analysis__error">{error}</p>}
 
       {status && (

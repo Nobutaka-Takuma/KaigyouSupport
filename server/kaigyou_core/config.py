@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -133,11 +133,102 @@ def sources_config() -> dict[str, Any]:
 
 
 def analysis_config() -> dict[str, Any]:
-    """商圏インテリジェンス・エンジンの設定。無い環境では空。"""
+    """商圏インテリジェンス・エンジンの設定。無い環境では空。
+
+    ``budget.mode`` が立っていれば、その節約設定を**上から重ねて**返します。
+    読む側は今までどおり `analysis_config()` を読むだけで、節約中かどうかを
+    気にしなくて済みます。
+    """
     try:
-        return load_yaml(config_dir() / "analysis.yaml")
+        return _with_budget(load_yaml(config_dir() / "analysis.yaml"))
     except ConfigNotFound:
         return {}
+
+
+#: 節約設定が上書きしてよい `limits` の項目。
+#:
+#: **白紙委任にはしません。** budget の下に何を書いても効く作りにすると、
+#: 打ち間違えた項目が黙って無視され、節約したつもりで満額請求されます。
+_BUDGET_LIMITS = frozenset({
+    "max_patterns", "searches_per_pattern", "max_searches_total",
+    "parallel_research", "max_clinics_in_projection", "clinics_to_research",
+    "surroundings_searches", "research_rounds", "followup_searches",
+})
+
+#: `limits` 以外に節約設定が効く項目。
+#:
+#:   effort / max_tokens  … 段ごとの指定ごと外して、モデル既定を差し替える
+#:   web_search           … 段の検索を落とす
+#:   competitors          … 競合分析の survey に重ねる（competitors_config）
+_BUDGET_OTHER = frozenset({"effort", "max_tokens", "web_search", "competitors"})
+
+#: 節約設定として認識する項目のすべて。**ここに無い項目は効きません。**
+BUDGET_KEYS = _BUDGET_LIMITS | _BUDGET_OTHER
+
+
+class UnknownBudgetKey(ValueError):
+    """節約設定に、効かない項目が書かれている。
+
+    黙って無視すると、節約したつもりで満額請求されます。打ち間違いは
+    起動時に気づけるほうがよい。
+    """
+
+
+def _with_budget(config: dict[str, Any]) -> dict[str, Any]:
+    """節約設定を重ねる（`budget.mode` が指す節）。
+
+    **段ごとの設定を書き換えるのではなく、上から重ねます。** 書き換えると、
+    元の値がどこにも残らず「元に戻す」が手作業になります。mode を消せば
+    元の設定がそのまま効きます。
+    """
+    budget = config.get("budget") or {}
+    mode = _budget_mode_name(budget)
+    profile = (budget.get(mode) or {}) if mode else {}
+    if not profile:
+        return config
+    unknown = sorted(set(profile) - BUDGET_KEYS)
+    if unknown:
+        raise UnknownBudgetKey(
+            f"config/analysis.yaml の budget.{mode} に、効かない項目があります: "
+            f"{', '.join(unknown)}。使えるのは {', '.join(sorted(BUDGET_KEYS))} です。")
+
+    out = dict(config)
+    out["limits"] = {**(config.get("limits") or {}),
+                     **{k: v for k, v in profile.items() if k in _BUDGET_LIMITS}}
+    # effort と max_tokens は段ごとに書いてあります。**段の指定ごと消します**
+    # ——段に effort: high と書いてあると、モデル既定を下げても効きません。
+    for key in ("steps", "competitor_steps"):
+        steps = config.get(key) or {}
+        out[key] = {n: _capped(step, profile) for n, step in steps.items()}
+    out["model"] = {**(config.get("model") or {}),
+                    **{k: profile[k] for k in ("effort", "max_tokens")
+                       if k in profile}}
+    return out
+
+
+def _capped(step: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    """1 段ぶんの設定から、節約中に無視したい指定を外す。"""
+    out = dict(step)
+    for key in ("effort", "effort_structure", "effort_scan"):
+        if "effort" in profile:
+            out.pop(key, None)
+    if "max_tokens" in profile:
+        out.pop("max_tokens", None)
+    # 検索を切るなら、段の web_search も落とします。**残すと、上限 0 回の
+    # 検索ツールを渡すことになります**（モデルは呼ぼうとして失敗します）。
+    if profile.get("web_search") is False:
+        out["web_search"] = False
+    return out
+
+
+def budget_mode() -> str | None:
+    """いま効いている節約設定の名前。効いていなければ None。"""
+    try:
+        budget = load_yaml(config_dir() / "analysis.yaml").get("budget") or {}
+    except ConfigNotFound:
+        return None
+    mode = _budget_mode_name(budget)
+    return mode if mode and budget.get(mode) else None
 
 
 def hypotheses_config(category: str | None = None) -> dict[str, Any]:
@@ -228,9 +319,38 @@ def competitors_config(category: str | None = None) -> dict[str, Any]:
     枠はスキーマに、語はここに。新しい業態は設定を足すだけで始められます。
     """
     try:
-        return load_yaml(business_file("competitors.yaml", category))
+        conf = load_yaml(business_file("competitors.yaml", category))
     except ConfigNotFound:
         return {}
+    # 節約設定は survey の上に重ねます。**この設定ファイルは書き換えません**
+    # ——書き換えると、budget.mode を消しても元に戻らなくなります。
+    saving = (_budget_profile() or {}).get("competitors") or {}
+    if not saving:
+        return conf
+    return {**conf, "survey": {**(conf.get("survey") or {}), **saving}}
+
+
+def _budget_profile() -> dict[str, Any]:
+    """いま効いている節約設定の中身。効いていなければ空。"""
+    try:
+        budget = load_yaml(config_dir() / "analysis.yaml").get("budget") or {}
+    except ConfigNotFound:
+        return {}
+    mode = _budget_mode_name(budget)
+    return (budget.get(mode) or {}) if mode else {}
+
+
+def _budget_mode_name(budget: Mapping[str, Any]) -> str | None:
+    """どの節約設定を使うか。**環境変数がファイルより強い。**
+
+    設定ファイルを書き換えずに切り替えられる口が要ります。本番と手元で
+    違う設定にしたいときや、テストが本来の設定を見たいときに、ファイルを
+    編集させるとコミットに混ざります。空文字は「節約しない」です。
+    """
+    override = os.getenv("KAIGYOU_BUDGET_MODE")
+    if override is not None:
+        return override.strip() or None
+    return budget.get("mode") or None
 
 
 def positioning_config(category: str | None = None) -> dict[str, Any]:

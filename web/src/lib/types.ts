@@ -507,6 +507,13 @@ export interface AnalysisStatus {
   status_note?: string | null;
   /** どちらの分析か。サーバが返します（段の数から推測しないこと）。 */
   kind?: AnalysisKind;
+  /**
+   * 効いている節約設定の名前。効いていなければ null。
+   *
+   * **黙っていられません。** 質を落とした結果を、本来の結果として読まれる
+   * のがいちばん困ります。
+   */
+  budget_mode?: string | null;
   /** いまの時点で何が分かっているか。段が1つも終わっていなければ null。 */
   progress?: AnalysisProgress | CompetitorProgress | null;
 }

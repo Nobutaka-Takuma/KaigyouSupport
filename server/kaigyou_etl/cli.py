@@ -841,6 +841,39 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print(f"{len(cancelled)} 件を取り下げました。")
         return EXIT_OK
 
+    if args.budget:
+        # **課金する前に、いくらかかりうるかを見る。** 走らせてから「思ったより
+        # 高かった」では遅い。実測ではなく上限なので、実際はこれより安く済みます。
+        from kaigyou_intel import budget as _budget
+
+        est = _budget.estimate(_category(args))
+        mode = est["budget_mode"]
+        print(f"モデル {est['model']}"
+              + (f" / 節約設定 {mode}" if mode else " / 節約設定なし"))
+        if mode:
+            print("  ※ 節約中です。分析の質は本来のものより落ちます。"
+                  "config/analysis.yaml の budget.mode を消すと戻ります。")
+        print()
+        total = 0.0
+        for run in est["runs"]:
+            print(f"  {run['label']}")
+            print(f"    呼び出し {run['calls']} 回 / Web検索 {run['searches']} 回"
+                  + (f"（{run['detail']}）" if run["detail"] else ""))
+            print(f"    入力 {run['input_tokens']:,} tok"
+                  f" / 出力 {run['output_tokens']:,} tok")
+            if "usd" in run:
+                total += run["usd"]
+                print(f"    最悪 ${run['usd']:.2f}")
+            print()
+        if est["prices_known"]:
+            print(f"  両方を 1 回ずつ走らせて、最悪 ${total:.2f}")
+        else:
+            print(f"  {est['model']} の単価が分かりません"
+                  "（kaigyou_intel/budget.py の PRICES に足してください）。")
+        print()
+        print(f"  {est['note']}")
+        return EXIT_OK
+
     if args.dry_run:
         # 課金する前に、何が送られるかを見るための道具。API は叩きません。
         with connect() as conn:
@@ -1282,6 +1315,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ジョブを取り下げる（all で待機中すべて）")
     p.add_argument("--questions", action="store_true",
                    help="立てた問いが実際に何を動かしたかを、保存済みのジョブから数える")
+    p.add_argument("--budget", action="store_true",
+                   help="1 回の分析が最悪どれだけ使うかの見積もり（API は叩きません）")
     p.add_argument("--export", nargs="?", const="", metavar="ID",
                    help="段ごとの入力と出力を JSON ファイルに書き出す"
                         "（省略時は最新のジョブ）")
