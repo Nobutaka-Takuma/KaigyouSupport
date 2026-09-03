@@ -6433,6 +6433,10 @@ def test_the_report_shows_the_position_before_the_prose(dataset):
                         "percentile": 0.35},
                   "note": "医院数は施設の数で、ユニット数ではありません。"}],
         "region_type": {"label": "住宅集積型", "because": ["population_mass=0.92"]},
+        # **タグは計算済みです**（指示書 §4）。LLM の仕事はこれを文章にすること。
+        "tags": [{"key": "population_dense", "label": "人口集積型",
+                  "because": ["population_mass が 92%"],
+                  "means": "住んでいる人が、比較母集団の中で多いほうに入ります。"}],
         "note": "percentile は相対値です。予測ではありません。",
     }
     markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
@@ -6447,6 +6451,10 @@ def test_the_report_shows_the_position_before_the_prose(dataset):
     assert "v1.0" in markdown and "2026-09-02" in markdown
     # 取れなかった軸を黙って落とさない。
     assert "未確認" in markdown
+    # **順番は開発指示書 §8。** 地域の姿 → 特徴 → 比較、の順。
+    assert (markdown.index("## この地域はどんな場所か")
+            < markdown.index("## 地域を構成する主な特徴")
+            < markdown.index("## 周辺地域と比較した特徴"))
 
 
 def test_the_prompts_still_say_the_model_does_not_make_the_numbers():
@@ -6877,9 +6885,11 @@ def test_a_ten_minute_walk_is_not_the_station_front():
     from kaigyou_core.site import station_band
 
     bands = cfg.insights_config("dental_clinic")["catchment"]["station_bands"]
-    assert station_band(810, bands)["label"] == "駅徒歩圏"
+    # 区分は開発指示書 §6。**812m の地点を「駅前」と表現しない。**
     assert station_band(120, bands)["label"] == "駅前"
-    assert station_band(380, bands)["label"] == "駅近"
+    assert station_band(500, bands)["label"] == "駅徒歩圏"
+    assert station_band(810, bands)["label"] == "駅近隣"
+    assert station_band(1800, bands)["label"] == "駅との関係弱"
     # 徒歩の分数も出すこと。810m を「駅前」と読むのは、分数を見れば起きません。
     assert station_band(810, bands)["walk_minutes"] == 10
     # 測れていなければ None。**「駅から遠い」ではありません。**
@@ -6977,8 +6987,8 @@ def test_the_report_separates_the_point_from_the_area(dataset):
     with_site["access"] = {**(dataset.get("access") or {}), "nearest_station": {
         "name": "沼津駅", "distance_m": 810,
         "direction": {"compass": "南南西"},
-        "band": {"label": "駅徒歩圏", "note": "徒歩12分まで。駅は使えるが、駅前ではない",
-                 "distance_m": 810, "walk_minutes": 10, "within_m": 1000}}}
+        "band": {"label": "駅近隣", "note": "徒歩15分まで。駅利用者の日常動線からは外れる",
+                 "distance_m": 810, "walk_minutes": 10, "within_m": 1200}}}
     with_site["site"] = {
         "radius_m": 500, "compare_radius_m": 1000, "mesh_size_m": 500,
         "resolution_note": None,
@@ -6991,14 +7001,170 @@ def test_the_report_separates_the_point_from_the_area(dataset):
     markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
                             "executive_summary": "e"}, to_jsonable(with_site))
 
-    assert "## この候補地そのものについて" in markdown
-    assert "駅徒歩圏" in markdown and "徒歩約 10 分" in markdown
+    assert "## この候補地と駅の関係" in markdown
+    assert "駅近隣" in markdown and "徒歩約 10 分" in markdown
     # **810m を「駅前」として通さないこと。** 区分は距離から決まっています。
-    head = markdown.split("## この地域はどんな場所か")[0]
-    assert "- **駅徒歩圏**" in head
-    assert "- **駅前**" not in head
+    assert "- **駅近隣**" in markdown
+    assert "- **駅前**" not in markdown
     # 足元と周りの突き合わせが表として出ること。
     assert "候補地の足元ではありません" in markdown
     assert "1.00 から離れているものだけ" in markdown
     # 本文（LLM）より前に置くこと。
-    assert markdown.index("## この候補地そのものについて") < markdown.index("## 結論")
+    assert markdown.index("## この候補地と駅の関係") < markdown.index("## 結論")
+    # **駅は地域の話のあと**（指示書 §8。地点→最寄り駅→駅周辺→判断は禁止）。
+    assert markdown.index("## この地域はどんな場所か") < markdown.index(
+        "## この候補地と駅の関係")
+
+
+# ============================================ 地点から始める（駅からではなく）
+#
+# 開発指示書 §1・§8。**地点 → 最寄り駅 → 駅周辺情報 → 判断、という構造は禁止。**
+#
+# 実測：沼津駅の南南西 810m（徒歩10分）の候補地が、駅前の分析になっていました。
+# 駅から書き始めると、駅の性格が地域の性格として語られます。
+
+def test_the_report_starts_with_the_area_not_the_station(dataset):
+    """**始まりは地域の姿です。駅はそのあと、説明変数として。**"""
+    from kaigyou_intel.report import to_markdown
+
+    ds = dict(dataset)
+    ds["positioning"] = {
+        "available": True,
+        "compared_with": {"type": "urban", "label": "静岡県内の市街地",
+                          "sample_count": 900},
+        "benchmark_version": "v1.0", "calculated_on": "2026-09-03",
+        "axes": [{"key": "population_mass", "label": "人口集積", "score": 88,
+                  "percentile": 0.88, "assessment": "高い",
+                  "means": "そこに住んでいる人の多さ",
+                  "from_measures": ["population"]}],
+        "gaps": [], "region_type": {"label": None, "because": [], "why_not": "x"},
+        "tags": [{"key": "population_dense", "label": "人口集積型",
+                  "because": ["population_mass が 88%"],
+                  "means": "住んでいる人が多いほうに入ります。"}],
+        "note": "n",
+    }
+    ds["access"] = {**(dataset.get("access") or {}), "nearest_station": {
+        "name": "沼津駅", "distance_m": 810,
+        "direction": {"compass": "南南西", "bearing_deg": 202.5},
+        "band": {"label": "駅近隣", "note": "徒歩15分まで",
+                 "distance_m": 810, "walk_minutes": 10, "within_m": 1200},
+        "population_side": {"toward_station": 200.0, "away_from_station": 800.0,
+                            "share_toward_station": 0.2,
+                            "reading": "商圏の人口は駅と**反対側**に寄っています。"}}}
+    markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
+                            "executive_summary": "e"}, to_jsonable(ds))
+
+    order = [markdown.index(h) for h in (
+        "## この地域はどんな場所か",
+        "## 地域を構成する主な特徴",
+        "## 周辺地域と比較した特徴",
+        "## この候補地と駅の関係",
+        "## 結論")]
+    assert order == sorted(order), "地点→最寄り駅→…の順に戻っている"
+    # 1 文で地域を定義すること（指示書 §7）。
+    assert "人口集積型の地域です" in markdown
+    # Fact → Interpretation。タグだけでは、なぜそう言えるのか分かりません。
+    assert "population_mass が 88%" in markdown
+
+
+def test_a_tag_is_decided_by_a_rule_and_carries_its_evidence():
+    """**個別指標を LLM に解釈させる前に、こちらで抽出します**（指示書 §4）。"""
+    from kaigyou_core import positioning
+
+    result = positioning.build(
+        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0)),
+         _measure("clinics_per_10k", "医院数", "competition", _bench("urban", 12.0))],
+        {**_positioning_config(),
+         "tags": [
+             {"key": "population_dense", "label": "人口集積型",
+              "when": {"axis": "population_mass", "at_least": 0.75},
+              "means": "多い"},
+             {"key": "supply_thin", "label": "医療供給不足型",
+              "when": {"axis": "supply", "below": 0.25}, "means": "薄い"},
+             {"key": "expensive", "label": "高地価型",
+              "when": {"axis": "cost", "at_least": 0.75}, "means": "高い"}]})
+
+    labels = {t["label"]: t for t in result["tags"]}
+    # **複数付きます。** ひとつに絞ると、絞った時点で解釈になります。
+    assert set(labels) == {"人口集積型", "医療供給不足型"}
+    assert labels["人口集積型"]["because"] == ["population_mass が 92%"]
+    # cost の軸は測っていない。**「条件を満たさなかった」ではなく「確かめて
+    # いない」ので、タグは付けません。**
+    assert "高地価型" not in labels
+
+
+def test_the_station_is_not_decided_by_distance_alone():
+    """**距離だけでは「駅との関係」は決まりません**（指示書 §6）。
+
+    駅まで 800m でも、人が全員反対側に住んでいるなら、駅は来院動線では
+    ありません。
+    """
+    from kaigyou_core.site import station_side
+
+    toward = station_side(800, 200)
+    assert toward["share_toward_station"] == 0.8
+    assert "駅の側に寄っています" in toward["reading"]
+
+    away = station_side(200, 800)
+    assert "反対側" in away["reading"]
+
+    even = station_side(500, 500)
+    assert "ほぼ半々" in even["reading"]
+    # 誰もいなければ語りません。
+    assert station_side(0, 0) is None
+
+
+def test_a_station_dependent_tag_needs_both_distance_and_direction():
+    """近いだけでは「駅依存度高型」にしません。"""
+    from kaigyou_core import positioning
+
+    config = {**_positioning_config(), "tags": [{
+        "key": "station_dependent", "label": "駅依存度高型",
+        "when": {"station_band_in": ["駅前", "駅徒歩圏"],
+                 "station_side_at_least": 0.58}, "means": "x"}]}
+    measures = [_measure("population", "商圏人口", "residents", _bench("urban", 50.0))]
+
+    near_and_toward = positioning.build(measures, config, station={
+        "band": {"label": "駅徒歩圏"},
+        "population_side": {"share_toward_station": 0.7}})
+    assert [t["label"] for t in near_and_toward["tags"]] == ["駅依存度高型"]
+
+    # 近いが、人は反対側。**駅は来院動線ではありません。**
+    near_but_away = positioning.build(measures, config, station={
+        "band": {"label": "駅徒歩圏"},
+        "population_side": {"share_toward_station": 0.3}})
+    assert near_but_away["tags"] == []
+
+    # 駅が分からないときも付けません（「条件を満たさない」ではありません）。
+    unknown = positioning.build(measures, config, station=None)
+    assert unknown["tags"] == []
+
+
+def test_the_rings_show_where_the_density_actually_is():
+    """**合計だけを並べると、外側が大きいのは当たり前です**（指示書 §2）。"""
+    from kaigyou_core.site import rings
+
+    out = rings([{"population": 300, "facility_count": 2},
+                 {"population": 1200, "facility_count": 5},
+                 {"population": 2400, "facility_count": 24}],
+                [500, 1000, 2000])
+    assert out[0].get("growth_from_inner") is None, "いちばん内側には比が無い"
+    # 面積は 4 倍。人口が 4 倍なら一様、2 倍なら外側は薄い。
+    assert out[1]["growth_from_inner"]["population"] == 4.0
+    assert out[2]["growth_from_inner"]["population"] == 2.0
+    # 歯科医院は外側で急増している——**これは半径ひとつでは見えません。**
+    assert out[2]["growth_from_inner"]["facility_count"] == 4.8
+
+
+def test_the_scan_is_told_to_look_around_the_site_not_around_the_station():
+    """検索を「◯◯駅」から始めさせない。
+
+    駅名で検索すると、候補地が駅から 800m 離れていても同じ結果が返ります。
+    """
+    text = cfg.prompt_text("step1_surroundings.md")
+    assert "検索を「◯◯駅」から始めないでください" in text
+    assert "候補地を中心とした半径 1km の中に何があるか" in text
+
+    features = cfg.prompt_text("step1_features.md")
+    assert "始まりは候補地です。最寄り駅ではありません" in features
+    assert "tags" in features, "判定済みのタグを渡していることを伝えていない"

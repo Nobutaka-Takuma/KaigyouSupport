@@ -116,3 +116,86 @@ def resolution_warning(radius_m: float, mesh_size_m: int | None) -> str | None:
             "仮定しています。** 半分が公園のメッシュでは、その仮定は外れます。"
             + (f"　{mesh_size_m}mより細かいメッシュを取り込むと精度が上がります。"
                if mesh_size_m > 250 else ""))
+
+
+# ------------------------------------------------- 階層：候補地から外へ広げる
+#
+# **始まりは候補地です。最寄り駅ではありません。**
+#
+# 「最寄り駅がどこか」から始めると、駅の性格が地域の性格として語られます。
+# 500m で足元を見て、1km で商圏を見て、2km で「その地域」を見る。駅はそのあと、
+# 必要なときだけ説明変数として出てきます（開発指示書 §2・§6）。
+
+def rings(values: Sequence[Mapping[str, Any]],
+          radii: Sequence[int]) -> list[dict[str, Any]]:
+    """半径ごとの集計を、外へ広げる形に並べる。
+
+    ``values`` は半径の小さい順。各段には**そのひとつ外側との差**も入れます。
+    合計だけを並べると、外側が大きいのは当たり前で、**どこで増えたのか**が
+    読めません。「1km→2km で人口が 3 倍」と「1.1 倍」は別のことです。
+    """
+    out: list[dict[str, Any]] = []
+    for i, (radius, value) in enumerate(zip(radii, values)):
+        row: dict[str, Any] = {"radius_m": int(radius), **dict(value)}
+        if i:
+            inner = values[i - 1]
+            row["growth_from_inner"] = {
+                key: _ratio(value.get(key), inner.get(key))
+                for key in ("population", "facility_count", "workers")
+                if value.get(key) is not None
+            }
+        out.append(row)
+    return out
+
+
+def _ratio(outer: Any, inner: Any) -> float | None:
+    try:
+        outer, inner = float(outer), float(inner)
+    except (TypeError, ValueError):
+        return None
+    return None if inner <= 0 else round(outer / inner, 2)
+
+
+#: 駅の方角から何度までを「駅の側」と数えるか。
+#:
+#: 90 度なら半円ちょうど。**狭くしすぎないこと**——メッシュは 500m 角なので、
+#: 細い扇形にすると入るメッシュが 1〜2 個になり、たまたまで決まります。
+STATION_SIDE_DEGREES = 90.0
+
+
+def station_side(toward: float | None, away: float | None) -> dict[str, Any] | None:
+    """商圏の人口は、駅の側に寄っているか。
+
+    **距離だけでは「駅との関係」は決まりません**（開発指示書 §6）。駅まで
+    800m でも、人が全員反対側に住んでいるなら、駅は動線ではありません。
+    逆に 1km でも、駅との間に住宅が詰まっているなら関係はあります。
+
+    候補地から見て、駅の方角±90 度に入るメッシュを「駅の側」として合計し、
+    反対側と比べます。**半々（0.5）なら、駅の方向に偏りはありません。**
+    """
+    if toward is None or away is None:
+        return None
+    total = float(toward) + float(away)
+    if total <= 0:
+        return None
+    share = float(toward) / total
+    return {
+        "toward_station": round(float(toward), 1),
+        "away_from_station": round(float(away), 1),
+        "share_toward_station": round(share, 3),
+        "reading": _side_reading(share),
+    }
+
+
+#: 「駅の側に寄っている」と言い切る境目。0.5 が偏りなし。
+_SIDE_LOW, _SIDE_HIGH = 0.42, 0.58
+
+
+def _side_reading(share: float) -> str:
+    if share > _SIDE_HIGH:
+        return ("商圏の人口は駅の側に寄っています。駅は来院動線として"
+                "働きうる位置にあります。")
+    if share < _SIDE_LOW:
+        return ("商圏の人口は駅と**反対側**に寄っています。駅までの距離が"
+                "近くても、住民の動線は駅を向いていない可能性があります。")
+    return "商圏の人口は、駅の側と反対側にほぼ半々です。"

@@ -941,6 +941,70 @@ def _bearing(from_lat: float, from_lng: float,
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def _station_context(conn, lat: float, lng: float, radius_m: int,
+                     metrics: Mapping[str, Any],
+                     insights_config: Mapping[str, Any],
+                     mesh_size_m: int | None) -> dict[str, Any]:
+    """タグ判定に要る、駅との関係だけ。
+
+    **駅は地域の定義には使いません**（指示書 §1）。ここで渡すのは、
+    地域特性タグの条件に「駅依存度」があるからで、それだけです。
+    """
+    direction = _direction_from_station(conn, lat, lng,
+                                        metrics.get("nearest_station")) or {}
+    return {
+        "band": site.station_band(
+            metrics.get("station_distance_m"),
+            (insights_config.get("catchment") or {}).get("station_bands") or []),
+        "population_side": _station_side(conn, lat, lng, radius_m,
+                                         direction.get("bearing_deg"),
+                                         mesh_size_m),
+    }
+
+
+def _station_side(conn, lat: float, lng: float, radius_m: int,
+                  station_bearing_deg: float | None,
+                  mesh_size_m: int | None) -> dict[str, Any] | None:
+    """商圏の人口は、駅の側に寄っているか（開発指示書 §6）。
+
+    **距離だけでは「駅との関係」は決まりません。** 駅まで 800m でも、人が
+    全員反対側に住んでいるなら、駅は動線ではありません。逆に 1km でも、
+    駅との間に住宅が詰まっているなら関係はあります。
+
+    候補地からメッシュ重心への方位を出し、駅の方角±90 度に入るものを
+    「駅の側」として合計します。1 往復です。
+    """
+    if station_bearing_deg is None or not mesh_size_m:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH here AS (SELECT ST_SetSRID(ST_MakePoint(%s, %s), 4326) AS g),
+            around AS (
+                SELECT pm.population,
+                       degrees(ST_Azimuth(here.g, ST_Centroid(pm.geom))) AS bearing
+                FROM population_mesh pm, here
+                WHERE pm.mesh_size_m = %s
+                  AND pm.population IS NOT NULL
+                  AND ST_DWithin(ST_Centroid(pm.geom)::geography,
+                                 here.g::geography, %s)
+            )
+            SELECT
+              sum(population) FILTER (
+                  WHERE abs(((bearing - %s + 540)::numeric %% 360) - 180) <= %s
+              ) AS toward,
+              sum(population) FILTER (
+                  WHERE abs(((bearing - %s + 540)::numeric %% 360) - 180) > %s
+              ) AS away
+            FROM around
+            """,
+            (lng, lat, mesh_size_m, radius_m,
+             station_bearing_deg, site.STATION_SIDE_DEGREES,
+             station_bearing_deg, site.STATION_SIDE_DEGREES))
+        row = cur.fetchone()
+    return site.station_side(row["toward"], row["away"]) if row else None
+
+
 def _site_shape(conn, lat: float, lng: float, radius_m: int, catchment: str,
                 insights_config: Mapping[str, Any], mesh_size_m: int | None,
                 category: str, prefecture_code: str,
@@ -990,11 +1054,23 @@ def _site_shape(conn, lat: float, lng: float, radius_m: int, catchment: str,
                             ("dental_clinics", "facility_count"),
                             ("workers", "workers"))
     }
+    # **階層。候補地から外へ広げます**（開発指示書 §2）。合計だけを並べると
+    # 外側が大きいのは当たり前なので、ひとつ外側との比も一緒に出します。
+    radii = [int(r) for r in (settings.get("rings_m") or []) if int(r) > 0]
+    if radii:
+        try:
+            out["rings"] = site.rings(
+                [analyze_point(conn, lat, lng, r, catchment=catchment,
+                               facility_category=category,
+                               mesh_size_m=mesh_size_m) for r in radii],
+                radii)
+        except Exception:  # noqa: BLE001 - 付随の指標。本体を落としません
+            out["rings"] = None
+    return out
     out["note"] = ("内側は商圏そのもの、外側は比較用の円です。**割合が"
                    "「一様ならこうなる」より大きければ、候補地そのものが"
                    "密集の中心にいます。** 小さければ、密集は円の中の"
                    "どこか別のところです。")
-    return out
 
 
 def _direction_from_station(conn: psycopg.Connection, lat: float, lng: float,
@@ -1762,7 +1838,10 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     insights = build_insights(measures, insights_config)
     # **ここが「GIS が確定する Fact」の要です。** percentile どうしの引き算を
     # LLM にやらせると解釈になり、ここでやれば Fact になります（指示書 §7・§17）。
-    positioning = positioning_of(measures, cfg.positioning_config(category))
+    positioning = positioning_of(measures, cfg.positioning_config(category),
+                                 station=_station_context(
+                                     conn, lat, lng, radius_m, metrics,
+                                     insights_config, mesh_size_m))
     # 候補地の足元と、その周り。**「その一帯の話」と「その地点の話」を分けます。**
     site_shape = _site_shape(conn, lat, lng, radius_m, catchment,
                              insights_config, mesh_size_m, category,
@@ -1939,6 +2018,15 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                     metrics.get("station_distance_m"),
                     (insights_config.get("catchment") or {}).get("station_bands")
                     or []),
+                # **距離だけでは「駅との関係」は決まりません**（指示書 §6）。
+                # 駅まで 800m でも、人が全員反対側に住んでいるなら、駅は
+                # 来院動線ではありません。
+                "population_side": _station_side(
+                    conn, lat, lng, radius_m,
+                    (_direction_from_station(
+                        conn, lat, lng, metrics.get("nearest_station")) or {}
+                     ).get("bearing_deg"),
+                    mesh_size_m),
             },
             "stations_in_radius": _stations(conn, lat, lng, radius_m),
         },

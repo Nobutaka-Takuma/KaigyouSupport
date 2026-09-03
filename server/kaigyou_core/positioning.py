@@ -26,7 +26,8 @@ from typing import Any, Iterable, Mapping, Sequence
 DEFAULT_GAP_THRESHOLD = 0.20
 
 
-def build(measures: Sequence[Any], config: Mapping[str, Any]) -> dict[str, Any]:
+def build(measures: Sequence[Any], config: Mapping[str, Any],
+          station: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """この地点の位置づけ。**母集団を 1 つに揃えて**語ります。
 
     母集団が違えば同じ数字の意味が変わります。人口を市街地の中で、医院数を
@@ -46,6 +47,7 @@ def build(measures: Sequence[Any], config: Mapping[str, Any]) -> dict[str, Any]:
 
     percentiles = _percentiles_in(measures, scope["type"])
     axes = _axes(percentiles, measures, config)
+    gaps = _gaps(percentiles, measures, config)
     return {
         "available": True,
         # **どれと比べたのかを必ず出します**（指示書 §16）。書かずに「上位8%」
@@ -54,8 +56,11 @@ def build(measures: Sequence[Any], config: Mapping[str, Any]) -> dict[str, Any]:
         "benchmark_version": str(config.get("benchmark_version") or "v0"),
         "calculated_on": date.today().isoformat(),
         "axes": axes,
-        "gaps": _gaps(percentiles, measures, config),
+        "gaps": gaps,
         "region_type": _region_type(axes, config),
+        # **個別指標を LLM に解釈させる前に、こちらで特徴を抽出します**
+        # （指示書 §4）。LLM の仕事はタグと根拠を文章にすることだけです。
+        "tags": _tags(axes, gaps, station, config),
         "note": ("percentile は同一都道府県内のメッシュ分布に対する相対値です。"
                  "**予測ではありません。**「相対的に少ない」は、比較した母集団の"
                  "中での位置の差であって、需要が余っていることではありません。"),
@@ -226,6 +231,99 @@ def _region_type(axes: Sequence[Mapping[str, Any]],
     }
 
 
+def _tags(axes: Sequence[Mapping[str, Any]], gaps: Sequence[Mapping[str, Any]],
+          station: Mapping[str, Any] | None,
+          config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """地域特性タグ（指示書 §4）。**複数付きます。**
+
+    「人口集積型」かつ「医療供給過密型」かつ「将来人口減少型」は矛盾では
+    なく、その地域の実態です。ひとつに絞ると、絞った時点で解釈になります。
+
+    条件を確かめられない（軸が未確認、駅が不明）タグは**付けません**。
+    「条件を満たさなかった」と「確かめられなかった」は別のことなので、
+    無いことを根拠にしません。
+    """
+    percentile = {a["key"]: a.get("percentile") for a in axes}
+    gap_by_key = {g["key"]: g.get("gap") for g in gaps if g.get("present")}
+    station = station or {}
+    band = (station.get("band") or {}).get("label")
+    side = (station.get("population_side") or {}).get("share_toward_station")
+
+    out: list[dict[str, Any]] = []
+    for rule in (config.get("tags") or []):
+        when = rule.get("when") or {}
+        because = _matches(when, percentile, gap_by_key, band, side)
+        if because is None:
+            continue
+        out.append({"key": rule.get("key"), "label": rule.get("label"),
+                    "means": rule.get("means"), "because": because})
+    return out
+
+
+def _matches(when: Mapping[str, Any], percentile: Mapping[str, Any],
+             gaps: Mapping[str, Any], band: str | None,
+             side: float | None) -> list[str] | None:
+    """条件を全部満たすか。満たすなら**その根拠**を返す。
+
+    根拠を返すのは、タグだけを見せても「なぜそう言えるのか」が分からない
+    からです。指示書 §7 が求める Fact → Interpretation の Fact 側です。
+    """
+    because: list[str] = []
+
+    if "axis" in when:
+        value = percentile.get(when["axis"])
+        if value is None:
+            return None
+        if "at_least" in when and value < float(when["at_least"]):
+            return None
+        if "below" in when and value >= float(when["below"]):
+            return None
+        because.append(f"{when['axis']} が {value:.0%}")
+
+    if "gap" in when:
+        value = gaps.get(when["gap"])
+        if value is None:
+            return None
+        if "at_least" in when and value < float(when["at_least"]):
+            return None
+        if "below" in when and value >= float(when["below"]):
+            return None
+        because.append(f"{when['gap']} の差が {value * 100:+.0f} ポイント")
+
+    if "station_band_in" in when:
+        if band is None or band not in (when["station_band_in"] or []):
+            return None
+        because.append(f"駅からの距離の区分が「{band}」")
+
+    if "station_side_at_least" in when or "station_side_below" in when:
+        if side is None:
+            return None
+        if ("station_side_at_least" in when
+                and side < float(when["station_side_at_least"])):
+            return None
+        if ("station_side_below" in when
+                and side >= float(when["station_side_below"])):
+            return None
+        because.append(f"商圏人口の {side:.0%} が駅の側")
+
+    return because or None
+
+
+def summary_sentence(positioning: Mapping[str, Any]) -> str | None:
+    """タグから、地域を 1 文で（指示書 §7）。
+
+    **LLM を使いません。** タグは計算済みで、並べれば文になります。LLM には
+    別途、同じタグから読みやすい 1 文を書かせますが、**これが無いと、LLM が
+    落ちたときにレポートの冒頭が空になります。**
+    """
+    tags = [t["label"] for t in (positioning.get("tags") or []) if t.get("label")]
+    if not tags:
+        return None
+    region = (positioning.get("region_type") or {}).get("label")
+    head = "・".join(tags)
+    return (f"{head}の地域です" + (f"（類型：{region}）" if region else "") + "。")
+
+
 def citable(positioning: Mapping[str, Any],
             layer_of: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
     """FACT が引ける形に平らにする。
@@ -264,6 +362,20 @@ def citable(positioning: Mapping[str, Any],
             "source": source,
             "note": (f"{axis.get('assessment', '')}。{axis.get('means') or ''}"
                      "　**順位ではなく、比較母集団の中での位置です。**"),
+        })
+
+    for tag in positioning.get("tags") or []:
+        # **タグも引ける形にします。** 引けないと LLM は言い直すしかなく、
+        # 言い直した瞬間に「その判定はどこから来たのか」が辿れなくなります。
+        out.append({
+            "key": f"positioning.tag.{tag['key']}",
+            "label": f"地域特性：{tag['label']}",
+            "value": tag["label"],
+            "unit": "",
+            "layer": "residents",
+            "source": source,
+            "note": (f"判定の根拠：{'、'.join(tag.get('because') or [])}。"
+                     f"{tag.get('means') or ''}"),
         })
 
     for gap in positioning.get("gaps") or []:

@@ -78,8 +78,13 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
     # **GIS が計算した位置づけ。LLM が書いた文章ではありません。**
     # 本文より前に置きます——読み手が本文を「どの数字の上に立った文章か」を
     # 知った状態で読めるように（指示書 §14・§16）。
-    lines += _site_block(dataset)
-    lines += _positioning_block(dataset)
+    # **順番は開発指示書 §8。** 地点 → 最寄り駅 → 駅周辺 → 判断、という
+    # 構造を禁じています。始まりは地域の姿で、駅はそのあと、**必要なときだけ
+    # 説明変数として**出てきます。
+    lines += _place_block(dataset)          # 1. この地域はどんな場所か
+    lines += _features_block(dataset)       # 2. 地域を構成する主な特徴
+    lines += _comparison_block(dataset)     # 3. 周辺地域と比較した特徴
+    lines += _station_block(dataset)        # 4. 駅との関係（説明変数）
 
     lines += _coverage_block(inquiry, sources)
 
@@ -125,47 +130,158 @@ def _misreading_block(dataset: Mapping[str, Any]) -> list[str]:
 
 # ------------------------------------------------- 冒頭：この地域はどんな場所か
 #
-# **この節は LLM が書いていません。** GIS が計算した値をそのまま並べています。
+# **開発指示書 §7・§8。** レポートは地域の姿から始めます。
 #
-# 本文（LLM が書く部分）より前に置くのは、読み手が本文を「どの数字の上に
-# 立った文章か」を知った状態で読めるようにするためです。あとに置くと、
-# 文章を信じたあとで根拠を照合することになり、順番として遅すぎます。
+# 以前は「候補地そのもの」の節が最寄り駅から始まっていました。地点 → 最寄り駅
+# → 駅周辺情報 → 判断、という構造です。**それをやると、駅の性格が地域の性格
+# として語られます。** 実測：沼津駅の南南西 810m（徒歩10分）の候補地が
+# 「駅前」の分析になっていました。
 #
-# 指示書 §14・§16。ランキング → 評価 → 地域の特徴、そして**なぜその評価に
-# なったのかを必ず確認できる**こと。
+# 駅は §4 の節で、**説明変数として**出てきます。
 
-def _site_block(dataset: Mapping[str, Any]) -> list[str]:
-    """候補地**そのもの**について言えること。**円を大きくすれば消える話と、
-    消えない話を分けます。**
+def _place_block(dataset: Mapping[str, Any]) -> list[str]:
+    """この地域はどんな場所か。**1 文と、根拠つきのタグ。**
 
-    実測：沼津駅の南南西 810m（徒歩10分）の候補地を半径1km で分析すると、
-    円は駅も駅前商店街も飲み込みます。出てくるのは「その地点の分析」ではなく
-    「その一帯の分析」で、候補地を 300m 動かしても同じ結論が出ます。
+    タグは計算済みです（`positioning.tags`）。LLM の仕事はこれを文章に
+    することで、タグそのものを作ることではありません（指示書 §4・§9）。
     """
+    from kaigyou_core.positioning import summary_sentence
+
+    positioning = dataset.get("positioning") or {}
+    if not positioning.get("available"):
+        return []
+    tags = positioning.get("tags") or []
+    scope = positioning.get("compared_with") or {}
+    lines = ["## この地域はどんな場所か", ""]
+
+    sentence = summary_sentence(positioning)
+    if sentence:
+        lines += [f"**{sentence}**", ""]
+    else:
+        lines += ["特徴として抽出できる条件に、ひとつも当てはまりませんでした。"
+                  "**特徴が無いという意味ではありません。**下の指標を読んでください。",
+                  ""]
+
+    if tags:
+        # **Fact → Interpretation**（指示書 §7）。タグだけを見せても、
+        # なぜそう言えるのかが分かりません。
+        lines += _table(["特徴", "そう判定した根拠", "この特徴が意味すること"],
+                        [[str(t.get("label", "")),
+                          "、".join(t.get("because") or []),
+                          str(t.get("means") or "")] for t in tags])
+        lines += ["", f"判定はすべて **{scope.get('label', '（不明）')}** の中での"
+                  "位置によります。**この節は生成された文章ではありません。**", ""]
+    return lines
+
+
+def _features_block(dataset: Mapping[str, Any]) -> list[str]:
+    """地域を構成する主な特徴（指示書 §8-2）。軸ごとの位置と、階層。"""
+    positioning = dataset.get("positioning") or {}
     site = dataset.get("site") or {}
+    if not positioning.get("available") and not site.get("rings"):
+        return []
+    lines = ["## 地域を構成する主な特徴", ""]
+    lines += _axis_table(positioning.get("axes") or [])
+    lines += _ring_lines(site)
+    return lines
+
+
+def _ring_lines(site: Mapping[str, Any]) -> list[str]:
+    """候補地から外へ広げた集計（指示書 §2）。
+
+    **合計だけを並べると、外側が大きいのは当たり前です。** ひとつ外側との比を
+    添えます。円の面積は半径の2乗で増えるので、**面積比と比べて初めて
+    「どこで増えたか」が読めます。**
+    """
+    rings = site.get("rings") or []
+    if len(rings) < 2:
+        return []
+    rows = []
+    for i, ring in enumerate(rings):
+        growth = ring.get("growth_from_inner") or {}
+        area = ("—" if not i else
+                f"{(ring['radius_m'] / rings[i - 1]['radius_m']) ** 2:.1f}倍")
+        rows.append([
+            f"半径 {ring['radius_m']:,}m",
+            f"{(ring.get('population') or 0):,.0f}",
+            f"{(ring.get('facility_count') or 0):,.0f}",
+            area,
+            "—" if not i else f"{growth.get('population') or '—'}倍",
+        ])
+    return (["### 候補地から外へ広げると", ""]
+            + _table(["", "人口", "歯科医院", "面積の比", "人口の比"], rows)
+            + ["", "**人口の比が面積の比より小さければ、外側は内側より薄い**"
+               "ということです。大きければ、密集は外側にあります。", ""])
+
+
+def _comparison_block(dataset: Mapping[str, Any]) -> list[str]:
+    """周辺地域と比較した特徴（指示書 §8-3）。
+
+    指標どうしのアンバランスと、足元と周りの突き合わせ。**どちらも
+    percentile の引き算で、GIS が済ませてあります。**
+    """
+    positioning = dataset.get("positioning") or {}
+    site = dataset.get("site") or {}
+    concentration = {k: v for k, v in (site.get("concentration") or {}).items() if v}
+    if not positioning.get("available") and not concentration:
+        return []
+    lines = ["## 周辺地域と比較した特徴", ""]
+    lines += _gap_lines(positioning.get("gaps") or [])
+    if concentration:
+        lines += _concentration_lines(concentration, site)
+    if site.get("resolution_note"):
+        lines += [f"**解像度についての注意**　{site['resolution_note']}", ""]
+    lines += _positioning_basis(positioning)
+    return lines
+
+
+def _positioning_basis(positioning: Mapping[str, Any]) -> list[str]:
+    """**どれと比べたのか、いつ、どの版か**（指示書 §16・§19）。
+
+    書かずに「上位8%」とだけ言えば、それはもう統計ではありません。
+    """
+    if not positioning.get("available"):
+        return []
+    scope = positioning.get("compared_with") or {}
+    return [
+        "**この評価の前提**", "",
+        f"- 比較した母集団：{scope.get('label', '（不明）')}"
+        f"（{scope.get('sample_count', 0):,} 商圏）",
+        f"- 評価ロジックの版：{positioning.get('benchmark_version', '')}"
+        f"　計算日：{positioning.get('calculated_on', '')}",
+        "", str(positioning.get("note") or ""), "",
+    ]
+
+
+def _station_block(dataset: Mapping[str, Any]) -> list[str]:
+    """駅との関係（指示書 §6）。**説明変数として、地域の話のあとに置きます。**
+
+    以前はここがレポートの最初でした。**駅から始めると、駅の性格が地域の
+    性格として語られます。** 距離だけでも決めません——駅まで 800m でも、
+    人が全員反対側に住んでいるなら、駅は来院動線ではありません。
+    """
     station = ((dataset.get("access") or {}).get("nearest_station") or {})
     band = station.get("band") or {}
-    concentration = {k: v for k, v in (site.get("concentration") or {}).items() if v}
-    if not band and not concentration:
+    side = station.get("population_side") or {}
+    if not band and not side:
         return []
 
-    lines = ["## この候補地そのものについて", "",
-             "**この節も生成された文章ではありません。**距離と割り算です。", ""]
-
+    lines = ["## この候補地と駅の関係", ""]
     if band:
         where = station.get("direction") or {}
         lines += [
             f"- **{band['label']}**　最寄り駅（{station.get('name') or '不明'}）"
             f"まで {band.get('distance_m'):,}m、徒歩約 {band.get('walk_minutes')} 分"
             + (f"。駅から見て{where.get('compass')}" if where.get("compass") else ""),
-            f"  　{band.get('note') or ''}",
-            "", "**この区分は距離から機械的に決めています。**"
-            "「駅前」と呼べるかどうかを、文章の印象で決めていません。", ""]
-
-    if concentration:
-        lines += _concentration_lines(concentration, site)
-    if site.get("resolution_note"):
-        lines += [f"**解像度についての注意**　{site['resolution_note']}", ""]
+            f"  　{band.get('note') or ''}", ""]
+    if side.get("share_toward_station") is not None:
+        lines += [
+            f"- **商圏人口の {side['share_toward_station']:.0%} が駅の側**"
+            f"（駅の方角±90度。駅側 {side['toward_station']:,.0f} 人 / "
+            f"反対側 {side['away_from_station']:,.0f} 人）",
+            f"  　{side.get('reading') or ''}", ""]
+    lines += ["**この区分は距離と人口の分布から機械的に決めています。**"
+              "「駅前」と呼べるかどうかを、文章の印象で決めていません。", ""]
     return lines
 
 
@@ -198,47 +314,6 @@ def _concentration_lines(concentration: Mapping[str, Any],
             + ["", "**集中度が 1.00 なら、円を大きくしても小さくしても同じ話に"
                "なります。** 1.00 から離れているものだけが、候補地そのものの"
                "性質です。", ""])
-
-
-def _positioning_block(dataset: Mapping[str, Any]) -> list[str]:
-    """周囲と比べてどんな場所か。**計算された値だけ。**
-
-    位置づけが出せない地点（メッシュスコアが未計算、比較できる商圏が無い）
-    では、理由を 1 行書きます。**黙って節ごと消しません**——読み手には
-    「特徴が無かった」に見えます。
-    """
-    positioning = dataset.get("positioning") or {}
-    if not positioning:
-        return []
-    if not positioning.get("available"):
-        return ["## この地域はどんな場所か", "",
-                str(positioning.get("why_not") or "位置づけを算出できませんでした。"),
-                ""]
-
-    scope = positioning.get("compared_with") or {}
-    lines = ["## この地域はどんな場所か", "",
-             "**この節は生成された文章ではありません。**下の数値は GIS が"
-             "計算したもので、本文の記述はこれを解釈したものです。", ""]
-
-    region = positioning.get("region_type") or {}
-    if region.get("label"):
-        lines += [f"### 類型：{region['label']}", ""]
-
-    lines += _axis_table(positioning.get("axes") or [])
-    lines += _gap_lines(positioning.get("gaps") or [])
-
-    # **どれと比べたのか、いつ計算したのか、どの版か**（指示書 §16・§19）。
-    # 書かずに「上位8%」とだけ言えば、それはもう統計ではありません。
-    lines += [
-        "**この評価の前提**", "",
-        f"- 比較した母集団：{scope.get('label', '（不明）')}"
-        f"（{scope.get('sample_count', 0):,} 商圏）",
-        f"- 評価ロジックの版：{positioning.get('benchmark_version', '')}"
-        f"　計算日：{positioning.get('calculated_on', '')}",
-        "",
-        str(positioning.get("note") or ""), "",
-    ]
-    return lines
 
 
 def _axis_table(axes: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -285,7 +360,9 @@ def _gap_lines(gaps: Sequence[Mapping[str, Any]]) -> list[str]:
     if found:
         for gap in found:
             a, b = gap["a"], gap["b"]
-            lines += [f"- **{gap.get('statement') or gap.get('label')}**  ",
+            # 文言そのものが強調を含みます（設定にある）。二重に囲みません。
+            said = str(gap.get("statement") or gap.get("label") or "")
+            lines += [f"- {said if '**' in said else '**' + said + '**'}  ",
                       f"  {a['label']} {a['percentile']:.0%} 対 "
                       f"{b['label']} {b['percentile']:.0%}"
                       f"（差 {abs(float(gap['gap'])) * 100:.0f} ポイント）"]

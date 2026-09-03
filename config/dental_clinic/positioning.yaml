@@ -135,6 +135,90 @@ gaps:
     note: >-
       地価は土地の価格で、賃料でも初期投資額でもありません。
 
+# ------------------------------------------------------------------ 地域特性タグ
+#
+# 開発指示書 §4。**個別指標を LLM に解釈させる前に、システム側で特徴を抽出します。**
+#
+# 「人口が上位8%、歯科医院が上位35%」を読んで「人口集積地域だが供給は薄い」と
+# 言うのは、これまで LLM の仕事でした。**それは解釈であって Fact ではありません。**
+# ここで判定すれば Fact になり、LLM の仕事は**タグと根拠を文章にすること**だけに
+# なります（指示書 §4 末尾・§9）。
+#
+# 条件に書けるもの:
+#   axis: <軸のキー>          at_least / below（0〜1 の percentile）
+#   gap: <ギャップのキー>      at_least / below（符号つき。a − b）
+#   station_band_in: [区分]   駅からの距離の区分
+#   station_side_at_least / station_side_below   商圏人口が駅側に寄っている割合
+#
+# **複数付きます。**「人口集積型」かつ「医療供給過密型」かつ「将来人口減少型」は
+# 矛盾ではなく、その地域の実態です。
+tags:
+  - key: population_dense
+    label: 人口集積型
+    when: { axis: population_mass, at_least: 0.75 }
+    means: 住んでいる人が、比較母集団の中で多いほうに入ります。
+
+  - key: population_thin
+    label: 人口希薄型
+    when: { axis: population_mass, below: 0.25 }
+    means: 住んでいる人が、比較母集団の中で少ないほうに入ります。
+
+  - key: daytime_inflow
+    label: 昼間人口流入型
+    when: { axis: daytime_inflow, at_least: 0.75 }
+    means: 働きに来る人が多い場所です（**通学者・来街者は含みません**）。
+
+  - key: workplace_over_home
+    label: 業務集積型
+    when: { gap: residents_vs_workers, below: -0.20 }
+    means: 住んでいる人より、働きに来る人のほうが相対的に厚い場所です。
+
+  - key: supply_dense
+    label: 医療供給過密型
+    when: { axis: supply, at_least: 0.75 }
+    means: 人口あたりの歯科医院が、比較母集団の中で多いほうに入ります。
+
+  - key: supply_thin
+    label: 医療供給不足型
+    when: { axis: supply, below: 0.25 }
+    means: 人口あたりの歯科医院が、比較母集団の中で少ないほうに入ります。
+
+  - key: demand_over_supply
+    label: 需要に対して供給が薄い
+    when: { gap: demand_vs_supply, at_least: 0.20 }
+    means: >-
+      人口規模に対して、人口あたりの歯科医院が相対的に少ない。**医院数は
+      施設の数で、ユニット数でも診療実績でもありません。**入口の指標です。
+
+  - key: shrinking
+    label: 将来人口減少型
+    when: { axis: outlook, below: 0.25 }
+    means: 直近の人口増減率が、比較母集団の中で低いほうに入ります（2015→2020 の実績）。
+
+  - key: holding
+    label: 人口維持型
+    when: { axis: outlook, at_least: 0.60 }
+    means: 直近の人口増減率が、比較母集団の中で高いほうに入ります。
+
+  - key: expensive
+    label: 高地価型
+    when: { axis: cost, at_least: 0.75 }
+    means: 地価が、比較母集団の中で高いほうに入ります（**賃料ではありません**）。
+
+  - key: station_dependent
+    label: 駅依存度高型
+    when:
+      station_band_in: [駅前, 駅徒歩圏]
+      station_side_at_least: 0.58
+    means: >-
+      駅に近く、かつ商圏の人口が駅の側に寄っています。**距離だけでは決めません**
+      ——駅まで近くても人が反対側に住んでいれば、駅は来院動線ではありません。
+
+  - key: station_detached
+    label: 駅との関係弱
+    when: { station_band_in: [駅近隣, 駅との関係弱] }
+    means: 駅の日常動線からは外れた立地です。来院は駅以外の動線が前提になります。
+
 # ------------------------------------------------------------------ 地域タイプ
 #
 # 指示書 §9。**名称を LLM に決めさせません。** 定量的なルールで決め、
