@@ -30,8 +30,9 @@ def tally(competitors: Sequence[Mapping[str, Any]],
     products = Counter(p for c in surveyed for p in (c.get("products") or []))
     targets = Counter(t for c in surveyed for t in (c.get("target") or []))
     positions = Counter(p for c in surveyed for p in (c.get("positioning") or []))
-    place = Counter(f.get("key") for c in surveyed
-                    for f in (c.get("place") or []) if f.get("key"))
+    # 確認できたキーだけが並びます（「駐車場：不明」は入っていません）。
+    place = Counter(k for c in surveyed
+                    for k in (c.get("place_confirmed") or []) if k)
 
     return {
         "surveyed": len(surveyed),
@@ -53,8 +54,10 @@ def tally(competitors: Sequence[Mapping[str, Any]],
         # 横軸の高いほうに寄っている件数（指示書 §4 の最後：自費診療を強く
         # 訴求する医院数）。**呼び方は設定の軸から**取ります——飲食なら
         # 「高価格帯」、学習塾なら「受験対応」です。判定は位置から。
+        # **置けなかった医院は数えません。** map_x の既定は 0 ですが、それは
+        # 「どちらとも言えない」であって「判定していない」ではありません。
         "leaning_x_high": len([c for c in surveyed
-                               if (c.get("map_x") or 0) > 0]),
+                               if c.get("map_placed") and (c.get("map_x") or 0) > 0]),
         "leaning_x_high_label": str(
             ((config.get("positioning_map") or {}).get("x") or {}).get("high") or ""),
         "note": (f"件数は**公開情報から確認できたもの**です。"
@@ -86,8 +89,10 @@ def positioning_map(competitors: Sequence[Mapping[str, Any]],
     for c in competitors:
         if not c.get("name"):
             continue
+        # 判定できたかは真偽値で来ます。**0 を「判定できなかった」に使いません**
+        # ——0 は「どちらとも言えない」という意味のある値です。
         x, y = c.get("map_x"), c.get("map_y")
-        if x is None or y is None:
+        if not c.get("map_placed") or x is None or y is None:
             undecided.append({"name": c["name"],
                               "why": c.get("map_basis") or "公開情報から判定できず"})
             continue

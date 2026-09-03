@@ -264,7 +264,7 @@ def _survey_one(target: Mapping[str, Any], payload: Mapping[str, Any],
 
 
 def _drop_unverifiable(competitor: Competitor, urls: set[str]) -> None:
-    """検索結果に無い URL を挙げた項目を落とす。**黙って落としません。**
+    """検索結果に無い URL を落とす。**黙って落としません。**
 
     モデルは実在しそうな URL を書けます。実在するかは検索結果で決まります
     （STEP2 と同じ検算）。
@@ -272,15 +272,18 @@ def _drop_unverifiable(competitor: Competitor, urls: set[str]) -> None:
     from kaigyou_intel.schemas import normalize_url
 
     known = {normalize_url(u) for u in urls if u}
-    kept = [f for f in competitor.place if normalize_url(f.source_url) in known]
-    dropped = len(competitor.place) - len(kept)
-    competitor.place = kept
-    competitor.sources = [u for u in competitor.sources
-                          if normalize_url(u) in known]
+    kept = [u for u in competitor.sources if normalize_url(u) in known]
+    dropped = len(competitor.sources) - len(kept)
+    competitor.sources = kept
+    if competitor.homepage and normalize_url(competitor.homepage) not in known:
+        dropped += 1
+        competitor.homepage = ""
     if dropped:
-        competitor.not_confirmed = list(competitor.not_confirmed) + [
-            f"{dropped} 件は、引用された URL が今回の検索結果に含まれていな"
-            "かったため除外しました（内容の当否ではありません）。"]
+        note = (f"{dropped} 件の URL は今回の検索結果に含まれていなかったため"
+                "落としました")
+        competitor.not_confirmed = (
+            f"{competitor.not_confirmed} / {note}" if competitor.not_confirmed
+            else note)
 
 
 def system_prompt(payload: Mapping[str, Any],

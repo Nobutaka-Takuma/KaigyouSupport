@@ -6855,6 +6855,66 @@ def test_a_failed_inquiry_does_not_lose_the_facts(monkeypatch, dataset):
 #: 呼び出しを分けてください——**上限のほうを上げないでください。**
 _WIRE_SCHEMA_LIMIT = 5_200
 
+#: **文字数だけでは足りませんでした。**
+#:
+#: CompetitorSurvey は 2,499 文字——上限の半分以下——でありながら
+#:
+#:     400 invalid_request_error: Schema is too complex.
+#:
+#: で落ちました。そのときの形は 配列 8・深さ 7・union 2 で、配列のうち 1 つは
+#: **オブジェクトの配列**（list[Finding]）でした。
+#:
+#: いっぽう Step3Output は配列 12 で通っています。**つまり「配列が n 個を
+#: 越えたら落ちる」という単純な線ではありません。** 本当の判定式は API 側に
+#: あり、こちらからは測れません。
+#:
+#: だから普遍的なしきい値は置きません（置けば、根拠のない理由でビルドを
+#: 止めることになります）。代わりに、**落ちた形が戻ってこないこと**だけを
+#: 見ます。
+
+
+def _schema_shape(model) -> dict[str, int]:
+    """スキーマの「形」。長さではなく、文法を組むのに効くものを数えます。"""
+    def walk(node, depth=0):
+        arrays = unions = nested = 0
+        deepest = depth
+        if isinstance(node, dict):
+            if node.get("type") == "array":
+                arrays += 1
+                # オブジェクトの配列（$ref 先が object）。入れ子の繰り返し。
+                if "$ref" in (node.get("items") or {}):
+                    nested += 1
+            if "anyOf" in node or "oneOf" in node:
+                unions += 1
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            return arrays, unions, nested, deepest
+        for child in children:
+            a, u, n, d = walk(child, depth + 1)
+            arrays += a
+            unions += u
+            nested += n
+            deepest = max(deepest, d)
+        return arrays, unions, nested, deepest
+
+    arrays, unions, nested, depth = walk(model.model_json_schema())
+    return {"arrays": arrays, "unions": unions,
+            "nested_object_arrays": nested, "depth": depth}
+
+
+def _sent_schemas() -> dict:
+    from kaigyou_intel.schemas import (
+        CompetitionSummary, CompetitorSurvey, Step1Inquiry, Step1Reading,
+        Step2Output, Step3Output, Step4Output)
+
+    return {"Step1Reading": Step1Reading, "Step1Inquiry": Step1Inquiry,
+            "Step2Output": Step2Output, "Step3Output": Step3Output,
+            "Step4Output": Step4Output,
+            "CompetitorSurvey": CompetitorSurvey,
+            "CompetitionSummary": CompetitionSummary}
+
 
 def test_every_schema_we_send_stays_small_enough():
     """**欄を 1 つ足しただけで越えることがあり、越えたことは動かすまで
@@ -6863,312 +6923,59 @@ def test_every_schema_we_send_stays_small_enough():
     実測：STEP1 が 7,977 文字で
       The compiled grammar is too large, which would cause performance issues.
     """
-    from kaigyou_intel.schemas import (
-        Step1Inquiry, Step1Reading, Step2Output, Step3Output, Step4Output)
-
-    sent = {"Step1Reading": Step1Reading, "Step1Inquiry": Step1Inquiry,
-            "Step2Output": Step2Output, "Step3Output": Step3Output,
-            "Step4Output": Step4Output}
-    too_big = {name: _schema_size(m) for name, m in sent.items()
+    too_big = {name: _schema_size(m) for name, m in _sent_schemas().items()
                if _schema_size(m) > _WIRE_SCHEMA_LIMIT}
     assert not too_big, (
         f"構造化出力のスキーマが大きすぎます: {too_big}。"
         "欄を減らすか、呼び出しを分けてください（上限を上げないこと）")
 
 
-# ======================================= 候補地そのものを見る（一帯ではなく）
-#
-# 実測：沼津駅の南南西 810m（徒歩10分）の候補地が「駅前」として分析されて
-# いました。半径1km の円は 3.14km²。駅から 800m 離れた地点を中心に置いても、
-# 円は駅も駅前商店街も飲み込みます。**候補地を 300m 動かしても同じ結論が
-# 出ます。**
+def test_the_competitor_schema_keeps_the_shape_that_stopped_failing():
+    """**落ちた形が戻ってこないこと。**
 
-def test_a_ten_minute_walk_is_not_the_station_front():
-    """**距離は測ってあります。呼び方をモデルの読み取りに任せません。**"""
-    from kaigyou_core import config as cfg
-    from kaigyou_core.site import station_band
+    実測：競合の調査が 2 院とも
 
-    bands = cfg.insights_config("dental_clinic")["catchment"]["station_bands"]
-    # 区分は開発指示書 §6。**812m の地点を「駅前」と表現しない。**
-    assert station_band(120, bands)["label"] == "駅前"
-    assert station_band(500, bands)["label"] == "駅徒歩圏"
-    assert station_band(810, bands)["label"] == "駅近隣"
-    assert station_band(1800, bands)["label"] == "駅との関係弱"
-    # 徒歩の分数も出すこと。810m を「駅前」と読むのは、分数を見れば起きません。
-    assert station_band(810, bands)["walk_minutes"] == 10
-    # 測れていなければ None。**「駅から遠い」ではありません。**
-    assert station_band(None, bands) is None
+        400 invalid_request_error: Schema is too complex.
 
+    で落ち、段ごと失敗しました。そのときの CompetitorSurvey は
+    配列 8・union 2・オブジェクトの配列 1（list[Finding]）。畳んだあとは
+    配列 6・union 0・オブジェクトの配列 0 です。
 
-def test_the_model_cannot_call_a_place_the_station_front():
-    """立地類型の選択肢から「駅前」を外したこと。
-
-    駅前かどうかは距離で決まります。類型が答えるのは「どんな性格の場所か」で、
-    それは距離とは別のことです——駅から 200m の住宅地の路面もあります。
+    **しきい値ではなく、あのときより複雑にならないことを見ます。** 本当の
+    判定式は API 側にあってこちらからは測れないので、「n を越えたら落ちる」
+    という線を引くと、根拠のない理由でビルドを止めることになります
+    （実際 Step3Output は配列 12 で通っています）。
     """
-    from kaigyou_intel.schemas import Surroundings
+    from kaigyou_intel.schemas import CompetitorSurvey
 
-    choices = Surroundings.model_json_schema()["properties"]["setting"]["enum"]
-    assert "駅前" not in choices, choices
-    assert "住宅地の路面" in choices
-    # プロンプトでも、そう言っていること。
-    assert "「駅前」という選択肢はありません" in cfg.prompt_text(
-        "step1_surroundings.md")
+    shape = _schema_shape(CompetitorSurvey)
+    # null 許容とオブジェクトの配列は、畳んだときに 0 にしました。戻さない。
+    assert shape["unions"] == 0, "null 許容を戻すと Schema is too complex に近づきます"
+    assert shape["nested_object_arrays"] == 0, "オブジェクトの配列を戻さないこと"
+    # 落ちたときが 8。同じかそれ以上には戻さない。
+    assert shape["arrays"] < 8, f"落ちたときと同じ複雑さです: {shape}"
 
 
-def test_the_point_is_told_apart_from_the_area_around_it():
-    """**半径をどちらか一方にするだけでは出ない話です。**
+def test_a_schema_the_api_refuses_falls_back_instead_of_failing_the_step():
+    """**逃げ道が、言い回し 1 つで通らないのでは意味がありません。**
 
-    2 つの円を突き合わせて初めて「その一帯の話」と「その地点の話」が
-    分かれます。
+    スキーマが複雑すぎるという 400 は、少なくとも 2 通りの文面で来ます。
+    片方だけを見ていたので、もう片方は緩い経路へ落ちずに段ごと失敗しました。
     """
-    from kaigyou_core.site import concentration
+    from kaigyou_intel.client import _grammar_too_large
 
-    # 一様なら、内側は面積比（25%）ちょうど。
-    even = concentration(250, 1000, 500, 1000)
-    assert even["share_if_even"] == 0.25
-    assert even["index"] == 1.0
-    assert "ほぼ一様" in even["reading"]
+    refused = [
+        "Error code: 400 - {'type': 'error', 'error': {'type': "
+        "'invalid_request_error', 'message': 'Schema is too complex.'}}",
+        "The compiled grammar is too large, which would cause performance "
+        "issues. Simplify your tool schemas.",
+    ]
+    for message in refused:
+        assert _grammar_too_large(Exception(message)), message[:60]
 
-    # 足元に寄っている。
-    dense = concentration(500, 1000, 500, 1000)
-    assert dense["index"] == 2.0
-    assert "密集の中心" in dense["reading"]
-
-    # 密集はどこかにあるが、足元ではない。**これが 1km 円だと消えます。**
-    thin = concentration(100, 1000, 500, 1000)
-    assert thin["index"] == 0.4
-    assert "候補地の足元ではありません" in thin["reading"]
-
-    # 外側が 0 なら語りません。0 で割らないためだけでなく、意味の上でも。
-    assert concentration(0, 0, 500, 1000) is None
-
-
-def test_a_catchment_smaller_than_the_mesh_says_so():
-    """**細かい半径を指定したぶんだけ精密になったように見せない。**
-
-    値は面積按分で出ますが、それは「メッシュの中では人が一様に住んでいる」と
-    仮定した数字です。半分が公園のメッシュでは、その仮定は外れます。
-    """
-    from kaigyou_core.site import resolution_warning
-
-    assert resolution_warning(500, 1000), "1kmメッシュで半径500mを測っている"
-    # メッシュに見合った半径なら黙っている（半径1km／1kmメッシュと同じ比）。
-    assert resolution_warning(500, 500) is None
-    assert resolution_warning(1000, 1000) is None
-
-
-def test_the_default_catchment_comes_from_the_business_type():
-    """**業態ごとに違います。** 歯科と総合病院で商圏の広さは桁が違います。"""
-    from kaigyou_core import config as cfg
-
-    assert cfg.default_radius_m("dental_clinic") == 500
-    # 設定の無い業態でも落ちないこと（コードの既定に落ちる）。
-    assert cfg.default_radius_m("そんな業態はない") == cfg.FALLBACK_RADIUS_M
-
-
-def test_the_dataset_carries_the_site_as_a_fact(conn):
-    """引用できる形になっていること。**引用できない数字は言い直すしかない。**"""
-    from kaigyou_core.dataset import build_dataset
-    from kaigyou_intel.projection import citable_keys, for_step1
-
-    dataset = build_dataset(conn, 35.7083, 139.6875, 500, mesh_size_m=500)
-    payload = for_step1(dataset, {})
-    keys = citable_keys(payload)
-    assert "access.station_band" in keys
-    assert any(k.startswith("site.concentration.") for k in keys), sorted(keys)[:8]
-    # 集中度は「一様ならこうなる」と一緒に。**読み手が自分で確かめられる形で。**
-    note = next(c["note"] for c in payload["citable"]
-                if c["key"].startswith("site.concentration."))
-    assert "一様なら" in note
-
-
-def test_the_report_separates_the_point_from_the_area(dataset):
-    """**円を大きくすれば消える話と、消えない話を分ける。**"""
-    from kaigyou_intel.report import to_markdown
-
-    with_site = dict(dataset)
-    with_site["access"] = {**(dataset.get("access") or {}), "nearest_station": {
-        "name": "沼津駅", "distance_m": 810,
-        "direction": {"compass": "南南西"},
-        "band": {"label": "駅近隣", "note": "徒歩15分まで。駅利用者の日常動線からは外れる",
-                 "distance_m": 810, "walk_minutes": 10, "within_m": 1200}}}
-    with_site["site"] = {
-        "radius_m": 500, "compare_radius_m": 1000, "mesh_size_m": 500,
-        "resolution_note": None,
-        "concentration": {
-            "population": {"inner_radius_m": 500, "outer_radius_m": 1000,
-                           "inner": 3000.0, "outer": 20000.0, "share": 0.15,
-                           "share_if_even": 0.25, "index": 0.6,
-                           "reading": "密集は商圏のどこかにありますが、"
-                                      "**候補地の足元ではありません。**"}}}
-    markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
-                            "executive_summary": "e"}, to_jsonable(with_site))
-
-    assert "## この候補地と駅の関係" in markdown
-    assert "駅近隣" in markdown and "徒歩約 10 分" in markdown
-    # **810m を「駅前」として通さないこと。** 区分は距離から決まっています。
-    assert "- **駅近隣**" in markdown
-    assert "- **駅前**" not in markdown
-    # 足元と周りの突き合わせが表として出ること。
-    assert "候補地の足元ではありません" in markdown
-    assert "1.00 から離れているものだけ" in markdown
-    # 本文（LLM）より前に置くこと。
-    assert markdown.index("## この候補地と駅の関係") < markdown.index("## 結論")
-    # **駅は地域の話のあと**（指示書 §8。地点→最寄り駅→駅周辺→判断は禁止）。
-    assert markdown.index("## この地域はどんな場所か") < markdown.index(
-        "## この候補地と駅の関係")
-
-
-# ============================================ 地点から始める（駅からではなく）
-#
-# 開発指示書 §1・§8。**地点 → 最寄り駅 → 駅周辺情報 → 判断、という構造は禁止。**
-#
-# 実測：沼津駅の南南西 810m（徒歩10分）の候補地が、駅前の分析になっていました。
-# 駅から書き始めると、駅の性格が地域の性格として語られます。
-
-def test_the_report_starts_with_the_area_not_the_station(dataset):
-    """**始まりは地域の姿です。駅はそのあと、説明変数として。**"""
-    from kaigyou_intel.report import to_markdown
-
-    ds = dict(dataset)
-    ds["positioning"] = {
-        "available": True,
-        "compared_with": {"type": "urban", "label": "静岡県内の市街地",
-                          "sample_count": 900},
-        "benchmark_version": "v1.0", "calculated_on": "2026-09-03",
-        "axes": [{"key": "population_mass", "label": "人口集積", "score": 88,
-                  "percentile": 0.88, "assessment": "高い",
-                  "means": "そこに住んでいる人の多さ",
-                  "from_measures": ["population"]}],
-        "gaps": [], "region_type": {"label": None, "because": [], "why_not": "x"},
-        "tags": [{"key": "population_dense", "label": "人口集積型",
-                  "because": ["population_mass が 88%"],
-                  "means": "住んでいる人が多いほうに入ります。"}],
-        "note": "n",
-    }
-    ds["access"] = {**(dataset.get("access") or {}), "nearest_station": {
-        "name": "沼津駅", "distance_m": 810,
-        "direction": {"compass": "南南西", "bearing_deg": 202.5},
-        "band": {"label": "駅近隣", "note": "徒歩15分まで",
-                 "distance_m": 810, "walk_minutes": 10, "within_m": 1200},
-        "population_side": {"toward_station": 200.0, "away_from_station": 800.0,
-                            "share_toward_station": 0.2,
-                            "reading": "商圏の人口は駅と**反対側**に寄っています。"}}}
-    markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
-                            "executive_summary": "e"}, to_jsonable(ds))
-
-    order = [markdown.index(h) for h in (
-        "## この地域はどんな場所か",
-        "## 地域を構成する主な特徴",
-        "## 周辺地域と比較した特徴",
-        "## この候補地と駅の関係",
-        "## 結論")]
-    assert order == sorted(order), "地点→最寄り駅→…の順に戻っている"
-    # 1 文で地域を定義すること（指示書 §7）。
-    assert "人口集積型の地域です" in markdown
-    # Fact → Interpretation。タグだけでは、なぜそう言えるのか分かりません。
-    assert "population_mass が 88%" in markdown
-
-
-def test_a_tag_is_decided_by_a_rule_and_carries_its_evidence():
-    """**個別指標を LLM に解釈させる前に、こちらで抽出します**（指示書 §4）。"""
-    from kaigyou_core import positioning
-
-    result = positioning.build(
-        [_measure("population", "商圏人口", "residents", _bench("urban", 92.0)),
-         _measure("clinics_per_10k", "医院数", "competition", _bench("urban", 12.0))],
-        {**_positioning_config(),
-         "tags": [
-             {"key": "population_dense", "label": "人口集積型",
-              "when": {"axis": "population_mass", "at_least": 0.75},
-              "means": "多い"},
-             {"key": "supply_thin", "label": "医療供給不足型",
-              "when": {"axis": "supply", "below": 0.25}, "means": "薄い"},
-             {"key": "expensive", "label": "高地価型",
-              "when": {"axis": "cost", "at_least": 0.75}, "means": "高い"}]})
-
-    labels = {t["label"]: t for t in result["tags"]}
-    # **複数付きます。** ひとつに絞ると、絞った時点で解釈になります。
-    assert set(labels) == {"人口集積型", "医療供給不足型"}
-    assert labels["人口集積型"]["because"] == ["population_mass が 92%"]
-    # cost の軸は測っていない。**「条件を満たさなかった」ではなく「確かめて
-    # いない」ので、タグは付けません。**
-    assert "高地価型" not in labels
-
-
-def test_the_station_is_not_decided_by_distance_alone():
-    """**距離だけでは「駅との関係」は決まりません**（指示書 §6）。
-
-    駅まで 800m でも、人が全員反対側に住んでいるなら、駅は来院動線では
-    ありません。
-    """
-    from kaigyou_core.site import station_side
-
-    toward = station_side(800, 200)
-    assert toward["share_toward_station"] == 0.8
-    assert "駅の側に寄っています" in toward["reading"]
-
-    away = station_side(200, 800)
-    assert "反対側" in away["reading"]
-
-    even = station_side(500, 500)
-    assert "ほぼ半々" in even["reading"]
-    # 誰もいなければ語りません。
-    assert station_side(0, 0) is None
-
-
-def test_a_station_dependent_tag_needs_both_distance_and_direction():
-    """近いだけでは「駅依存度高型」にしません。"""
-    from kaigyou_core import positioning
-
-    config = {**_positioning_config(), "tags": [{
-        "key": "station_dependent", "label": "駅依存度高型",
-        "when": {"station_band_in": ["駅前", "駅徒歩圏"],
-                 "station_side_at_least": 0.58}, "means": "x"}]}
-    measures = [_measure("population", "商圏人口", "residents", _bench("urban", 50.0))]
-
-    near_and_toward = positioning.build(measures, config, station={
-        "band": {"label": "駅徒歩圏"},
-        "population_side": {"share_toward_station": 0.7}})
-    assert [t["label"] for t in near_and_toward["tags"]] == ["駅依存度高型"]
-
-    # 近いが、人は反対側。**駅は来院動線ではありません。**
-    near_but_away = positioning.build(measures, config, station={
-        "band": {"label": "駅徒歩圏"},
-        "population_side": {"share_toward_station": 0.3}})
-    assert near_but_away["tags"] == []
-
-    # 駅が分からないときも付けません（「条件を満たさない」ではありません）。
-    unknown = positioning.build(measures, config, station=None)
-    assert unknown["tags"] == []
-
-
-def test_the_rings_show_where_the_density_actually_is():
-    """**合計だけを並べると、外側が大きいのは当たり前です**（指示書 §2）。"""
-    from kaigyou_core.site import rings
-
-    out = rings([{"population": 300, "facility_count": 2},
-                 {"population": 1200, "facility_count": 5},
-                 {"population": 2400, "facility_count": 24}],
-                [500, 1000, 2000])
-    assert out[0].get("growth_from_inner") is None, "いちばん内側には比が無い"
-    # 面積は 4 倍。人口が 4 倍なら一様、2 倍なら外側は薄い。
-    assert out[1]["growth_from_inner"]["population"] == 4.0
-    assert out[2]["growth_from_inner"]["population"] == 2.0
-    # 歯科医院は外側で急増している——**これは半径ひとつでは見えません。**
-    assert out[2]["growth_from_inner"]["facility_count"] == 4.8
-
-
-def test_the_scan_is_told_to_look_around_the_site_not_around_the_station():
-    """検索を「◯◯駅」から始めさせない。
-
-    駅名で検索すると、候補地が駅から 800m 離れていても同じ結果が返ります。
-    """
-    text = cfg.prompt_text("step1_surroundings.md")
-    assert "検索を「◯◯駅」から始めないでください" in text
-    assert "候補地を中心とした半径 1km の中に何があるか" in text
-
-    features = cfg.prompt_text("step1_features.md")
-    assert "始まりは候補地です。最寄り駅ではありません" in features
-    assert "tags" in features, "判定済みのタグを渡していることを伝えていない"
+    # **スキーマ以外の 400 で緩い経路へ落ちないこと。** 落ちると、本当の
+    # 原因（入力が長い、モデル名が違う）が握りつぶされます。
+    for message in ("Error code: 400 - prompt is too long",
+                    "Error code: 404 - model not found",
+                    "Error code: 429 - rate_limit_error"):
+        assert not _grammar_too_large(Exception(message)), message

@@ -420,21 +420,35 @@ def _send(client: Any, request: Mapping[str, Any], settings: Mapping[str, Any],
             raise
 
 
+#: スキーマが原因の 400 だと分かる言い回し。**1 つではありません。**
+#:
+#: 実測した 2 つ：
+#:
+#:     The compiled grammar is too large, which would cause performance
+#:     issues. Simplify your tool schemas or reduce the number of strict tools.
+#:
+#:     Schema is too complex.
+#:
+#: 前者だけを見ていたので、後者は緩い経路へ落ちずに段ごと失敗しました
+#: （競合の調査が 2 院とも 400 で落ちました）。**逃げ道を用意しておきながら、
+#: 言い回しが 1 つ違うだけで通らないのでは意味がありません。**
+_SCHEMA_REFUSED = (
+    ("grammar", "too large"),
+    ("schema", "too complex"),
+    ("schema", "too large"),
+    ("schema", "too deeply nested"),
+)
+
+
 def _grammar_too_large(exc: Exception) -> bool:
-    """スキーマが大きすぎて構造化出力を組めなかったか。
-
-    実測のメッセージ：
-
-        The compiled grammar is too large, which would cause performance
-        issues. Simplify your tool schemas or reduce the number of strict tools.
+    """スキーマが複雑すぎて構造化出力を組めなかったか。
 
     **状態コードでは見分けられません。** 400 は「入力が長すぎる」でも
     「モデル名が違う」でも返ります。緩い経路へ落として構わないのは、
     スキーマが原因のときだけです。
     """
     text = str(exc).lower()
-    return "grammar is too large" in text or (
-        "grammar" in text and "too large" in text)
+    return any(all(word in text for word in phrase) for phrase in _SCHEMA_REFUSED)
 
 
 def _as_prose_json(request: Mapping[str, Any], schema: Any,

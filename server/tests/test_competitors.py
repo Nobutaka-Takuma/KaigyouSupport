@@ -47,16 +47,18 @@ CONFIG = {
 COMPETITORS = [
     {"name": "A歯科", "distance_m": 220, "products": ["一般歯科", "小児歯科"],
      "target": ["小児"], "positioning": ["小児対応"],
-     "place": [{"key": "parking", "value": "あり", "source_url": "https://a.example/"}],
-     "map_x": -1, "map_y": -1, "map_basis": "保険中心・一般"},
+     "place_confirmed": ["parking"],
+     "map_placed": True, "map_x": -1, "map_y": -1, "map_basis": "保険中心・一般"},
     {"name": "B歯科", "distance_m": 640, "products": ["インプラント", "一般歯科"],
      "target": ["成人"], "positioning": ["インプラント"],
-     "place": [], "map_x": 2, "map_y": 2, "map_basis": "自費専門を掲げる"},
+     "place_confirmed": [],
+     "map_placed": True, "map_x": 2, "map_y": 2, "map_basis": "自費専門を掲げる"},
     {"name": "C歯科", "distance_m": 880, "products": ["一般歯科"],
      "target": ["高齢者"], "positioning": [],
-     "place": [{"key": "weekend", "value": "土曜のみ",
-                "source_url": "https://c.example/"}],
-     "map_x": None, "map_y": None, "map_basis": "サイトに診療方針の記載なし"},
+     "place_confirmed": ["weekend"],
+     # 判定できなかった。**0 ではなく map_placed=False で表します**——0 は
+     # 「どちらとも言えない」という意味のある値なので、混ぜられません。
+     "map_placed": False, "map_basis": "サイトに診療方針の記載なし"},
 ]
 
 
@@ -140,7 +142,7 @@ def test_the_quadrants_are_named_from_the_config_not_from_dentistry():
 
 def test_a_clinic_on_the_axis_is_not_pushed_into_a_quadrant():
     """0 は「どちらとも言えない」で、判定できなかったのとは別です。"""
-    middle = [{"name": "E歯科", "map_x": 0, "map_y": 1}]
+    middle = [{"name": "E歯科", "map_placed": True, "map_x": 0, "map_y": 1}]
     counts = {q["label"]: q["count"]
               for q in competition.positioning_map(middle, CONFIG)["quadrants"]}
     assert counts["どちらとも言えない（軸上）"] == 1
@@ -361,7 +363,8 @@ def test_the_vocabulary_lives_in_config_not_in_code():
             "scale": [-2, -1, 0, 1, 2]},
     }
     shops = [{"name": "麺屋A", "distance_m": 120, "products": ["ラーメン"],
-              "target": ["学生"], "map_x": -1, "map_y": 1, "map_basis": "券売機"}]
+              "target": ["学生"], "map_placed": True, "map_x": -1, "map_y": 1,
+              "map_basis": "券売機"}]
     out = json.dumps({"tally": competition.tally(shops, ramen),
                       "map": competition.positioning_map(shops, ramen)},
                      ensure_ascii=False)

@@ -445,23 +445,29 @@ def _verify_questions(output: Step1Output, fact_ids: set[str],
 # 1 つの出力に入れると、文法が大きくなりすぎて API が 400 を返します
 # （実測済み：`The compiled grammar is too large`）。
 
-class Finding(BaseModel):
-    """公開情報から確認できた 1 項目。**確認できなかったものは出しません。**
-
-    「駐車場：不明」の行を作らないのは、**不明を並べると調べた量が多く
-    見える**からです。確認できなかったことは `not_confirmed` にまとめます。
-    """
-
-    key: str = Field(description="parking / weekend / evening など、設定のキー")
-    value: str = Field(description="確認できた内容。「あり」「土日とも診療」など")
-    source_url: str = Field(description="そう書いてあったページの URL")
-
-
+# ---------------------------------------------------------------------------
+# **Competitor は平らに保ちます。** 入れ子の配列と null 許容を並べたところ、
+# API が
+#
+#     400 invalid_request_error: Schema is too complex.
+#
+# を返し、2 院とも構造化できずに段ごと落ちました。文法を組むのは配列の「数」と
+# 「入れ子の深さ」に効くので、こう畳んであります。
+#
+#     place: list[Finding]      → place_confirmed: list[str]（キーだけ）
+#     promotion: list[str]      → promotion_note: str
+#     not_confirmed: list[str]  → not_confirmed: str
+#     map_x: int | None         → map_x: int + map_placed: bool
+#
+# **数えるもの（§4 の「駐車場あり何院」）は残しています**——キーの配列があれば
+# 数えられるので、1 項目ごとの入れ子は要りません。
+#
+# この説明を docstring ではなくコメントに置いているのは、**docstring が
+# JSON Schema の description になって毎回の呼び出しに乗るから**です。設計の
+# 経緯は送る必要がありません。
+# ---------------------------------------------------------------------------
 class Competitor(BaseModel):
-    """競合 1 件の STP と 4P（指示書 §2・§3）。
-
-    **推測で補完しません。** 確認できなかった項目は `not_confirmed` に置きます。
-    """
+    """競合 1 件の STP と 4P。確認できなかった項目は not_confirmed へ。"""
 
     name: str = Field(description="医院名。入力で渡した名前をそのまま")
     homepage: str = Field(default="", description="公式サイトの URL。無ければ空")
@@ -477,19 +483,30 @@ class Competitor(BaseModel):
         default_factory=list, description="扱っている診療領域。設定の語彙から")
     price_note: str = Field(
         default="", description="価格の訴求。確認できた自費価格があれば具体的に")
-    place: list[Finding] = Field(
-        default_factory=list, description="駐車場・土日診療など、確認できたもの")
-    promotion: list[str] = Field(
-        default_factory=list, description="Web での主な訴求・SNS・キャンペーン")
+    #: **確認できたものだけ。** 「駐車場：不明」は入れません——不明を並べると
+    #: 調べた量が多く見えます。確認できなかったことは not_confirmed へ。
+    place_confirmed: list[str] = Field(
+        default_factory=list,
+        description="確認できた設備・条件のキー（parking / weekend など）だけを列挙")
+    place_note: str = Field(
+        default="", description="立地・診療時間で分かったことを 1〜2 文で")
+    promotion_note: str = Field(
+        default="", description="Web での主な訴求・SNS・キャンペーンを 1〜2 文で")
     # --- ポジショニングマップ（指示書 §5）---
     #: **判定根拠が弱ければ配置しません。** 無理に置くと、地図の上では他の点と
-    #: 同じ確かさに見えます。null は「判定困難」です。
-    map_x: int | None = Field(default=None, description="-2〜+2。判定困難なら null")
-    map_y: int | None = Field(default=None, description="-2〜+2。判定困難なら null")
+    #: 同じ確かさに見えます。map_placed=false が「判定困難」です。
+    #:
+    #: 真偽値を別に持つのは、0 が「どちらとも言えない」という**意味のある値**
+    #: だからです。0 を「判定できなかった」に使うと、その 2 つが混ざります。
+    map_placed: bool = Field(
+        default=False,
+        description="公開情報から位置を判定できたか。できなければ false")
+    map_x: int = Field(default=0, description="-2〜+2。map_placed=false なら無視")
+    map_y: int = Field(default=0, description="-2〜+2。map_placed=false なら無視")
     map_basis: str = Field(
         default="", description="その位置に置いた根拠。置けないならその理由")
-    #: 調べたが確認できなかった項目。**空にしないでください。**
-    not_confirmed: list[str] = Field(default_factory=list)
+    not_confirmed: str = Field(
+        default="", description="調べたが確認できなかったこと。空にしないでください")
     sources: list[str] = Field(
         default_factory=list, description="参照したページの URL")
 
