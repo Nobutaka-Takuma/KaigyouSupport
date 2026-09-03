@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../lib/api";
 import { authConfigured, storedSession } from "../lib/auth";
 import type {
-  AnalysisProgress, AnalysisReport, AnalysisStatus, AnalysisStep,
+  AnalysisKind, AnalysisProgress, AnalysisReport, AnalysisStatus, AnalysisStep,
+  CompetitorProgress,
 } from "../lib/types";
+import { isCompetitorProgress } from "../lib/types";
 import { AnalysisReportView } from "./AnalysisReport";
 
 /**
@@ -77,10 +79,16 @@ export function AnalysisPanel({
   locationName?: string;
 }) {
   const [jobId, setJobId] = useState<string | null>(null);
+  // どちらの分析を見ているか。**サーバの答えを優先します**——保存した値は
+  // 「押したつもり」で、サーバの値は「実際に作られたジョブ」です。
+  const [kind, setKind] = useState<AnalysisKind>("area");
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
+  // どちらのボタンを押したか。**両方を同時に無効にしない**ため、真偽値では
+  // なく種類を持ちます（押していないほうは押せたままにする理由がない、と
+  // 思いがちですが、押したほうだけが「開始中…」になるほうが分かります）。
+  const [starting, setStarting] = useState<AnalysisKind | null>(null);
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [needsToken, setNeedsToken] = useState(false);
   // ポーリングは終わった時点で止まります。やり直したら再開させる必要があるので、
@@ -106,8 +114,11 @@ export function AnalysisPanel({
     }
     try {
       const at = JSON.parse(saved) as
-        { id: string; lat: number; lng: number; radius: number };
-      setJobId(samePlace(at, { lat, lng, radius }) ? at.id : null);
+        { id: string; lat: number; lng: number; radius: number;
+          kind?: AnalysisKind };
+      const same = samePlace(at, { lat, lng, radius });
+      setJobId(same ? at.id : null);
+      setKind(same ? (at.kind ?? "area") : "area");
     } catch {
       setJobId(null);
     }
@@ -117,6 +128,7 @@ export function AnalysisPanel({
     try {
       const next = await api.analysis.status(id);
       setStatus(next);
+      if (next.kind) setKind(next.kind);
       if (next.report_available) {
         setReport(await api.analysis.report(id));
       }
@@ -158,18 +170,28 @@ export function AnalysisPanel({
     return () => window.clearInterval(id);
   }, [waiting]);
 
-  async function start() {
-    setStarting(true);
+  /**
+   * 分析を始める。**どちらの分析かは引数で決まります。**
+   *
+   * 半径はサーバが決めます。競合分析は 1km 圏が基本（指示書 §1）で、周辺一般の
+   * 既定（500m）とは別の設定から取ります。ここから渡すと、画面で選んだ
+   * 表示用の半径が競合の調査範囲になってしまいます——**同じ地点でも、
+   * 見るべき範囲が違います。**
+   */
+  async function start(which: AnalysisKind) {
+    setStarting(which);
     setError(null);
     setReport(null);
     setStatus(null);
+    setKind(which);
     try {
       const created = await api.analysis.create(
-        { lat, lng, radius, catchment, profile: profile || undefined,
-          location_name: locationName || undefined },
+        { lat, lng, radius: which === "competitors" ? undefined : radius,
+          catchment, profile: profile || undefined,
+          location_name: locationName || undefined, kind: which },
         token || undefined);
       localStorage.setItem(JOB_KEY,
-        JSON.stringify({ id: created.job_id, lat, lng, radius }));
+        JSON.stringify({ id: created.job_id, lat, lng, radius, kind: which }));
       if (token) localStorage.setItem(TOKEN_KEY, token);
       setJobId(created.job_id);
       setAttempt((n) => n + 1);
@@ -178,7 +200,7 @@ export function AnalysisPanel({
       if (err instanceof ApiError && aboutTheToken(err)) setNeedsToken(true);
       setError(err instanceof ApiError ? explain(err) : String(err));
     } finally {
-      setStarting(false);
+      setStarting(null);
     }
   }
 
@@ -238,20 +260,37 @@ export function AnalysisPanel({
             </button>
           </span>
         ) : (
-          <button onClick={start} disabled={starting || waiting === true}>
-            {starting ? "開始中…"
-              : queued ? "順番待ち…"
-              : waiting ? "実行中…"
-              : "この地点で分析を開始"}
-          </button>
+          <span className="analysis__actions">
+            {/* **2 つは別の分析です。** 続きでも詳細版でもありません。
+                周辺一般は統計から地域の構造を読み、競合は 1 件ずつ Web で
+                調べます。検索の使い道が正反対なので、同じ実行の中には
+                入れられません。 */}
+            <StartButton kind="area" label="周辺一般の分析を開始する"
+                         starting={starting} queued={queued} waiting={waiting}
+                         active={kind} onStart={start} />
+            <StartButton kind="competitors" label="周辺の競合を分析する"
+                         starting={starting} queued={queued} waiting={waiting}
+                         active={kind} onStart={start} />
+          </span>
         )}
       </div>
-      <p className="analysis__lead">
-        統計から特徴を抽出し（STEP1）、その背景と近隣医院の自費診療をWeb検索で
-        調べ（STEP2）、需要が生まれる筋道と開業方針を組み立て（STEP3）、
-        歯科医師に渡せるレポートに書き直します（STEP4）。
-        数分かかり、1件あたり1ドル前後のAPI費用が発生します。
-      </p>
+      {kind === "competitors" ? (
+        <p className="analysis__lead">
+          半径1km の医院を近い順に調べ、各院の Web から STP（顧客層・訴求）と
+          4P（診療領域・価格・立地条件・訴求）を取り出して（STEP1）、
+          この地域に何が多く何が少ないかを集計し、競争環境を要約します
+          （STEP2）。<strong>集計とポジショニングマップは計算した値</strong>で、
+          LLM が書くのはその解釈だけです。
+          数分かかり、API費用が発生します。
+        </p>
+      ) : (
+        <p className="analysis__lead">
+          統計から特徴を抽出し（STEP1）、その背景と近隣医院の自費診療をWeb検索で
+          調べ（STEP2）、需要が生まれる筋道と開業方針を組み立て（STEP3）、
+          歯科医師に渡せるレポートに書き直します（STEP4）。
+          数分かかり、1件あたり1ドル前後のAPI費用が発生します。
+        </p>
+      )}
 
       {/* サーバが要求したときだけ。保存済みの値があっても、アカウント運用の
           画面では出しません（使われないので、あるだけ誤解を招く）。 */}
@@ -291,7 +330,9 @@ export function AnalysisPanel({
             </p>
           )}
 
-          {status.progress && <Findings p={status.progress} />}
+          {status.progress && (isCompetitorProgress(status.progress)
+            ? <CompetitorFindings p={status.progress} />
+            : <Findings p={status.progress} />)}
 
           {failedStep?.error_message && <FailureNote text={failedStep.error_message} />}
 
@@ -333,6 +374,98 @@ export function AnalysisPanel({
     </section>
   );
 }
+
+/**
+ * 分析を始めるボタン 1 つ。
+ *
+ * **押していないほうも押せません。** 走っている分析が 1 つあるのに、もう
+ * 一方を押せると、進捗表示はどちらのものか分からなくなります（ジョブは
+ * 1 件しか覚えていません）。押したほうだけが「開始中…」になります。
+ */
+function StartButton(
+  { kind, label, starting, queued, waiting, active, onStart }: {
+    kind: AnalysisKind;
+    label: string;
+    starting: AnalysisKind | null;
+    queued: boolean;
+    waiting: boolean | null | undefined;
+    active: AnalysisKind;
+    onStart: (kind: AnalysisKind) => void;
+  },
+) {
+  const busy = starting !== null || waiting === true;
+  const mine = starting === kind || (waiting === true && active === kind);
+  return (
+    <button
+      className={kind === "competitors" ? "analysis__ghost" : undefined}
+      onClick={() => onStart(kind)} disabled={busy}>
+      {starting === kind ? "開始中…"
+        : mine && queued ? "順番待ち…"
+        : mine && waiting ? "実行中…"
+        : label}
+    </button>
+  );
+}
+
+
+/**
+ * 競合分析で、ここまでに分かったこと。
+ *
+ * 周辺一般の Findings とは別の部品です。**数え方が違うのではなく、数える
+ * ものが違います。** 同じ部品に押し込むと、問いを立てる段の無い分析に
+ * 「問い 0 件」と出ます。
+ *
+ * 「調べていない」を最初に出すのは、この画面のいちばんの誤読が
+ * 「1km 圏に 12 院」だからです。上限で切った 12 件なのか、本当に 12 院しか
+ * ないのかで、読み方が正反対になります。
+ */
+function CompetitorFindings({ p }: { p: CompetitorProgress }) {
+  return (
+    <div className="findings">
+      <h4 className="findings__title">ここまでに分かったこと</h4>
+      <ul className="findings__list">
+        <li>
+          Web で調べ終えた医院 <strong>{p.surveyed} 件</strong>
+          {p.total_in_radius != null && <>／半径内 {p.total_in_radius} 件</>}
+        </li>
+        {p.not_surveyed > 0 && (
+          <li className="findings__again">
+            上限で切って調べていない <strong>{p.not_surveyed} 件</strong>
+            　——<strong>その地域に存在しないという意味ではありません。</strong>
+          </li>
+        )}
+        {p.failed > 0 && (
+          <li>調べたが構造化できなかった医院 {p.failed} 件</li>
+        )}
+        {/* **STEP2 が済むまで出しません。** 「500m圏 0 件」は結果に見えますが、
+            実際は「まだ数えていない」です。 */}
+        {p.within_near != null && p.near_radius_m != null && (
+          <li>
+            うち {p.near_radius_m.toLocaleString()}m 圏
+            <strong> {p.within_near} 件</strong>
+          </li>
+        )}
+        {(p.placed > 0 || p.undecided > 0) && (
+          <li>
+            ポジショニングマップに配置 <strong>{p.placed} 件</strong>
+            {p.undecided > 0 && (
+              <span className="findings__verdict is-uncertain">
+                判定困難 {p.undecided}
+              </span>
+            )}
+          </li>
+        )}
+      </ul>
+      {p.character && (
+        <div className="findings__open">
+          <strong>この地域の競合の特徴</strong>
+          <ul><li>{p.character}</li></ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 /**
  * ここまでに分かったこと（指示書 §25）。

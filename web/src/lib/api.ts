@@ -9,6 +9,7 @@ import type {
   AdminUsage,
   Me,
   AnalysisCreated,
+  AnalysisKind,
   AnalysisList,
   AnalysisReport,
   AnalysisStatus,
@@ -187,10 +188,19 @@ export const api = {
       params: {
         lat: number;
         lng: number;
-        radius: number;
+        /** 省略するとサーバが業態と種類ごとの既定を使います。 */
+        radius?: number;
         catchment?: "circle" | "walk";
         profile?: string;
         location_name?: string;
+        /**
+         * 何を分析するか。省略すると周辺一般（これまでの挙動）。
+         *
+         * **半径はサーバが決めます。** 競合分析は 1km 圏が基本で、周辺一般の
+         * 既定（500m）とは別の設定から取ります。ここで radius を渡さないと、
+         * それぞれの既定が効きます。
+         */
+        kind?: AnalysisKind;
       },
       token?: string,
     ) => request<AnalysisCreated>("POST", "/analysis", params, token),

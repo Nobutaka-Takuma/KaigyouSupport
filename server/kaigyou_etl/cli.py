@@ -362,12 +362,19 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
     profile = args.profile or scoring.get("active_profile")
     model = ScoringModel(scoring, profile)
 
+    # **同じ地点でも、見るべき範囲が違います。** 競合分析は 1km 圏が基本
+    # （開発指示書 §1）で、周辺一般の既定（歯科は 500m）とは別の設定です。
+    radius = args.radius or (
+        int(((cfg.competitors_config(category).get("survey") or {})
+             .get("radius_m")) or 1000) if args.kind == "competitors"
+        else cfg.default_radius_m(category))
+
     with connect() as conn:
         prefecture_code = default_prefecture(conn, prefecture_at(conn, args.lat, args.lng))
         mesh_size_m = resolve_mesh_size(conn, None, prefecture_code)
         print(f"基礎データを作成しています（{prefecture_code} / メッシュ {mesh_size_m}m）...")
         dataset = to_jsonable(build_dataset(
-            conn, args.lat, args.lng, args.radius,
+            conn, args.lat, args.lng, radius,
             prefecture_code=prefecture_code, mesh_size_m=mesh_size_m,
             profile=profile, category=category,
             max_clinics=int((cfg.analysis_config().get("limits") or {})
@@ -375,16 +382,20 @@ def cmd_new_analysis(args: argparse.Namespace) -> int:
             disclaimer=DISCLAIMER))
 
         job_id = jobs.create_job(
-            conn, lat=args.lat, lng=args.lng, radius_m=args.radius,
+            conn, lat=args.lat, lng=args.lng, radius_m=radius,
             dataset=dataset, base_hash=base_data_hash(dataset),
-            business_type=category, location_name=args.name, profile=profile)
+            business_type=category, location_name=args.name, profile=profile,
+            analysis_kind=args.kind)
 
     population = ((dataset.get("demand") or {}).get("residents") or {}) \
-        .get("by_radius", {}).get(str(args.radius), {}).get("population")
+        .get("by_radius", {}).get(str(radius), {}).get("population")
     clinics = ((dataset.get("competition") or {}).get("clinics_in_radius") or {}).get("count")
     print(f"ジョブを作成しました: {job_id}")
-    print(f"  地点        {args.lat}, {args.lng} / 半径 {args.radius}m"
+    print(f"  地点        {args.lat}, {args.lng} / 半径 {radius}m"
           + (f" / {args.name}" if args.name else ""))
+    print(f"  種類        "
+          + ("周辺の競合の分析" if args.kind == "competitors" else "周辺一般の分析")
+          + f"（{len(jobs.steps_for(args.kind))} 段）")
     print(f"  プロファイル {profile}")
     if category != DEFAULT_CATEGORY:
         print(f"  業態        {category}")
@@ -650,6 +661,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     """
     import json as _json
 
+    from kaigyou_core.db import column_exists
     from kaigyou_intel import client as llm
     from kaigyou_intel import jobs as _jobs
     from kaigyou_intel.steps import step1_features
@@ -657,21 +669,28 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     if args.list:
         with connect() as conn, conn.cursor() as cur:
-            cur.execute("""
+            # 種類の列は無いかもしれません（マイグレーション前）。
+            has_kind = column_exists(conn, "analysis_jobs", "analysis_kind")
+            kind_col = "analysis_kind" if has_kind else "'area' AS analysis_kind"
+            cur.execute(f"""
                 SELECT id, location_name, latitude, longitude, radius_m, profile,
-                       status, current_step, created_at
+                       status, current_step, created_at, {kind_col}
                 FROM analysis_jobs ORDER BY created_at DESC LIMIT 20
             """)
             rows = cur.fetchall()
         if not rows:
             print("ジョブはありません。")
             return EXIT_OK
-        print(f"{'作成日時':16s} {'状態':10s} {'地点':14s} ジョブID")
+        # **種類を出します。** 同じ「STEP1 実行中」でも、周辺一般と競合分析では
+        # 走っている仕事が違います。並べて見分けが付かないと、失敗したときに
+        # どちらのプロンプトを直せばよいのか分かりません。
+        print(f"{'作成日時':16s} {'状態':10s} {'種類':6s} {'地点':14s} ジョブID")
         for i, r in enumerate(rows):
             when = r["created_at"].strftime("%m-%d %H:%M")
             name = (r["location_name"] or f"{r['latitude']:.4f},{r['longitude']:.4f}")[:14]
+            kind = "競合" if r["analysis_kind"] == "competitors" else "周辺"
             mark = " ←次に実行" if r["status"] == "queued" and r is rows[-1] else ""
-            print(f"{when:16s} {r['status']:10s} {name:14s} {r['id']}{mark}")
+            print(f"{when:16s} {r['status']:10s} {kind:6s} {name:14s} {r['id']}{mark}")
         print("\nworker は古い順に処理します。不要なものは --cancel <id> で取り下げてください。")
         return EXIT_OK
 
@@ -849,15 +868,24 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                 return EXIT_OK
             job_id = str(row["id"])
             job = _jobs.get_job(conn, job_id, include_base_data=True)
+            # **種類ごとに STEP1 は別の仕事です。** 競合分析のジョブに周辺一般の
+            # 組み立てを当てると、送られないプロンプトを「送る内容」として
+            # 見せることになります——課金前の確認になりません。
+            kind = _jobs.kind_of(conn, job_id)
 
-        payload = step1_features.build_input(job["base_data"])
-        settings = llm.step_settings(1)
-        # **実行と同じ組み立てを通します。** 生のファイルを書き出していた頃は、
-        # {max_patterns} も {dead_ends} も置き換わっていない、実際には送られない
-        # 文書を見せていました。「課金する前に何が送られるかを見る」道具が
-        # 送られないものを見せていては、確認になりません。
-        system = step1_features.system_prompt(
-            payload, job.get("business_type") or DEFAULT_CATEGORY)
+        category = job.get("business_type") or DEFAULT_CATEGORY
+        if kind == "competitors":
+            from kaigyou_intel.steps import comp1_survey
+
+            payload = comp1_survey.build_input(job["base_data"], category)
+            system = comp1_survey.system_prompt(payload, category)
+        else:
+            payload = step1_features.build_input(job["base_data"])
+            # **実行と同じ組み立てを通します。** 生のファイルを書き出していた
+            # 頃は、{max_patterns} も {dead_ends} も置き換わっていない、実際には
+            # 送られない文書を見せていました。
+            system = step1_features.system_prompt(payload, category)
+        settings = llm.step_settings(1, kind=kind)
         body = _json.dumps(payload, ensure_ascii=False, indent=1)
 
         if waiting > 1 and not args.job:
@@ -873,7 +901,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         size = len(system.encode()) + len(body.encode())
         label = f"ジョブ {job_id}" + (f"（{row['location_name']}）"
                                        if row.get("location_name") else "")
-        print(f"{label} / STEP1 に送る内容を書き出しました: {out}")
+        print(f"{label} / STEP1（{_jobs.steps_for(kind)[1]}）に送る内容を"
+              f"書き出しました: {out}")
         print(f"  モデル      {settings['model']}（effort={settings['effort']}）")
         print(f"  入力サイズ  {size:,} bytes  ≒ {size // 2:,} トークン前後（日本語の概算）")
         print(f"  Web検索     {'あり' if settings['web_search'] else 'なし'}")
@@ -1217,7 +1246,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("new-analysis", help="商圏分析ジョブを1件作る")
     p.add_argument("--lat", type=float, required=True)
     p.add_argument("--lng", type=float, required=True)
-    p.add_argument("--radius", type=int, default=1000, help="商圏半径（m）")
+    p.add_argument("--radius", type=int, default=None,
+                   help="商圏半径（m）。省略すると業態と種類ごとの既定")
+    p.add_argument("--kind", choices=("area", "competitors"), default="area",
+                   help="area=周辺一般の分析 / competitors=周辺の競合の分析")
     p.add_argument("--name", default=None, help="レポートに載せる地点名")
     p.add_argument("--profile", default=None,
                    help="スコアリングプロファイル（省略時は active_profile）")

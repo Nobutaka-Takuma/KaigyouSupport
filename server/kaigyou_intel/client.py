@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence, Type, TypeVar
 
@@ -101,9 +102,51 @@ def is_configured() -> bool:
     return (Path.home() / ".config" / "anthropic").is_dir()
 
 
-def step_settings(step_number: int) -> dict[str, Any]:
+#: 分析の種類ごとの、段の設定がある場所。
+#:
+#: **同じ「STEP1」でも、種類が違えば別のプロンプトです。** 周辺一般の STEP1 は
+#: 商圏特徴抽出、競合分析の STEP1 は競合の調査です。
+STEP_CONFIG_KEY = {"area": "steps", "competitors": "competitor_steps"}
+
+#: いま組み立てている分析の種類。worker が段を走らせる前に設定します。
+#:
+#: 引数で引き回さないのは、`step_settings` が 20 か所以上から呼ばれていて、
+#: そのすべてに種類を通すと、**渡し忘れた 1 か所が黙って別のプロンプトを
+#: 使います。** 既定は "area" なので、既存の呼び出しは今までどおりです。
+_KIND = "area"
+
+
+def use_kind(kind: str) -> None:
+    """これから走らせる分析の種類を伝える。"""
+    global _KIND
+    _KIND = kind if kind in STEP_CONFIG_KEY else "area"
+
+
+@contextmanager
+def for_kind(kind: str):
+    """この間だけ、その種類として組み立てる。**抜けたら元に戻します。**
+
+    設定しっぱなしにすると、段が終わったあとも残ります。worker はプロセスを
+    使い回すので、競合分析のジョブの次に来た周辺一般のジョブが——たまたま
+    `run_step` を通らない経路（`analyze --dry-run` や検算）で——競合分析の
+    プロンプト設定を読みます。落ちません。**違うプロンプトで成功します。**
+    """
+    previous = _KIND
+    use_kind(kind)
+    try:
+        yield
+    finally:
+        use_kind(previous)
+
+
+def current_kind() -> str:
+    return _KIND
+
+
+def step_settings(step_number: int, kind: str | None = None) -> dict[str, Any]:
     config = cfg.analysis_config()
-    step = (config.get("steps") or {}).get(step_number) or {}
+    key = STEP_CONFIG_KEY.get(kind or _KIND, "steps")
+    step = (config.get(key) or {}).get(step_number) or {}
     model = config.get("model") or {}
     return {
         "name": step.get("name", f"step{step_number}"),

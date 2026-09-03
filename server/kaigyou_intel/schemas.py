@@ -432,6 +432,108 @@ def _verify_questions(output: Step1Output, fact_ids: set[str],
     return problems
 
 
+# ============================================================ 競合分析（3C の C2）
+#
+# 開発指示書「地域競合分析AI MVP」。**周辺一般の調査に使っていた検索リソースを、
+# 競合医院の情報収集に振り替えます。**
+#
+# 枠（STP と 4P）は業態を問わず同じで、中に入る語だけが違います。だから枠は
+# ここに、語は config/<業態>/competitors.yaml に置きます。歯科で始めますが、
+# 飲食・小売・学習塾でも同じ枠が使えます。
+#
+# **スキーマは小さく保ちます。** 1 医院につき 1 回の構造化出力です。全医院を
+# 1 つの出力に入れると、文法が大きくなりすぎて API が 400 を返します
+# （実測済み：`The compiled grammar is too large`）。
+
+class Finding(BaseModel):
+    """公開情報から確認できた 1 項目。**確認できなかったものは出しません。**
+
+    「駐車場：不明」の行を作らないのは、**不明を並べると調べた量が多く
+    見える**からです。確認できなかったことは `not_confirmed` にまとめます。
+    """
+
+    key: str = Field(description="parking / weekend / evening など、設定のキー")
+    value: str = Field(description="確認できた内容。「あり」「土日とも診療」など")
+    source_url: str = Field(description="そう書いてあったページの URL")
+
+
+class Competitor(BaseModel):
+    """競合 1 件の STP と 4P（指示書 §2・§3）。
+
+    **推測で補完しません。** 確認できなかった項目は `not_confirmed` に置きます。
+    """
+
+    name: str = Field(description="医院名。入力で渡した名前をそのまま")
+    homepage: str = Field(default="", description="公式サイトの URL。無ければ空")
+    # --- STP ---
+    segments: list[str] = Field(
+        default_factory=list, description="主な顧客層。設定の語彙から")
+    target: list[str] = Field(
+        default_factory=list, description="特に訴求している層。設定の語彙から")
+    positioning: list[str] = Field(
+        default_factory=list, description="何を強みとして訴求しているか")
+    # --- 4P ---
+    products: list[str] = Field(
+        default_factory=list, description="扱っている診療領域。設定の語彙から")
+    price_note: str = Field(
+        default="", description="価格の訴求。確認できた自費価格があれば具体的に")
+    place: list[Finding] = Field(
+        default_factory=list, description="駐車場・土日診療など、確認できたもの")
+    promotion: list[str] = Field(
+        default_factory=list, description="Web での主な訴求・SNS・キャンペーン")
+    # --- ポジショニングマップ（指示書 §5）---
+    #: **判定根拠が弱ければ配置しません。** 無理に置くと、地図の上では他の点と
+    #: 同じ確かさに見えます。null は「判定困難」です。
+    map_x: int | None = Field(default=None, description="-2〜+2。判定困難なら null")
+    map_y: int | None = Field(default=None, description="-2〜+2。判定困難なら null")
+    map_basis: str = Field(
+        default="", description="その位置に置いた根拠。置けないならその理由")
+    #: 調べたが確認できなかった項目。**空にしないでください。**
+    not_confirmed: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(
+        default_factory=list, description="参照したページの URL")
+
+
+class CompetitorSurvey(BaseModel):
+    """1 医院ぶんの調査結果（構造化の呼び出しが返す形）。"""
+
+    competitor: Competitor
+
+
+class OpportunityHypothesis(BaseModel):
+    """競合分布から見える機会の**仮説**（指示書 §6）。
+
+    **「競合が少ない＝市場機会がある」と断定しません。** 少ないのは、
+    やってみて成立しなかったからかもしれません。
+    """
+
+    position: str = Field(description="どのポジションか")
+    why: str = Field(description="競合データのどこからそう言えるのか")
+    caveat: str = Field(
+        description="この仮説が外れるとしたら何が理由か。"
+                    "「競合が少ないのは需要が無いからかもしれない」など")
+
+
+class CompetitionSummary(BaseModel):
+    """地域の競争環境の要約（指示書 §6）。**集計は済んでいます。**
+
+    数え上げは Python がやりました。ここでやるのは、**その数字が何を
+    意味するかを言うこと**だけです。新しい数字を作らないでください。
+    """
+
+    landscape: str = Field(description="競争環境を 2〜3 文で。集計値に基づいて")
+    character: str = Field(
+        description="「この地域の歯科医院は○○型が多い」の形で 1 文")
+    crowded: list[str] = Field(
+        default_factory=list, description="競争が集中している領域")
+    sparse: list[str] = Field(
+        default_factory=list, description="比較的競合が少ない領域")
+    opportunities: list[OpportunityHypothesis] = Field(default_factory=list)
+    not_determinable: list[str] = Field(
+        default_factory=list,
+        description="調べたが確認できなかったこと。空にしないでください")
+
+
 # ------------------------------------------------------------------ STEP2
 #: 仮説の判定（指示書 §12）。
 #:

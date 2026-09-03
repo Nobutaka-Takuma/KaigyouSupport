@@ -1418,6 +1418,17 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         # 座標より、その名前で呼ばれたほうが読む人には分かります。
         cur.execute("SELECT location_name FROM analysis_jobs WHERE id = %s", (job_id,))
         row = cur.fetchone()
+
+    # **どちらの文書を書くかは、ジョブの種類が決めます。**
+    #
+    # 呼び出し側（worker）に決めさせると、種類を渡し忘れたときに競合分析の
+    # 出力が周辺一般の型で描かれます。落ちません——見出しだけが並んだ、
+    # 中身の無いレポートが**成功として保存されます。**
+    from kaigyou_intel import jobs as _jobs
+    if _jobs.kind_of(conn, job_id) == "competitors":
+        return _save_competitor_report(conn, job_id, output, dataset, row, sources)
+
+    with conn.cursor() as cur:
         # 開業方針は STEP3 が欄のまま出しています。最終段は散文だけを書くので、
         # 表にする材料はここで取りに行きます。
         cur.execute("SELECT output_json FROM analysis_steps WHERE job_id = %s "
@@ -1450,9 +1461,15 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         named["location"] = {**(dataset.get("location") or {}),
                              "name": row["location_name"]}
 
+    markdown = to_markdown(output, named, sources, judgement, surroundings,
+                           inquiry)
+    return _store(conn, job_id, output, markdown, problems)
+
+
+def _store(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
+           markdown: str, problems: Sequence[TraceProblem] = ()) -> str:
+    """書き上がった文書を 1 行に収める。**保存の口は 1 つだけ**にします。"""
     with conn.cursor() as cur:
-        markdown = to_markdown(output, named, sources, judgement, surroundings,
-                               inquiry)
         cur.execute(
             """
             INSERT INTO analysis_reports (job_id, report_json, report_markdown,
@@ -1471,6 +1488,27 @@ def save(conn: psycopg.Connection, job_id: str, output: Mapping[str, Any],
         report_id = str(cur.fetchone()["id"])
     conn.commit()
     return report_id
+
+
+def _save_competitor_report(conn: psycopg.Connection, job_id: str,
+                            output: Mapping[str, Any],
+                            dataset: Mapping[str, Any],
+                            job_row: Mapping[str, Any] | None,
+                            sources: Sequence[Mapping[str, Any]]) -> str:
+    """競合分析の文書（開発指示書 §4〜§6）。
+
+    こちらは前段の出力を集めに行きません。**必要なものは全部 output の中に
+    あります**——集計もポジショニングマップも、STEP2 が持ち回っています。
+    統計データセットからは地点名だけを使います。
+    """
+    from kaigyou_intel import competitor_report
+
+    named = dict(dataset)
+    if job_row and job_row.get("location_name"):
+        named["location"] = {**(dataset.get("location") or {}),
+                             "name": job_row["location_name"]}
+    markdown = competitor_report.to_markdown(output, named, sources)
+    return _store(conn, job_id, output, markdown)
 
 
 #: レポートを書き出す既定の場所。設定で変えられます（config/analysis.yaml）。

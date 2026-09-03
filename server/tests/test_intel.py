@@ -1006,7 +1006,11 @@ def test_a_job_can_be_created_without_an_http_client():
     args = parser.parse_args(["new-analysis", "--lat", "35.6717", "--lng", "139.765",
                               "--name", "銀座4丁目", "--profile", "pediatric"])
     assert isinstance(args, argparse.Namespace)
-    assert (args.lat, args.lng, args.radius) == (35.6717, 139.765, 1000)
+    # 半径は**省略時に決めません。** 業態と種類で既定が違うので（歯科の
+    # 周辺一般は 500m、競合分析は 1km）、パーサに 1 つ埋めると、API と CLI で
+    # 別の商圏が作られます。決めるのは cmd_new_analysis です。
+    assert (args.lat, args.lng, args.radius) == (35.6717, 139.765, None)
+    assert args.kind == "area"
     assert args.func.__name__ == "cmd_new_analysis"
 
 

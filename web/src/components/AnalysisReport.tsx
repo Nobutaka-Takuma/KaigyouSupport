@@ -2,7 +2,8 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import { renderMarkdown } from "../lib/markdown";
 import type {
-  AnalysisReport, AnalysisSource, ClientReportJson, Evidenced, ReportBlock,
+  AnalysisReport, AnalysisSource, ClientReportJson, CompetitorReportJson,
+  CompetitorTally, CountedLabel, Evidenced, PositioningMap, ReportBlock,
   ReportJson,
 } from "../lib/types";
 
@@ -52,10 +53,23 @@ function byPriority(a: AnalysisSource, b: AnalysisSource) {
 export function AnalysisReportView(
   { report, jobId }: { report: AnalysisReport; jobId: string },
 ) {
+  // **競合分析はまったく別の文書です。** 統計の話は 1 行も出てきません。
+  // 同じ描画に通すと、空の見出しが並んだレポートが出来上がります——
+  // 落ちないので、成功したように見えます。
+  if (isCompetitorReport(report.report_json)) {
+    return <CompetitorReportView report={report} json={report.report_json}
+                                 jobId={jobId} />;
+  }
   if (isClientReport(report.report_json)) {
     return <ClientReportView report={report} json={report.report_json} jobId={jobId} />;
   }
   return <WorkingReportView report={report} json={report.report_json} jobId={jobId} />;
+}
+
+function isCompetitorReport(
+  json: ClientReportJson | ReportJson | CompetitorReportJson,
+): json is CompetitorReportJson {
+  return "character" in json && "landscape" in json;
 }
 
 /**
@@ -89,7 +103,9 @@ function MarkdownView({ markdown, jobId }: { markdown: string; jobId: string }) 
 
 /** 顧客提出用の形で保存されたレポートか。段の構成を変える前の古い
  *  ジョブは、タグ付きの働き用の形のまま残っています。 */
-function isClientReport(json: ClientReportJson | ReportJson): json is ClientReportJson {
+function isClientReport(
+  json: ClientReportJson | ReportJson | CompetitorReportJson,
+): json is ClientReportJson {
   return "verdict" in json && "support_needed" in json;
 }
 
@@ -410,4 +426,302 @@ function shorten(text: string, limit = 80) {
  */
 async function download(jobId: string) {
   await api.analysis.download(jobId);
+}
+
+
+/**
+ * 競合分析のレポート（開発指示書 §4〜§6）。
+ *
+ * **どこまでが数えた値で、どこからが解釈かを、画面の上で分けます。**
+ * 集計とポジショニングマップは Python が数えました。LLM が書いたのは
+ * 競争環境の文と機会仮説だけです。混ぜて並べると、読み手にはどちらも
+ * 同じ確かさに見えます。
+ *
+ * 最初のタブが「調べた範囲」なのは、この文書のいちばんの誤読が
+ * 「1km 圏に 12 院」だからです。上限で切った 12 件なのか、本当に 12 院なのかで
+ * 読み方が正反対になります。
+ */
+function CompetitorReportView(
+  { report, json, jobId }:
+    { report: AnalysisReport; json: CompetitorReportJson; jobId: string },
+) {
+  const [open, setOpen] =
+    useState<"landscape" | "tally" | "map" | "sources" | "markdown">("landscape");
+  const cited = list(report.sources).sort(byPriority);
+  const tally = json.tally;
+  const pmap = json.positioning_map;
+  const coverage = json.coverage ?? {};
+  const label = json.label ?? "競合";
+  const opportunities = list(json.opportunities);
+
+  return (
+    <div className="report">
+      <div className="report__summary">
+        <strong className="report__verdict">競合分析</strong>
+        {json.character}
+      </div>
+
+      {/* **調べた範囲を、タブの外に出します。** タブの中に入れると、
+          開かなければ見えません。以降の件数は全部この範囲の中の件数です。 */}
+      <div className="report__coverage">
+        <strong>この分析で調べた範囲</strong>
+        <ul>
+          {coverage.total_in_radius != null && (
+            <li>
+              半径{coverage.radius_m ? `${coverage.radius_m.toLocaleString()}m` : ""}
+              内の{label}：{coverage.total_in_radius} 件（施設データベースより）
+            </li>
+          )}
+          <li>Web で調べた：<strong>{tally?.surveyed ?? coverage.surveyed ?? 0} 件</strong></li>
+          {tally?.near_radius_m != null && (
+            <li>
+              うち {tally.near_radius_m.toLocaleString()}m 圏：
+              <strong>{tally.within_near} 件</strong>
+            </li>
+          )}
+          {!!coverage.not_surveyed && (
+            <li className="report__caveat">
+              上限で切って調べていない：{coverage.not_surveyed} 件　
+              <strong>その地域に存在しないという意味ではありません。</strong>
+            </li>
+          )}
+          {list(coverage.failed).length > 0 && (
+            <li>
+              調べたが構造化できなかった：{list(coverage.failed).length} 件
+              （{list(coverage.failed).map((f) => f.name).join("、")}）
+            </li>
+          )}
+        </ul>
+        <p className="report__note">
+          以降の件数は、すべてこの範囲の中の件数です。各{label}の Web サイトに
+          書かれていない項目は数に入りません——
+          <strong>扱っていないという意味ではありません。</strong>
+        </p>
+      </div>
+
+      <div className="report__tabs" role="tablist">
+        {([["landscape", "競争環境"],
+           ["tally", "多いもの・少ないもの"],
+           ["map", `ポジショニングマップ${pmap ? ` (${list(pmap.placed).length})` : ""}`],
+           ["sources", `出典 (${cited.length})`],
+           ...(report.report_markdown
+               ? ([["markdown", "文書"]] as const) : []),
+          ] as const).map(([key, text]) => (
+          <button key={key} role="tab" aria-selected={open === key}
+                  className={open === key ? "is-active" : ""}
+                  onClick={() => setOpen(key)}>
+            {text}
+          </button>
+        ))}
+        {report.report_markdown && (
+          <button className="report__download" onClick={() => { void download(jobId); }}>
+            Markdownで保存
+          </button>
+        )}
+      </div>
+
+      {open === "markdown" && report.report_markdown && (
+        <MarkdownView markdown={report.report_markdown} jobId={jobId} />
+      )}
+
+      {open === "landscape" && (
+        <div className="report__prose">
+          <p>{json.landscape}</p>
+          {list(json.crowded).length > 0 && (
+            <>
+              <h4>競争が集中している領域</h4>
+              <ul>{list(json.crowded).map((x, i) => <li key={i}>{x}</li>)}</ul>
+            </>
+          )}
+          {list(json.sparse).length > 0 && (
+            <>
+              <h4>比較的{label}が少ない領域</h4>
+              <ul>{list(json.sparse).map((x, i) => <li key={i}>{x}</li>)}</ul>
+            </>
+          )}
+
+          {opportunities.length > 0 && (
+            <>
+              <h4>機会仮説（仮説であって、結論ではありません）</h4>
+              {opportunities.map((h, i) => (
+                <div key={i} className="report__support">
+                  <strong>{h.position}</strong>
+                  <p>{h.why}</p>
+                  {/* **但し書きを小さくしません。** 「競合が少ない」が
+                      「機会がある」に読み替えられるのは、ここが薄いときです。 */}
+                  <p className="report__counterpoint">
+                    <strong>外れるとしたら</strong>　{h.caveat}
+                  </p>
+                </div>
+              ))}
+              <p className="report__note">
+                {label}が少ないことは、そこに需要があることを意味しません。
+                「まだ誰もやっていない」のか「やってみて成立しなかった」のかは、
+                この分析では区別できません。
+              </p>
+            </>
+          )}
+
+          {list(json.not_determinable).length > 0 && (
+            <>
+              <h4>調べたが確認できなかったこと</h4>
+              <ul>
+                {list(json.not_determinable).map((x, i) => <li key={i}>{x}</li>)}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+
+      {open === "tally" && tally && <TallyView tally={tally} label={label} />}
+      {open === "map" && pmap && <PositioningView map={pmap} label={label} />}
+      {open === "sources" && <SourceList report={report} cited={cited} />}
+      <p className="report__disclaimer">{report.disclaimer}</p>
+    </div>
+  );
+}
+
+/**
+ * 何が多く、何が少ないか（指示書 §4）。**0 件の行を消しません。**
+ *
+ * 「この地域にインプラントを掲げる医院は無い」は、行が無いことでは
+ * 伝わりません——調べ落としと区別が付かないからです。
+ */
+function TallyView({ tally, label }: { tally: CompetitorTally; label: string }) {
+  return (
+    <div className="report__prose">
+      {([["取り扱っている領域", tally.products],
+         ["訴求している顧客層", tally.targets],
+         [`各${label}が掲げている強み（自由記述）`, tally.positioning],
+        ] as [string, CountedLabel[]][]).map(([heading, rows]) => (
+        list(rows).length > 0 && (
+          <section key={heading}>
+            <h4>{heading}</h4>
+            <CountTable rows={list(rows)} label={label} />
+          </section>
+        )
+      ))}
+      {list(tally.place).length > 0 && (
+        <section>
+          <h4>立地・営業条件</h4>
+          <CountTable rows={list(tally.place)} label={label} />
+        </section>
+      )}
+      {tally.leaning_x_high_label && (
+        <p>
+          {tally.leaning_x_high_label}寄りと判定した{label}：
+          <strong>{tally.leaning_x_high} 件</strong>
+        </p>
+      )}
+      {tally.note && <p className="report__note">{tally.note}</p>}
+    </div>
+  );
+}
+
+function CountTable(
+  { rows, label }: { rows: { label: string; count: number;
+                            outside_vocabulary?: boolean }[]; label: string },
+) {
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  return (
+    <table className="report__counts">
+      <thead><tr><th>項目</th><th>{label}数</th><th /></tr></thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.label} className={r.count === 0 ? "is-zero" : undefined}>
+            <td>
+              {r.label}
+              {r.outside_vocabulary && (
+                <small className="report__note">（設定の語彙外）</small>
+              )}
+            </td>
+            <td>{r.count}</td>
+            <td>
+              <span className="report__bar"
+                    style={{ width: `${(r.count / max) * 100}%` }} />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * ポジショニングマップ（指示書 §5）。
+ *
+ * **判定困難を図に載せません。** 載せると、他の点と同じ確かさに見えます。
+ * 置けなかった件は図の下に、理由とともに出します。
+ */
+function PositioningView(
+  { map, label }: { map: PositioningMap; label: string },
+) {
+  const placed = list(map.placed);
+  const scale = list(map.scale);
+  const lo = Math.min(...(scale.length ? scale : [-2]));
+  const hi = Math.max(...(scale.length ? scale : [2]));
+  const span = hi - lo || 1;
+  const at = (v: number) => ((v - lo) / span) * 100;
+
+  return (
+    <div className="report__prose">
+      <div className="posmap" role="img"
+           aria-label={`横軸 ${map.x.low}〜${map.x.high}、`
+                       + `縦軸 ${map.y.low}〜${map.y.high} の分布図`}>
+        <span className="posmap__axis posmap__axis--x-low">{map.x.low}</span>
+        <span className="posmap__axis posmap__axis--x-high">{map.x.high}</span>
+        <span className="posmap__axis posmap__axis--y-low">{map.y.low}</span>
+        <span className="posmap__axis posmap__axis--y-high">{map.y.high}</span>
+        {placed.map((p, i) => (
+          <span key={i} className="posmap__point"
+                style={{ left: `${at(p.x)}%`, bottom: `${at(p.y)}%` }}
+                title={`${p.name}${p.basis ? `：${p.basis}` : ""}`}>
+            <span className="posmap__label">{shorten(p.name, 10)}</span>
+          </span>
+        ))}
+      </div>
+
+      {list(map.quadrants).length > 0 && (
+        <>
+          <h4>区画ごとの{label}数</h4>
+          <CountTable rows={list(map.quadrants)} label={label} />
+          {/* **空いている区画を「機会」と読ませない。** 図だけでは、まだ誰も
+              やっていないのか、やってみて成立しなかったのかを区別できません。 */}
+          <p className="report__note">
+            0 件の区画は、そこに機会があるという意味ではありません。
+          </p>
+        </>
+      )}
+
+      <h4>各{label}の位置</h4>
+      <table className="report__counts">
+        <thead>
+          <tr><th>{label}</th><th>距離</th><th>判定の根拠</th></tr>
+        </thead>
+        <tbody>
+          {[...placed].sort((a, b) => (a.distance_m ?? Infinity)
+                                      - (b.distance_m ?? Infinity)).map((p, i) => (
+            <tr key={i}>
+              <td>{p.name}</td>
+              <td>{p.distance_m == null ? "—"
+                   : `${Math.round(p.distance_m).toLocaleString()}m`}</td>
+              <td>{p.basis || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {list(map.undecided).length > 0 && (
+        <>
+          <h4>位置を判定できなかった{label}（{list(map.undecided).length} 件）</h4>
+          <ul>
+            {list(map.undecided).map((u, i) => (
+              <li key={i}>{u.name}：{u.why}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {map.note && <p className="report__note">{map.note}</p>}
+    </div>
+  );
 }

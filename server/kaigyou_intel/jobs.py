@@ -29,13 +29,35 @@ STEP_NAMES = {
     4: "顧客提出用レポート",
 }
 
+#: 競合分析の段（開発指示書「地域競合分析AI MVP」）。
+#:
+#: **周辺一般の分析とは段の数も中身も違います。** 地域について広く調べる
+#: 代わりに、競合 1 院ずつを深く調べます。集計（§4）とポジショニングマップ
+#: （§5）は Python がやるので、LLM の段は 2 つです。
+COMPETITOR_STEP_NAMES = {
+    1: "競合の調査",
+    2: "競争環境の要約",
+}
+
+#: 種類ごとの段の名前。
+STEPS_BY_KIND = {"area": STEP_NAMES, "competitors": COMPETITOR_STEP_NAMES}
+
+#: 既定の種類。既存の行はこれです（マイグレーション 036 の DEFAULT）。
+DEFAULT_KIND = "area"
+
+
+def steps_for(kind: str | None) -> dict[int, str]:
+    """その種類の段の構成。知らない種類は周辺一般として扱います。"""
+    return STEPS_BY_KIND.get(kind or DEFAULT_KIND, STEP_NAMES)
+
 
 def create_job(conn: psycopg.Connection, *, lat: float, lng: float, radius_m: int,
                dataset: Mapping[str, Any], base_hash: str,
                business_type: str = DEFAULT_CATEGORY,
                location_name: str | None = None,
                profile: str | None = None,
-               user_id: str | None = None) -> str:
+               user_id: str | None = None,
+               analysis_kind: str = DEFAULT_KIND) -> str:
     """Job と、その 4 ステップの空枠を作る。
 
     ステップの行を最初に作るのは、進捗を「まだ無い」ではなく「pending」として
@@ -47,14 +69,15 @@ def create_job(conn: psycopg.Connection, *, lat: float, lng: float, radius_m: in
             """
             INSERT INTO analysis_jobs (
                 user_id, business_type, location_name, latitude, longitude,
-                radius_m, profile, base_data, base_data_hash, status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')
+                radius_m, profile, base_data, base_data_hash, status,
+                analysis_kind
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s)
             RETURNING id
             """,
             (user_id, business_type, location_name, lat, lng, radius_m, profile,
-             Json(dataset), base_hash))
+             Json(dataset), base_hash, analysis_kind))
         job_id = str(cur.fetchone()["id"])
-        for number, name in STEP_NAMES.items():
+        for number, name in steps_for(analysis_kind).items():
             cur.execute(
                 "INSERT INTO analysis_steps (job_id, step_number, step_name, status) "
                 "VALUES (%s, %s, %s, 'pending')", (job_id, number, name))
@@ -62,15 +85,45 @@ def create_job(conn: psycopg.Connection, *, lat: float, lng: float, radius_m: in
     return job_id
 
 
+def kind_of(conn: psycopg.Connection, job_id: str) -> str:
+    """このジョブの分析の種類。
+
+    段の構成がこれで決まります。**列が無い環境では周辺一般として扱います**
+    （デプロイとマイグレーションの間の窓。列が無いのは「まだ当てていない」で
+    あって、種類が無いわけではありません）。
+    """
+    from kaigyou_core.db import column_exists
+
+    if not column_exists(conn, "analysis_jobs", "analysis_kind"):
+        return DEFAULT_KIND
+    with conn.cursor() as cur:
+        cur.execute("SELECT analysis_kind FROM analysis_jobs WHERE id = %s",
+                    (job_id,))
+        row = cur.fetchone()
+    return (row["analysis_kind"] if row else None) or DEFAULT_KIND
+
+
 def get_job(conn: psycopg.Connection, job_id: str,
             include_base_data: bool = False) -> dict[str, Any] | None:
-    columns = ("id, user_id, business_type, location_name, latitude, longitude, "
-               "radius_m, profile, base_data_hash, status, current_step, "
-               "error_message, created_at, started_at, completed_at")
+    """Job 1 件。**種類の列は、無い環境では黙って外します。**
+
+    kind_of が列の有無を見ているのに、ここが素で SELECT していると、
+    マイグレーションを当てる前のデプロイでは kind_of に届く前に落ちます
+    （デプロイとマイグレーションの間の窓）。守るなら両方です。
+    """
+    from kaigyou_core.db import column_exists
+
+    columns = ["id", "user_id", "business_type", "location_name",
+               "latitude", "longitude", "radius_m", "profile", "base_data_hash",
+               "status", "current_step", "error_message", "created_at",
+               "started_at", "completed_at"]
+    if column_exists(conn, "analysis_jobs", "analysis_kind"):
+        columns.insert(3, "analysis_kind")
     if include_base_data:
-        columns += ", base_data"
+        columns.append("base_data")
     with conn.cursor() as cur:
-        cur.execute(f"SELECT {columns} FROM analysis_jobs WHERE id = %s", (job_id,))
+        cur.execute(f"SELECT {', '.join(columns)} FROM analysis_jobs WHERE id = %s",
+                    (job_id,))
         row = cur.fetchone()
     return dict(row) if row else None
 
@@ -87,16 +140,17 @@ def ensure_steps(conn: psycopg.Connection, job_id: str) -> int:
     永久に止まります。画面には「順番待ち」とだけ出ます。だから、いま存在
     しない段の行は落とします。済んだ段（completed）は触りません（要件 §32）。
     """
+    names = steps_for(kind_of(conn, job_id))
     with conn.cursor() as cur:
         cur.execute("SELECT step_number FROM analysis_steps WHERE job_id = %s",
                     (job_id,))
         have = {int(r["step_number"]) for r in cur.fetchall()}
-        obsolete = sorted(n for n in have if n not in STEP_NAMES)
-        missing = [n for n in STEP_NAMES if n not in have]
+        obsolete = sorted(n for n in have if n not in names)
+        missing = [n for n in names if n not in have]
         for number in missing:
             cur.execute(
                 "INSERT INTO analysis_steps (job_id, step_number, step_name, status) "
-                "VALUES (%s, %s, %s, 'pending')", (job_id, number, STEP_NAMES[number]))
+                "VALUES (%s, %s, %s, 'pending')", (job_id, number, names[number]))
         if obsolete:
             cur.execute("DELETE FROM analysis_steps "
                         "WHERE job_id = %s AND step_number = ANY(%s)",
@@ -139,12 +193,13 @@ def next_step(conn: psycopg.Connection, job_id: str) -> int | None:
     受け取れません。空の入力で「分析しました」と言われるほうが、
     止まっているより悪い。
     """
+    names = steps_for(kind_of(conn, job_id))
     for step in get_steps(conn, job_id):
         number = int(step["step_number"])
         # いまは存在しない段の行（段構成を変える前に作られた Job）。走らせる
         # 実装が無いので、返すとそこで止まります。ensure_steps が消しますが、
         # そちらを通らない経路もあるのでここでも飛ばします。
-        if number not in STEP_NAMES:
+        if number not in names:
             continue
         if step["status"] == "completed":
             continue
@@ -325,7 +380,7 @@ def finish_step(conn: psycopg.Connection, job_id: str, number: int,
             (Json(output), usage.get("input_tokens"), usage.get("output_tokens"),
              usage.get("web_searches"), usage.get("cache_read_tokens"),
              usage.get("cache_write_tokens"), job_id, number))
-        if number >= max(STEP_NAMES):
+        if number >= max(steps_for(kind_of(conn, job_id))):
             cur.execute(
                 "UPDATE analysis_jobs SET status = 'completed', completed_at = now() "
                 "WHERE id = %s", (job_id,))

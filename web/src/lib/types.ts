@@ -457,9 +457,20 @@ export interface AnalysisStep {
   prompt_version?: string | null;
 }
 
+/**
+ * 分析の種類。
+ *
+ * area        … 周辺一般（統計から地域の構造を読む。4段）
+ * competitors … 周辺の競合（1件ずつ Web で調べて STP/4P に構造化。2段）
+ *
+ * **段の数で見分けません。** 段の数を変えた日に、黙って別の画面が出ます。
+ */
+export type AnalysisKind = "area" | "competitors";
+
 export interface AnalysisCreated {
   job_id: string;
   status: string;
+  kind?: AnalysisKind;
   steps: AnalysisStep[];
   worker_required: boolean;
   note: string;
@@ -494,8 +505,42 @@ export interface AnalysisStatus {
   /** ホスティング環境では null。APIサーバはLLMを呼ばないので判定できない。 */
   llm_configured: boolean | null;
   status_note?: string | null;
+  /** どちらの分析か。サーバが返します（段の数から推測しないこと）。 */
+  kind?: AnalysisKind;
   /** いまの時点で何が分かっているか。段が1つも終わっていなければ null。 */
-  progress?: AnalysisProgress | null;
+  progress?: AnalysisProgress | CompetitorProgress | null;
+}
+
+/**
+ * 競合分析で、いまの時点で分かっていること。
+ *
+ * 周辺一般の progress とは**別の形**です。同じ形にすると、問いを立てる段が
+ * 無い分析に「問い 0 件」と出ます——立てなかったのではなく、立てる段が
+ * ないのに。
+ */
+export interface CompetitorProgress {
+  /** Web で調べ終えた件数。 */
+  surveyed: number;
+  /** 調べようとした件数（上限で切ったあと）。 */
+  requested: number;
+  failed: number;
+  /** 上限で切って調べていない件数。**存在しないという意味ではない。** */
+  not_surveyed: number;
+  total_in_radius?: number | null;
+  /** STEP2 が済むまで null。0 と書くと「近くに1件も無い」に見える。 */
+  within_near?: number | null;
+  near_radius_m?: number | null;
+  placed: number;
+  undecided: number;
+  character: string;
+  through_step: number;
+}
+
+/** 進捗がどちらの形か。**判定はサーバの kind ではなくデータの形で。** */
+export function isCompetitorProgress(
+  p: AnalysisProgress | CompetitorProgress | null | undefined,
+): p is CompetitorProgress {
+  return !!p && "surveyed" in p;
 }
 
 /**
@@ -595,9 +640,72 @@ export interface AnalysisSource {
   retrieved_at?: string | null;
 }
 
+/**
+ * 競合分析の最終段の出力（開発指示書 §4〜§6）。
+ *
+ * 集計（tally）とポジショニングマップは **Python が数えた値**で、LLM が
+ * 書いたのは landscape / character / crowded / sparse / opportunities だけ
+ * です。画面はその境目を出します——どの数字が数えた値で、どの文が解釈か。
+ */
+export interface CompetitorReportJson {
+  label?: string;
+  /** 競争環境。2〜3文。 */
+  landscape: string;
+  /** 「この地域の歯科医院は○○型が多い」の 1 文。 */
+  character: string;
+  crowded?: string[];
+  sparse?: string[];
+  opportunities?: { position: string; why: string; caveat: string }[];
+  not_determinable?: string[];
+  tally?: CompetitorTally;
+  positioning_map?: PositioningMap;
+  coverage?: {
+    surveyed?: number | null;
+    requested?: number | null;
+    failed?: { name: string; why: string }[];
+    not_surveyed?: number | null;
+    total_in_radius?: number | null;
+    radius_m?: number | null;
+  };
+}
+
+export interface CountedLabel {
+  label: string;
+  count: number;
+  /** 設定の語彙に無い語が出てきた。語彙の抜けに気づけるように残します。 */
+  outside_vocabulary?: boolean;
+}
+
+export interface CompetitorTally {
+  surveyed: number;
+  within_near: number;
+  near_radius_m: number;
+  products: CountedLabel[];
+  targets: CountedLabel[];
+  positioning: CountedLabel[];
+  place: { key: string; label: string; count: number }[];
+  /** 横軸の高いほう（自費／高価格帯など）に寄っている件数。 */
+  leaning_x_high: number;
+  /** その軸の呼び方。**設定から来ます**（歯科なら「自費診療中心」）。 */
+  leaning_x_high_label: string;
+  note?: string;
+}
+
+export interface PositioningMap {
+  x: { key?: string; label?: string; low?: string; high?: string };
+  y: { key?: string; label?: string; low?: string; high?: string };
+  scale: number[];
+  placed: { name: string; x: number; y: number; distance_m: number | null;
+            basis: string }[];
+  /** 置けなかった競合。**無理に置きません**（他の点と同じ確かさに見える）。 */
+  undecided: { name: string; why: string }[];
+  quadrants: { label: string; count: number }[];
+  note?: string;
+}
+
 export interface AnalysisReport {
   /** 最終段の出力。顧客提出用まで走ったジョブは ClientReportJson。 */
-  report_json: ClientReportJson | ReportJson;
+  report_json: ClientReportJson | ReportJson | CompetitorReportJson;
   report_markdown: string | null;
   trace_ok: boolean | null;
   trace_problems: { where: string; problem: string }[] | null;

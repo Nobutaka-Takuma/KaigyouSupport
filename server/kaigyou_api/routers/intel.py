@@ -81,6 +81,10 @@ def create_analysis(
     catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$"),
     category: str = Query(DEFAULT_CATEGORY),
     location_name: str | None = Query(None, description="レポートに載せる地点名"),
+    # **分析の種類。** area = 周辺一般（地域の構造）、competitors = 周辺の競合。
+    # 段の数も中身も違います。検索リソースの振り分けもここで変わります——
+    # 周辺一般は地域について広く、競合は 1 院ずつ深く。
+    kind: str = Query("area", pattern="^(area|competitors)$"),
     profile: str | None = Query(None),
     background: BackgroundTasks = None,  # type: ignore[assignment]
     conn: psycopg.Connection = Depends(get_conn),
@@ -99,7 +103,12 @@ def create_analysis(
     # **省略時は業態の既定**（config/<業態>/insights.yaml の
     # catchment.default_radius_m）。歯科は 500m です——半径1km の円は
     # 3.14km² あり、駅から 800m の候補地を中心に置いても駅を飲み込みます。
-    radius = radius or cfg.default_radius_m(category)
+    # 競合分析は、指示書 §1 のとおり基本 1km 圏です。周辺一般の既定（500m）とは
+    # 別の設定から取ります——**同じ地点でも、見るべき範囲が違います。**
+    radius = radius or (
+        int(((cfg.competitors_config(category).get("survey") or {})
+             .get("radius_m")) or 1000) if kind == "competitors"
+        else cfg.default_radius_m(category))
     if account is None:
         # アカウント機能を使っていない環境（手元）。共有シークレットで守ります。
         _authorise(x_analysis_token)
@@ -123,7 +132,7 @@ def create_analysis(
         conn, lat=lat, lng=lng, radius_m=radius, dataset=dataset,
         base_hash=base_data_hash(dataset), business_type=category,
         location_name=location_name, profile=profile or model.profile_name,
-        user_id=account.user_id if account else None)
+        user_id=account.user_id if account else None, analysis_kind=kind)
 
     # **作った直後に、こちらから worker を起こします。**
     #
@@ -142,8 +151,9 @@ def create_analysis(
         "job_id": job_id,
         "quota": _quota_view(conn, account),
         "status": "queued",
+        "kind": kind,
         "steps": [{"step_number": n, "step_name": name, "status": "pending"}
-                  for n, name in jobs.STEP_NAMES.items()],
+                  for n, name in jobs.steps_for(kind).items()],
         # worker が動いていないと、いつまでも queued のままです。黙って待たせない。
         "worker_required": True,
         "note": ("分析は worker が実行します。`kaigyou-etl analyze --worker` を"
@@ -226,8 +236,13 @@ def get_analysis(job_id: str,
             "WHERE job_id = %s", (job_id,))
         source_rows = [dict(r) for r in cur.fetchall()]
 
+    kind = job.get("analysis_kind") or jobs.DEFAULT_KIND
     return {
         "job": job,
+        # **どちらの分析か。** 画面はこれで進捗の見せ方とレポートの型を
+        # 選びます。段の数（4 と 2）から推測させると、段の数を変えた日に
+        # 黙って別の画面が出ます。
+        "kind": kind,
         # **output_json は返しません。**どの画面も読んでいないのに、進捗の
         # 問い合わせは 4 秒ごとに走ります。数分の待ちのあいだ、読まれない
         # STEP1〜4 の出力を何十回も往復させることになります。段の中身から
@@ -235,7 +250,8 @@ def get_analysis(job_id: str,
         # `kaigyou-etl analyze --show` が DB から直接読みます。
         "steps": [{k: v for k, v in s.items() if k != "output_json"} for s in steps],
         # 指示書 §25。待っている数分に、**何が分かってきたのかを見せる。**
-        "progress": _progress(steps, source_rows),
+        "progress": (_competitor_progress(steps) if kind == "competitors"
+                     else _progress(steps, source_rows)),
         "source_count": sources,
         "report_available": report is not None,
         "trace_ok": report["trace_ok"] if report else None,
@@ -299,6 +315,40 @@ def _progress(steps: list[dict[str, Any]],
     }
 
 
+def _competitor_progress(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """競合分析で、いまの時点で分かっていること。
+
+    周辺一般の progress（問いと仮説の数）は、この分析には 1 つも当てはまり
+    ません。**同じ形を返すと、画面には「問い 0 件」と出ます**——立てなかった
+    のではなく、立てる段が無いのに。
+
+    数えるのは STEP1 の出力そのものです。集計は STEP2 が Python で済ませて
+    いますが、STEP1 が終わった時点で「何院調べ終えたか」はもう分かります。
+    """
+    done = {int(s["step_number"]): (s.get("output_json") or {})
+            for s in steps if s["status"] == "completed"}
+    survey = done.get(1) or {}
+    if not survey:
+        return None
+    summary = done.get(2) or {}
+    tally = summary.get("tally") or {}
+    return {
+        "surveyed": int(survey.get("surveyed") or 0),
+        "requested": int(survey.get("requested") or 0),
+        "failed": len(survey.get("failed") or []),
+        "not_surveyed": int(survey.get("not_surveyed") or 0),
+        "total_in_radius": survey.get("total_in_radius"),
+        # STEP2 が済むまでは null。0 と書くと「近くに 1 院も無い」に見えます。
+        "within_near": tally.get("within_near"),
+        "near_radius_m": tally.get("near_radius_m"),
+        "placed": len(((summary.get("positioning_map") or {}).get("placed")) or []),
+        "undecided": len(((summary.get("positioning_map") or {})
+                          .get("undecided")) or []),
+        "character": summary.get("character") or "",
+        "through_step": max(done),
+    }
+
+
 #: 状態の意味。UI で出すためのもので、判定には使いません。
 _STATUS_NOTE = {
     "queued": "worker の順番待ちです。worker が動いていないと進みません。",
@@ -324,8 +374,10 @@ def retry_step(job_id: str, step_number: int,
     if account is None:
         _authorise(x_analysis_token)
     _require_tables(conn)
-    if step_number not in jobs.STEP_NAMES:
-        raise HTTPException(400, detail="ステップ番号は 1〜4 です。")
+    names = jobs.steps_for(jobs.kind_of(conn, job_id))
+    if step_number not in names:
+        raise HTTPException(
+            400, detail=f"この分析のステップ番号は 1〜{max(names)} です。")
     job = jobs.get_job(conn, job_id)
     if job is None:
         raise HTTPException(404, detail="そのジョブはありません。")

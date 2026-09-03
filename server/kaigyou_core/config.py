@@ -220,6 +220,19 @@ def default_radius_m(category: str | None = None) -> int:
         return FALLBACK_RADIUS_M
 
 
+def competitors_config(category: str | None = None) -> dict[str, Any]:
+    """競合分析の語彙と予算（config/<業態>/competitors.yaml）。
+
+    **枠（STP と 4P）は業態を問わず同じで、中に入る語だけが違います。**
+    歯科なら「インプラント」、飲食なら「客単価」、学習塾なら「集団／個別」。
+    枠はスキーマに、語はここに。新しい業態は設定を足すだけで始められます。
+    """
+    try:
+        return load_yaml(business_file("competitors.yaml", category))
+    except ConfigNotFound:
+        return {}
+
+
 def positioning_config(category: str | None = None) -> dict[str, Any]:
     """地域の位置づけの軸・しきい値・地域タイプ（config/<業態>/positioning.yaml）。
 

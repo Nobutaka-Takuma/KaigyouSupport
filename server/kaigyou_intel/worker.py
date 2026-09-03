@@ -21,6 +21,8 @@ from kaigyou_intel import failures
 from kaigyou_intel import jobs
 from kaigyou_intel import report
 from kaigyou_intel.steps import (
+    comp1_survey,
+    comp2_summary,
     step1_features, step2_research, step3_demand, step4_report)
 
 #: 実装済みのステップ。ここに無い番号に来たら止めます。「未実装なので飛ばす」
@@ -38,6 +40,28 @@ RUNNERS: dict[int, Callable[[Any, str], Any]] = {
     3: step3_demand.run,
     4: step4_report.run,
 }
+
+#: 競合分析の段。**同じ「STEP1」でも、種類が違えば別の仕事です。**
+COMPETITOR_RUNNERS: dict[int, Callable[[Any, str], Any]] = {
+    1: comp1_survey.run,
+    2: comp2_summary.run,
+}
+
+#: 種類ごとの段の表。**モジュール属性を都度読み直します。**
+#: 表を辞書に畳んで持つと、RUNNERS を差し替えても畳んだ側は古い辞書を
+#: 指したままで、差し替えたつもりの段が動きません（テストが差し替えます）。
+_RUNNER_ATTR_BY_KIND = {"area": "RUNNERS", "competitors": "COMPETITOR_RUNNERS"}
+
+
+def runners_for(kind: str | None) -> dict[int, Callable[[Any, str], Any]]:
+    attr = _RUNNER_ATTR_BY_KIND.get(kind or jobs.DEFAULT_KIND, "RUNNERS")
+    return globals()[attr]
+
+
+def all_runner_steps() -> list[int]:
+    """種類をまたいだ、実装済みの段番号。"""
+    return sorted({n for kind in _RUNNER_ATTR_BY_KIND
+                   for n in runners_for(kind)})
 
 
 class StepNotImplemented(RuntimeError):
@@ -65,8 +89,22 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     if job is None:
         raise ValueError(f"job {job_id} が見つかりません")
 
+    kind = jobs.kind_of(conn, job_id)
+    # **段のプロンプトは種類ごとに違います。** 同じ「STEP1」でも、周辺一般は
+    # 商圏特徴抽出、競合分析は競合の調査です。伝え忘れると、黙って別の
+    # プロンプトが使われます。
+    #
+    # 抜けたら元に戻します。設定しっぱなしにすると、この段が終わったあとも
+    # 残り、次に来た別の種類のジョブが——`run_step` を通らない経路で——
+    # 前のジョブのプロンプト設定を読みます。
+    with llm.for_kind(kind):
+        return _run_step(conn, job, job_id, number, kind)
+
+
+def _run_step(conn: psycopg.Connection, job: Mapping[str, Any], job_id: str,
+              number: int, kind: str) -> dict[str, Any]:
     settings = llm.step_settings(number)
-    runner = RUNNERS.get(number)
+    runner = runners_for(kind).get(number)
     if runner is None:
         # 記録は残しません。未実装は「失敗」ではないからです。failed と書くと
         # 実行して壊れたように見えて、実装後に手で直さないと再開できません。
@@ -117,7 +155,7 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
         report.write_step_file(conn, job_id, number, payload, output)
     except OSError:
         pass
-    if number == max(RUNNERS):
+    if number == max(runners_for(kind)):
         # 最終段。レポートは Markdown にして保存します。免責とデータ時点は
         # ここで付けるので、LLM が書き忘れても落ちません。
         report.save(conn, job_id, output, job["base_data"])
@@ -137,6 +175,25 @@ def run_step(conn: psycopg.Connection, job_id: str, number: int) -> dict[str, An
     return output
 
 
+def _competitor_input(conn: psycopg.Connection, job: Mapping[str, Any],
+                      number: int) -> dict[str, Any]:
+    """競合分析の段に渡すもの（開発指示書 §1・§4）。
+
+    STEP1 は GIS が確定した競合一覧、STEP2 は**集計済み**の競争環境です。
+    数え上げは Python が済ませてあるので、LLM には数えさせません。
+    """
+    category = _business_type(job)
+    if number == 1:
+        return comp1_survey.build_input(job["base_data"], category)
+    if number == 2:
+        survey = jobs.step_output(conn, job["id"], 1)
+        if not survey:
+            raise StepNotImplemented(
+                "STEP1 の出力がありません。STEP2 は競合の調査結果を集計する段です。")
+        return comp2_summary.build_input(survey, category)
+    raise StepNotImplemented(f"競合分析に STEP{number} はありません。")
+
+
 def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
                 number: int) -> dict[str, Any]:
     """そのステップに渡すものを組み立てる。
@@ -144,6 +201,9 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
     前のステップの出力が要るものは DB から読みます。worker が記憶を持たない
     ようにしてあるので、途中で落ちても続きから拾えます。
     """
+    kind = job.get("analysis_kind") or jobs.DEFAULT_KIND
+    if kind == "competitors":
+        return _competitor_input(conn, job, number)
     if number == 1:
         return step1_features.build_input(job["base_data"])
     if number == 2:
@@ -411,7 +471,8 @@ def serve(connect: Callable[[], psycopg.Connection], *, once: bool = False,
         # 未実装で止まっていた Job を、実装済みになっていれば拾い直します。
         # 「実装したあとにどのジョブを再開するか」を人が覚えている必要は
         # 無いはずです。
-        resumed = jobs.requeue_unblocked(conn, RUNNERS)
+        # 種類をまたいで、実装済みの段番号すべて。
+        resumed = jobs.requeue_unblocked(conn, all_runner_steps())
     if resumed:
         say(f"未実装で止まっていたジョブ {resumed} 件を再開します。")
 
