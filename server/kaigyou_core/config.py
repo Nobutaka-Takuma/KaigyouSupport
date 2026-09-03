@@ -198,6 +198,28 @@ def insights_config(category: str | None = None) -> dict[str, Any]:
         return {}
 
 
+#: 商圏半径の既定。**config/<業態>/insights.yaml の catchment に無いときだけ。**
+#:
+#: 500m にしています。1km の円は 3.14km² で、駅から 800m 離れた候補地を中心に
+#: 置いても駅も駅前商店街も飲み込みます。歯科医院のような小規模事業では、
+#: 出てくるのが「その一帯の分析」になり、**候補地を 300m 動かしても同じ結論**
+#: が出ます。
+FALLBACK_RADIUS_M = 500
+
+
+def default_radius_m(category: str | None = None) -> int:
+    """その業態の既定の商圏半径。
+
+    **業態ごとに違います。** 歯科医院は徒歩とママチャリで来る範囲が主戦場
+    ですが、総合病院や大型店は桁が違います。コードに定数を置きません。
+    """
+    catchment = (insights_config(category).get("catchment") or {})
+    try:
+        return int(catchment.get("default_radius_m") or FALLBACK_RADIUS_M)
+    except (TypeError, ValueError):
+        return FALLBACK_RADIUS_M
+
+
 def positioning_config(category: str | None = None) -> dict[str, Any]:
     """地域の位置づけの軸・しきい値・地域タイプ（config/<業態>/positioning.yaml）。
 

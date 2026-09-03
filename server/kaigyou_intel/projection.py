@@ -147,6 +147,35 @@ def _citable(dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     competition = dataset.get("competition") or {}
 
+    # --- 候補地そのもの：駅前か、密集の中心か -------------------------------
+    #
+    # **円を大きくすれば消える話と、消えない話を分けるところです。**
+    # 半径1km の円は 3.14km²。駅から 800m の候補地を中心に置いても、円は駅も
+    # 駅前商店街も飲み込みます。「その一帯の分析」になり、候補地を 300m
+    # 動かしても同じ結論が出ます。
+    station = (dataset.get("access") or {}).get("nearest_station") or {}
+    band = station.get("band") or {}
+    if band.get("label"):
+        add("access.station_band", "駅からの距離の区分", band["label"], "", "access",
+            "国土数値情報 S12 と候補地の座標",
+            note=(f"最寄り駅まで {band.get('distance_m')}m"
+                  f"（徒歩約{band.get('walk_minutes')}分）。{band.get('note') or ''}"
+                  "　**この区分は距離から機械的に決めています。**"))
+
+    site_shape = dataset.get("site") or {}
+    for key, label in (("population", "人口"), ("dental_clinics", "歯科医院数"),
+                       ("workers", "従業者数")):
+        conc = (site_shape.get("concentration") or {}).get(key) or {}
+        if conc.get("index") is None:
+            continue
+        add(f"site.concentration.{key}", f"{label}の集中度（足元 ÷ 一様なら）",
+            conc["index"], "倍", "residents" if key != "dental_clinics" else "competition",
+            "商圏の集計（内側の円と外側の円の突き合わせ）",
+            note=(f"半径{conc['inner_radius_m']}m に {conc['inner']:,.0f}、"
+                  f"半径{conc['outer_radius_m']}m に {conc['outer']:,.0f}。"
+                  f"割合 {conc['share']:.1%}（一様なら {conc['share_if_even']:.0%}）。"
+                  f"{conc.get('reading') or ''}"))
+
     # --- 立地：駅から見てどちら側か ---------------------------------------
     # **「南口か北口か」はここで決まります。** 駅の座標も候補地の座標も
     # 手元にあるので、方位は引き算で出ます。実測（沼津駅）のレポートは
@@ -406,6 +435,8 @@ def for_step1(dataset: Mapping[str, Any],
         # 軸・ギャップ・地域タイプ・比較母集団・評価ロジックの版まで含みます。
         # LLM はこれを解釈します。作りません。
         "positioning": dataset.get("positioning"),
+        # 候補地そのものの性質（駅からの距離の区分・足元と周りの比較）。
+        "site": dataset.get("site"),
         # 組み合わせと「何が確認できていないか」だけ。成分の値は measures に
         # 既にあるので再掲しません（再掲すると 11.7KB が 1.4KB で済むところを
         # 使い、しかも同じ数字が 2 か所にある状態で読ませることになります）。

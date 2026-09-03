@@ -78,6 +78,7 @@ def to_markdown(output: Mapping[str, Any], dataset: Mapping[str, Any],
     # **GIS が計算した位置づけ。LLM が書いた文章ではありません。**
     # 本文より前に置きます——読み手が本文を「どの数字の上に立った文章か」を
     # 知った状態で読めるように（指示書 §14・§16）。
+    lines += _site_block(dataset)
     lines += _positioning_block(dataset)
 
     lines += _coverage_block(inquiry, sources)
@@ -132,6 +133,72 @@ def _misreading_block(dataset: Mapping[str, Any]) -> list[str]:
 #
 # 指示書 §14・§16。ランキング → 評価 → 地域の特徴、そして**なぜその評価に
 # なったのかを必ず確認できる**こと。
+
+def _site_block(dataset: Mapping[str, Any]) -> list[str]:
+    """候補地**そのもの**について言えること。**円を大きくすれば消える話と、
+    消えない話を分けます。**
+
+    実測：沼津駅の南南西 810m（徒歩10分）の候補地を半径1km で分析すると、
+    円は駅も駅前商店街も飲み込みます。出てくるのは「その地点の分析」ではなく
+    「その一帯の分析」で、候補地を 300m 動かしても同じ結論が出ます。
+    """
+    site = dataset.get("site") or {}
+    station = ((dataset.get("access") or {}).get("nearest_station") or {})
+    band = station.get("band") or {}
+    concentration = {k: v for k, v in (site.get("concentration") or {}).items() if v}
+    if not band and not concentration:
+        return []
+
+    lines = ["## この候補地そのものについて", "",
+             "**この節も生成された文章ではありません。**距離と割り算です。", ""]
+
+    if band:
+        where = station.get("direction") or {}
+        lines += [
+            f"- **{band['label']}**　最寄り駅（{station.get('name') or '不明'}）"
+            f"まで {band.get('distance_m'):,}m、徒歩約 {band.get('walk_minutes')} 分"
+            + (f"。駅から見て{where.get('compass')}" if where.get("compass") else ""),
+            f"  　{band.get('note') or ''}",
+            "", "**この区分は距離から機械的に決めています。**"
+            "「駅前」と呼べるかどうかを、文章の印象で決めていません。", ""]
+
+    if concentration:
+        lines += _concentration_lines(concentration, site)
+    if site.get("resolution_note"):
+        lines += [f"**解像度についての注意**　{site['resolution_note']}", ""]
+    return lines
+
+
+def _concentration_lines(concentration: Mapping[str, Any],
+                         site: Mapping[str, Any]) -> list[str]:
+    """足元と、その周り。
+
+    **半径をどちらか一方にするだけでは出ない話です。** 2 つの円を突き合わせて
+    初めて「その一帯の話」と「その地点の話」が分かれます。
+    """
+    labels = {"population": "人口", "dental_clinics": "歯科医院数",
+              "workers": "従業者数"}
+    inner = site.get("radius_m")
+    outer = site.get("compare_radius_m")
+    rows = []
+    for key, conc in concentration.items():
+        rows.append([
+            labels.get(key, key),
+            f"{conc['inner']:,.0f}", f"{conc['outer']:,.0f}",
+            f"{conc['share']:.1%}", f"{conc['index']:.2f}",
+        ])
+    return (["### 足元と、その周り", "",
+             f"半径 {inner}m（商圏）と半径 {outer}m を突き合わせたものです。"
+             f"人が一様に分布していれば、内側には外側の "
+             f"**{(float(inner) / float(outer)) ** 2:.0%}** が入るはずです。", ""]
+            + _table([f"", f"半径{inner}m", f"半径{outer}m", "割合", "集中度"], rows)
+            + [""]
+            + [f"- **{labels.get(k, k)}**：{v['reading']}"
+               for k, v in concentration.items() if v.get("reading")]
+            + ["", "**集中度が 1.00 なら、円を大きくしても小さくしても同じ話に"
+               "なります。** 1.00 から離れているものだけが、候補地そのものの"
+               "性質です。", ""])
+
 
 def _positioning_block(dataset: Mapping[str, Any]) -> list[str]:
     """周囲と比べてどんな場所か。**計算された値だけ。**

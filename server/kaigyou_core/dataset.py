@@ -41,6 +41,7 @@ import psycopg
 
 from kaigyou_core import provenance as prov
 from kaigyou_core.positioning import build as positioning_of
+from kaigyou_core import site
 from kaigyou_core.analysis import (
     DEFAULT_CATCHMENT,
     DEFAULT_CATEGORY,
@@ -940,6 +941,62 @@ def _bearing(from_lat: float, from_lng: float,
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def _site_shape(conn, lat: float, lng: float, radius_m: int, catchment: str,
+                insights_config: Mapping[str, Any], mesh_size_m: int | None,
+                category: str, prefecture_code: str,
+                profile: str | None) -> dict[str, Any]:
+    """候補地そのものの性質。**円を大きくすれば消える話と、消えない話を分ける。**
+
+    実測：沼津駅の南南西 810m の候補地を半径1km で分析すると、円は駅も駅前
+    商店街も飲み込みます。出てくるのは「その地点の分析」ではなく「その一帯の
+    分析」で、**候補地を 300m 動かしても同じ結論が出ます。**
+
+    ここでは、内側の円と外側の円を突き合わせます。人が一様に住んでいれば、
+    内側には面積比のぶんだけ入っているはずで、そこからのずれが**その地点
+    そのものの性質**です。半径をどちらか一方にするだけでは出ません。
+    """
+    settings = insights_config.get("catchment") or {}
+    outer_m = int(settings.get("compare_radius_m") or 0)
+    out: dict[str, Any] = {
+        "radius_m": radius_m,
+        "compare_radius_m": outer_m or None,
+        "mesh_size_m": mesh_size_m,
+        # 商圏がメッシュより小さいときの注意。**黙って出すと、細かい半径を
+        # 指定したぶんだけ精密になったように見えます。**
+        "resolution_note": site.resolution_warning(radius_m, mesh_size_m),
+    }
+    # 外側の円が内側より大きいときだけ意味があります。等しい・小さいなら
+    # 比べる相手になりません。
+    if not outer_m or outer_m <= radius_m:
+        out["concentration"] = None
+        out["note"] = ("外側の円（比較用）が商圏半径以下のため、"
+                       "足元と周りの比較は算出していません。")
+        return out
+    try:
+        inner = analyze_point(conn, lat, lng, radius_m, catchment=catchment,
+                              facility_category=category,
+                              mesh_size_m=mesh_size_m)
+        outer = analyze_point(conn, lat, lng, outer_m, catchment=catchment,
+                              facility_category=category,
+                              mesh_size_m=mesh_size_m)
+    except Exception:  # noqa: BLE001 - 付随の指標。本体を落としません
+        out["concentration"] = None
+        out["note"] = "足元と周りの比較を算出できませんでした。"
+        return out
+    out["concentration"] = {
+        key: site.concentration(inner.get(metric), outer.get(metric),
+                                radius_m, outer_m)
+        for key, metric in (("population", "population"),
+                            ("dental_clinics", "facility_count"),
+                            ("workers", "workers"))
+    }
+    out["note"] = ("内側は商圏そのもの、外側は比較用の円です。**割合が"
+                   "「一様ならこうなる」より大きければ、候補地そのものが"
+                   "密集の中心にいます。** 小さければ、密集は円の中の"
+                   "どこか別のところです。")
+    return out
+
+
 def _direction_from_station(conn: psycopg.Connection, lat: float, lng: float,
                             name: str | None) -> dict[str, Any] | None:
     """最寄り駅から見て、候補地はどちらの方角か。
@@ -1706,6 +1763,10 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
     # **ここが「GIS が確定する Fact」の要です。** percentile どうしの引き算を
     # LLM にやらせると解釈になり、ここでやれば Fact になります（指示書 §7・§17）。
     positioning = positioning_of(measures, cfg.positioning_config(category))
+    # 候補地の足元と、その周り。**「その一帯の話」と「その地点の話」を分けます。**
+    site_shape = _site_shape(conn, lat, lng, radius_m, catchment,
+                             insights_config, mesh_size_m, category,
+                             prefecture_code, profile)
 
     tables = ["population_mesh", "mesh_business", "facilities", "stations",
               # 都市計画が未取得の県では「建てられるか」を判定できません。
@@ -1792,6 +1853,9 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         # 地域の位置づけ。**単なる数字ではなく、「周囲と比べてどんな場所か」。**
         # LLM はこれを引用します（作りません）。
         "positioning": positioning,
+        # 候補地そのものの性質。**円を大きくすれば消える話と、消えない話を
+        # 分けるところです。**
+        "site": site_shape,
         "insight_metrics": insights,
         "demand": {
             # A total hides its own shape; this is how the residents are laid
@@ -1868,6 +1932,13 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
                 # 駅のどちら側か。**「南口か北口か」はここで決まります。**
                 "direction": _direction_from_station(
                     conn, lat, lng, metrics.get("nearest_station")),
+                # **駅前かどうかは、ここで決まります。** 距離は測ってあるので、
+                # 呼び方をモデルの読み取りに任せません。実測：沼津駅の南南西
+                # 810m（徒歩10分）の候補地が「駅前」として分析されていました。
+                "band": site.station_band(
+                    metrics.get("station_distance_m"),
+                    (insights_config.get("catchment") or {}).get("station_bands")
+                    or []),
             },
             "stations_in_radius": _stations(conn, lat, lng, radius_m),
         },

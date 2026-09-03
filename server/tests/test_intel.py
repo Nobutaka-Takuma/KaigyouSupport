@@ -6862,3 +6862,143 @@ def test_every_schema_we_send_stays_small_enough():
     assert not too_big, (
         f"構造化出力のスキーマが大きすぎます: {too_big}。"
         "欄を減らすか、呼び出しを分けてください（上限を上げないこと）")
+
+
+# ======================================= 候補地そのものを見る（一帯ではなく）
+#
+# 実測：沼津駅の南南西 810m（徒歩10分）の候補地が「駅前」として分析されて
+# いました。半径1km の円は 3.14km²。駅から 800m 離れた地点を中心に置いても、
+# 円は駅も駅前商店街も飲み込みます。**候補地を 300m 動かしても同じ結論が
+# 出ます。**
+
+def test_a_ten_minute_walk_is_not_the_station_front():
+    """**距離は測ってあります。呼び方をモデルの読み取りに任せません。**"""
+    from kaigyou_core import config as cfg
+    from kaigyou_core.site import station_band
+
+    bands = cfg.insights_config("dental_clinic")["catchment"]["station_bands"]
+    assert station_band(810, bands)["label"] == "駅徒歩圏"
+    assert station_band(120, bands)["label"] == "駅前"
+    assert station_band(380, bands)["label"] == "駅近"
+    # 徒歩の分数も出すこと。810m を「駅前」と読むのは、分数を見れば起きません。
+    assert station_band(810, bands)["walk_minutes"] == 10
+    # 測れていなければ None。**「駅から遠い」ではありません。**
+    assert station_band(None, bands) is None
+
+
+def test_the_model_cannot_call_a_place_the_station_front():
+    """立地類型の選択肢から「駅前」を外したこと。
+
+    駅前かどうかは距離で決まります。類型が答えるのは「どんな性格の場所か」で、
+    それは距離とは別のことです——駅から 200m の住宅地の路面もあります。
+    """
+    from kaigyou_intel.schemas import Surroundings
+
+    choices = Surroundings.model_json_schema()["properties"]["setting"]["enum"]
+    assert "駅前" not in choices, choices
+    assert "住宅地の路面" in choices
+    # プロンプトでも、そう言っていること。
+    assert "「駅前」という選択肢はありません" in cfg.prompt_text(
+        "step1_surroundings.md")
+
+
+def test_the_point_is_told_apart_from_the_area_around_it():
+    """**半径をどちらか一方にするだけでは出ない話です。**
+
+    2 つの円を突き合わせて初めて「その一帯の話」と「その地点の話」が
+    分かれます。
+    """
+    from kaigyou_core.site import concentration
+
+    # 一様なら、内側は面積比（25%）ちょうど。
+    even = concentration(250, 1000, 500, 1000)
+    assert even["share_if_even"] == 0.25
+    assert even["index"] == 1.0
+    assert "ほぼ一様" in even["reading"]
+
+    # 足元に寄っている。
+    dense = concentration(500, 1000, 500, 1000)
+    assert dense["index"] == 2.0
+    assert "密集の中心" in dense["reading"]
+
+    # 密集はどこかにあるが、足元ではない。**これが 1km 円だと消えます。**
+    thin = concentration(100, 1000, 500, 1000)
+    assert thin["index"] == 0.4
+    assert "候補地の足元ではありません" in thin["reading"]
+
+    # 外側が 0 なら語りません。0 で割らないためだけでなく、意味の上でも。
+    assert concentration(0, 0, 500, 1000) is None
+
+
+def test_a_catchment_smaller_than_the_mesh_says_so():
+    """**細かい半径を指定したぶんだけ精密になったように見せない。**
+
+    値は面積按分で出ますが、それは「メッシュの中では人が一様に住んでいる」と
+    仮定した数字です。半分が公園のメッシュでは、その仮定は外れます。
+    """
+    from kaigyou_core.site import resolution_warning
+
+    assert resolution_warning(500, 1000), "1kmメッシュで半径500mを測っている"
+    # メッシュに見合った半径なら黙っている（半径1km／1kmメッシュと同じ比）。
+    assert resolution_warning(500, 500) is None
+    assert resolution_warning(1000, 1000) is None
+
+
+def test_the_default_catchment_comes_from_the_business_type():
+    """**業態ごとに違います。** 歯科と総合病院で商圏の広さは桁が違います。"""
+    from kaigyou_core import config as cfg
+
+    assert cfg.default_radius_m("dental_clinic") == 500
+    # 設定の無い業態でも落ちないこと（コードの既定に落ちる）。
+    assert cfg.default_radius_m("そんな業態はない") == cfg.FALLBACK_RADIUS_M
+
+
+def test_the_dataset_carries_the_site_as_a_fact(conn):
+    """引用できる形になっていること。**引用できない数字は言い直すしかない。**"""
+    from kaigyou_core.dataset import build_dataset
+    from kaigyou_intel.projection import citable_keys, for_step1
+
+    dataset = build_dataset(conn, 35.7083, 139.6875, 500, mesh_size_m=500)
+    payload = for_step1(dataset, {})
+    keys = citable_keys(payload)
+    assert "access.station_band" in keys
+    assert any(k.startswith("site.concentration.") for k in keys), sorted(keys)[:8]
+    # 集中度は「一様ならこうなる」と一緒に。**読み手が自分で確かめられる形で。**
+    note = next(c["note"] for c in payload["citable"]
+                if c["key"].startswith("site.concentration."))
+    assert "一様なら" in note
+
+
+def test_the_report_separates_the_point_from_the_area(dataset):
+    """**円を大きくすれば消える話と、消えない話を分ける。**"""
+    from kaigyou_intel.report import to_markdown
+
+    with_site = dict(dataset)
+    with_site["access"] = {**(dataset.get("access") or {}), "nearest_station": {
+        "name": "沼津駅", "distance_m": 810,
+        "direction": {"compass": "南南西"},
+        "band": {"label": "駅徒歩圏", "note": "徒歩12分まで。駅は使えるが、駅前ではない",
+                 "distance_m": 810, "walk_minutes": 10, "within_m": 1000}}}
+    with_site["site"] = {
+        "radius_m": 500, "compare_radius_m": 1000, "mesh_size_m": 500,
+        "resolution_note": None,
+        "concentration": {
+            "population": {"inner_radius_m": 500, "outer_radius_m": 1000,
+                           "inner": 3000.0, "outer": 20000.0, "share": 0.15,
+                           "share_if_even": 0.25, "index": 0.6,
+                           "reading": "密集は商圏のどこかにありますが、"
+                                      "**候補地の足元ではありません。**"}}}
+    markdown = to_markdown({"title": "t", "summary": "s", "sections": [],
+                            "executive_summary": "e"}, to_jsonable(with_site))
+
+    assert "## この候補地そのものについて" in markdown
+    assert "駅徒歩圏" in markdown and "徒歩約 10 分" in markdown
+    # **810m を「駅前」として通さないこと。** 区分は距離から決まっています。
+    head = markdown.split("## この地域はどんな場所か")[0]
+    assert "- **駅徒歩圏**" in head
+    assert "- **駅前**" not in head
+    # 足元と周りの突き合わせが表として出ること。
+    assert "候補地の足元ではありません" in markdown
+    assert "1.00 から離れているものだけ" in markdown
+    # 本文（LLM）より前に置くこと。
+    assert markdown.index("## この候補地そのものについて") < markdown.index("## 結論")

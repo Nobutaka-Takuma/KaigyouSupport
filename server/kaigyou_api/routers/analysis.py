@@ -283,7 +283,7 @@ def _round(value: Any, digits: int = 0) -> Any:
 def candidate_analysis(
     lat: float = Query(..., ge=-90, le=90),
     lng: float = Query(..., ge=-180, le=180),
-    radius: int = Query(1000, ge=100, le=10000, description="商圏半径（m）"),
+    radius: int | None = Query(None, ge=100, le=10000, description="商圏半径（m）"),
     all_radii: bool = Query(True, description="設定済みの全半径について人口・競合も返す"),
     category: str = Query(DEFAULT_CATEGORY),
     mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
@@ -294,6 +294,10 @@ def candidate_analysis(
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    # **省略時は業態の既定**（config/<業態>/insights.yaml の
+    # catchment.default_radius_m）。歯科は 500m です——半径1km の円は
+    # 3.14km² あり、駅から 800m の候補地を中心に置いても駅を飲み込みます。
+    radius = radius or cfg.default_radius_m(category)
     # The point decides, not the map's dropdown. Analysing a Chiyoda click
     # against Shizuoka's mesh resolution answers "no population here" for one
     # of the densest places in the country, and nothing on screen explains why.
@@ -363,7 +367,7 @@ def candidate_analysis(
 def dataset(
     lat: float = Query(..., ge=-90, le=90),
     lng: float = Query(..., ge=-180, le=180),
-    radius: int = Query(1000, ge=100, le=10000, description="商圏半径（m）"),
+    radius: int | None = Query(None, ge=100, le=10000, description="商圏半径（m）"),
     catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$"),
     category: str = Query(DEFAULT_CATEGORY),
     profile: str | None = Query(None, description="省略時は active_profile"),
@@ -386,6 +390,10 @@ def dataset(
     No model is called here. It returns the document; what reads it is the
     caller's business.
     """
+    # **省略時は業態の既定**（config/<業態>/insights.yaml の
+    # catchment.default_radius_m）。歯科は 500m です——半径1km の円は
+    # 3.14km² あり、駅から 800m の候補地を中心に置いても駅を飲み込みます。
+    radius = radius or cfg.default_radius_m(category)
     return build_dataset(
         conn, lat, lng, radius,
         catchment=catchment, category=category,
@@ -506,7 +514,7 @@ def rankings(
 @router.get("/compare", summary="複数候補地の比較（最大3地点）")
 def compare(
     points: str = Query(..., description="lat,lng をセミコロン区切りで最大3地点"),
-    radius: int = Query(1000, ge=100, le=10000),
+    radius: int | None = Query(None, ge=100, le=10000),
     labels: str | None = Query(None, description="地点名をセミコロン区切りで"),
     category: str = Query(DEFAULT_CATEGORY),
     mesh_size_m: int | None = Query(None, description="省略時は読み込み済みデータから自動判定"),
@@ -515,6 +523,10 @@ def compare(
     conn: psycopg.Connection = Depends(get_conn),
     model: ScoringModel = Depends(get_model),
 ) -> dict[str, Any]:
+    # **省略時は業態の既定**（config/<業態>/insights.yaml の
+    # catchment.default_radius_m）。歯科は 500m です——半径1km の円は
+    # 3.14km² あり、駅から 800m の候補地を中心に置いても駅を飲み込みます。
+    radius = radius or cfg.default_radius_m(category)
     mesh_size_m_requested = mesh_size_m
     parsed: list[tuple[float, float]] = []
     for chunk in points.split(";"):

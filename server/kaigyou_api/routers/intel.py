@@ -77,7 +77,7 @@ def _require_tables(conn: psycopg.Connection) -> None:
 def create_analysis(
     lat: float = Query(..., ge=-90, le=90),
     lng: float = Query(..., ge=-180, le=180),
-    radius: int = Query(1000, ge=100, le=10000),
+    radius: int | None = Query(None, ge=100, le=10000),
     catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$"),
     category: str = Query(DEFAULT_CATEGORY),
     location_name: str | None = Query(None, description="レポートに載せる地点名"),
@@ -96,6 +96,10 @@ def create_analysis(
 
     枠の確認は**始める前**です。走らせてから止めても API 費用は戻りません。
     """
+    # **省略時は業態の既定**（config/<業態>/insights.yaml の
+    # catchment.default_radius_m）。歯科は 500m です——半径1km の円は
+    # 3.14km² あり、駅から 800m の候補地を中心に置いても駅を飲み込みます。
+    radius = radius or cfg.default_radius_m(category)
     if account is None:
         # アカウント機能を使っていない環境（手元）。共有シークレットで守ります。
         _authorise(x_analysis_token)

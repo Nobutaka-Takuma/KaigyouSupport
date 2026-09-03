@@ -117,7 +117,11 @@ export function MapPage() {
 
   const [meta, setMeta] = useState<Meta | null>(null);
   const [profile, setProfile] = useState<string>("");
-  const [radius, setRadius] = useState(1000);
+  // 既定は 500m。**半径1km の円は 3.14km² あり、駅から 800m の候補地を中心に
+  // 置いても駅も駅前商店街も飲み込みます。** 歯科医院のような小規模事業では、
+  // 出てくるのが「その一帯の分析」になり、候補地を 300m 動かしても同じ結論が
+  // 出ます。1km は「比べる相手」として site.concentration に出ます。
+  const [radius, setRadius] = useState(500);
   const [meshMetric, setMeshMetric] = useState<MeshMetric>("overall_score");
   const [catchment, setCatchment] = useState<Catchment>("circle");
   const [showExport, setShowExport] = useState(false);
