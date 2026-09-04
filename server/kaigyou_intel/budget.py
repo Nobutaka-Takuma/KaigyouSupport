@@ -56,15 +56,24 @@ def estimate(category: str = DEFAULT_CATEGORY) -> dict[str, Any]:
 
 def _area(config: Mapping[str, Any], limits: Mapping[str, Any],
           category: str) -> dict[str, Any]:
-    """プレDD レポート。**LLM の呼び出しは 1 回だけです。**
+    """プレDD（第I部）＋ 開業提言（第II部）。
 
     1 段目（事実の確定）は DB のデータを数えるだけで API を叩きません。
-    数えるのは 2 段目の 1 回きりです。
+    2 段目が 1 回、3 段目が 2 回（調べる＋写す）です。
     """
     steps = config.get("steps") or {}
-    calls = {number: (0 if (step or {}).get("prompt") is None else 1)
-             for number, step in steps.items()}
-    return _rollup("周辺一般の分析（プレDD）", steps, calls, 0, config, category,
+    calls: dict[int, int] = {}
+    for number, step in steps.items():
+        if (step or {}).get("prompt") is None:
+            calls[number] = 0                     # LLM を呼ばない段
+        elif (step or {}).get("prompt_structure"):
+            calls[number] = 2                     # 調べる → 写す
+        else:
+            calls[number] = 1
+    searches = int(limits.get("advice_searches", 0)) \
+        + int(limits.get("advice_fetches", 0))
+    return _rollup("周辺一般の分析（プレDD＋提言）", steps, calls, searches,
+                   config, category,
                    detail="1 段目は DB を数えるだけ（API を叩きません）")
 
 

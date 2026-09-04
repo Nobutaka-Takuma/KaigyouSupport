@@ -23,6 +23,7 @@ from kaigyou_intel import report
 from kaigyou_intel.steps import (
     comp1_survey,
     comp2_summary,
+    advice_write,
     dd_facts,
     dd_write,
     step1_features, step2_research, step3_demand, step4_report)
@@ -39,6 +40,7 @@ from kaigyou_intel.steps import (
 RUNNERS: dict[int, Callable[[Any, str], Any]] = {
     1: dd_facts.run,
     2: dd_write.run,
+    3: advice_write.run,
 }
 
 #: 旧・4段の探索型。**消していません**——既定から外しただけです。
@@ -257,6 +259,14 @@ def build_input(conn: psycopg.Connection, job: Mapping[str, Any],
             raise StepNotImplemented(
                 "STEP1 の出力がありません。STEP2 は確定した事実を読む段です。")
         return dd_write.build_input(pack, _business_type(job))
+    if number == 3:
+        pack = jobs.step_output(conn, job["id"], 1)
+        if not pack:
+            raise StepNotImplemented(
+                "STEP1 の出力がありません。提言は確定した事実の上に立ちます。")
+        # 第I部の結論も渡します。**同じ地点で 2 つの文書が矛盾しないように。**
+        return advice_write.build_input(
+            pack, jobs.step_output(conn, job["id"], 2), _business_type(job))
     raise StepNotImplemented(f"STEP{number} の入力の作り方が未定義です")
 
 

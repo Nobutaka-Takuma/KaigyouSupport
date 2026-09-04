@@ -1446,9 +1446,15 @@ def _save_dd_report(conn: psycopg.Connection, job_id: str,
     if job_row and job_row.get("location_name"):
         pack["location"] = {**(pack.get("location") or {}),
                             "name": job_row["location_name"]}
+    # 最終段は提言（第II部）。第I部の散文は STEP2 に入っています。
+    written = _jobs_step_output(conn, job_id, 2) or output
+    advice = output if output is not written else None
     markdown = dd_report.to_markdown(
-        output, pack, sources, str(dataset.get("disclaimer") or ""))
-    return _store(conn, job_id, output, markdown)
+        written, pack, sources, str(dataset.get("disclaimer") or ""),
+        advice=advice)
+    # **両方を 1 つの JSON に。** 画面は片方だけを出すこともできます。
+    stored = {**dict(written), "advice": advice}
+    return _store(conn, job_id, stored, markdown)
 
 
 def _jobs_step_output(conn: psycopg.Connection, job_id: str,

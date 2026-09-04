@@ -141,3 +141,37 @@ further_dd:
     label: 承継の条件と売り手の事情
     why: 非公開です。売り時の推定はできても、事情は分かりません。
     how: 仲介経由のヒアリング
+
+# ---------------------------------------------------------------------------
+# 提言レポート（第II部）。
+#
+# **プレDD（第I部）とは目的が違います。**
+#
+#   第I部  この商圏は「どうなっているか」   …… 事実。推論しない
+#   第II部 ここで開業するなら「どうするか」 …… 推論する。仮説と明示する
+#
+# 分けているのは、混ぜると第I部が信用を失うからです。事実の文書に戦略提言が
+# 混ざると、読み手はどこまでが確定でどこからが提案なのか分からなくなります。
+# ---------------------------------------------------------------------------
+advice_chapters:
+  - {key: primary_patients,     title: 主要患者}
+  - {key: secondary_patients,   title: 準主要患者}
+  - {key: avoid_competing,      title: 積極的に競争すべきではない患者層}
+  - {key: primary_catchment,    title: 第1商圏}
+  - {key: secondary_catchment,  title: 第2商圏}
+  - {key: reason_to_visit,      title: 患者を引き込む理由}
+  - {key: clinic_model,         title: 推奨する医院モデル}
+  - {key: differentiation,      title: 差別化の方向性}
+  - {key: opening_risks,        title: 開業上の主要リスク}
+  - {key: before_opening,       title: 開業前に追加取得すべき情報}
+
+# 提言の根拠に付ける印。**どこまでが確定で、どこからが推測かを字面で分ける。**
+evidence_tags:
+  - {key: FACT,        label: 事実,       note: JSON または信頼できる外部資料に明記}
+  - {key: BENCHMARK,   label: 比較,       note: 平均・周辺地域との比較で意味づけした事実}
+  - {key: PATTERN,     label: パターン,   note: 複数の事実を組み合わせて見えた特徴}
+  - {key: WHY,         label: 背景,       note: 外部資料で裏づけた、または合理的に推測できる要因}
+  - {key: HYPOTHESIS,  label: 仮説,       note: 証拠が足りず、検証が必要}
+  - {key: INSIGHT,     label: 解釈,       note: 複数のデータから導かれる経営上の意味}
+  - {key: IMPLICATION, label: 示唆,       note: それが歯科医院経営に意味すること}
+  - {key: ACTION,      label: 行動,       note: 開業者が取るべき具体的な行動}

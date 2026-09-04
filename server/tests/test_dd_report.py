@@ -231,3 +231,178 @@ def test_further_dd_separates_what_can_never_be_known():
     section = markdown[markdown.index("## 9. 追加DD"):markdown.index("## 10.")]
     assert "公開情報に無い" in section
     assert "売上・利益・患者数" in section
+
+
+# ===================================================== 第II部（開業提言）
+#
+# **第I部と第II部は目的が違います。**
+#
+#     第I部  この商圏は「どうなっているか」   …… 事実。推論しない
+#     第II部 ここで開業するなら「どうするか」 …… 推論する。仮説と明示する
+#
+# 分けているのは、混ぜると第I部が信用を失うからです。事実の文書に戦略提言が
+# 混ざると、読み手はどこまでが確定でどこからが提案なのか分からなくなります。
+
+def _advice() -> dict:
+    return {
+        "title": "開業提言",
+        "reasoning": [
+            {"tag": "FACT", "statement": "商圏人口は厚い。", "source": "国勢調査2020"},
+            {"tag": "PATTERN", "statement": "人口集積と供給過密が同時に立つ。",
+             "source": ""},
+            {"tag": "WHY", "statement": "旧市街の住宅地形成による可能性。",
+             "source": "https://city.example/"},
+            {"tag": "INSIGHT", "statement": "量ではなく質で選ばれる商圏。", "source": ""},
+            {"tag": "ACTION", "statement": "予防とリコールの仕組みを開業時から。",
+             "source": ""},
+        ],
+        "segments": [
+            {"role": "primary", "label": "子育て世帯",
+             "basis": "年少人口比＋世帯あたり人員", "why": "住宅地形成",
+             "caution": "開発が一巡していれば減る"},
+            {"role": "avoid", "label": "自費矯正の専門層",
+             "basis": "周辺に専門医院＋価格競争", "why": "既存医院が確立",
+             "caution": "実際の症例数は未確認"},
+        ],
+        "catchments": [{"rank": "primary", "extent": "徒歩圏 500m と生活動線",
+                        "basis": "メッシュ人口の偏り", "expectation": "かかりつけ"}],
+        "reason_to_visit": "待ち時間の短さ。",
+        "clinic_model": "ユニット4台、土曜診療。",
+        "differentiation": "予防中心のリコール設計。",
+        "opening_risks": ["供給過密による新患獲得の遅れ"],
+        "before_opening": ["各院のユニット数と待ち時間"],
+        "information_gaps": "周辺医院の中身は 1 件も調べていません。",
+    }
+
+
+def test_one_run_produces_both_reports():
+    """**ボタン 1 つで 2 部。** 章立てはどちらも設定が決めます。"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    markdown = dd_report.to_markdown(_written(), pack, [], "免責", advice=_advice())
+
+    assert "# 第I部　商圏プレDD" in markdown
+    assert "# 第II部　開業提言" in markdown
+    assert markdown.index("第I部") < markdown.index("第II部")
+
+    titles = [c["title"] for c in cfg.dd_config("dental_clinic")["advice_chapters"]]
+    assert len(titles) == 10
+    tail = markdown[markdown.index("# 第II部"):]
+    for index, title in enumerate(titles, start=1):
+        assert f"## {index}. {title}" in tail, title
+
+
+def test_the_reader_is_told_which_part_reasons():
+    """**どこまでが事実で、どこからが提案か。** 混ぜると第I部が信用を失います。"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    markdown = dd_report.to_markdown(_written(), pack, [], "", advice=_advice())
+    assert "推論" in markdown[:markdown.index("# 第I部")]
+    assert "**ここからは推論です。**" in markdown[markdown.index("# 第II部"):]
+
+
+def test_the_reasoning_chain_is_shown_with_its_tags():
+    """FACT → … → ACTION を、印つきで残すこと。"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    markdown = dd_report.to_markdown(_written(), pack, [], "", advice=_advice())
+    appendix = markdown[markdown.index("## 付録：この提言に至った筋道"):]
+    for tag in ("FACT", "PATTERN", "WHY", "INSIGHT", "ACTION"):
+        assert f"`{tag}`" in appendix, tag
+    assert "https://city.example/" in appendix, "WHY の出典が消えています"
+
+
+def test_a_layer_with_no_basis_says_so_instead_of_inventing_one():
+    """挙げられなかった層は、**空欄ではなく「挙げられていない」と書く。**"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    thin = {**_advice(), "segments": [s for s in _advice()["segments"]
+                                      if s["role"] == "primary"]}
+    markdown = dd_report.to_markdown(_written(), pack, [], "", advice=thin)
+    section = markdown[markdown.index("## 2. 準主要患者"):markdown.index("## 3. 積極的")]
+    assert "挙げられていません" in section
+
+
+# ------------------------------------------------- 情報不足を機会と読み替えない
+def _payload(surveyed: int) -> dict:
+    return {"facts": {"competition": {"surveyed_count": surveyed}}}
+
+
+def test_calling_the_competition_weak_without_looking_is_rejected():
+    """**いちばん起きやすい壊れ方です。**
+
+    競合の中身を 1 件も見ていないのに「競合が少ない」と書くと、情報不足が
+    そのまま機会に化けます。指示書が名指しで禁じている失敗です。
+    """
+    from kaigyou_intel.steps.advice_write import _verify
+
+    report = {**_advice(),
+              "differentiation": "周辺は競合が少ないため、予防で差別化できる。"}
+    problems = _verify(report, _payload(0))
+    assert any("競合が少な" in p for p in problems), problems
+
+    # 中身を調べたうえでの記述なら通ること。
+    assert not any("競合が少な" in p for p in _verify(report, _payload(3)))
+
+
+def test_not_looking_at_all_must_be_stated_as_a_gap():
+    """調べていないなら、**調べていないと書くこと。**"""
+    from kaigyou_intel.steps.advice_write import _verify
+
+    silent = {**_advice(), "information_gaps": ""}
+    assert any("information_gaps" in p for p in _verify(silent, _payload(0)))
+    assert not [p for p in _verify(_advice(), _payload(0))
+                if "information_gaps" in p]
+
+
+def test_the_advice_must_reach_an_action():
+    """**示唆で終わらせない。** 開業者が何をするかまで書くのが提言です。"""
+    from kaigyou_intel.steps.advice_write import _verify
+
+    stops_short = {**_advice(),
+                   "reasoning": [s for s in _advice()["reasoning"]
+                                 if s["tag"] != "ACTION"]}
+    assert any("ACTION" in p for p in _verify(stops_short, _payload(3)))
+
+
+def test_the_segments_and_the_first_catchment_are_required():
+    """主要患者・競争しない層・第1商圏は、提言の骨格です。"""
+    from kaigyou_intel.steps.advice_write import _verify
+
+    assert _verify(_advice(), _payload(3)) == []
+    no_avoid = {**_advice(),
+                "segments": [s for s in _advice()["segments"]
+                             if s["role"] != "avoid"]}
+    assert any("競争すべきでない層" in p for p in _verify(no_avoid, _payload(3)))
+    no_ring = {**_advice(), "catchments": []}
+    assert any("第1商圏" in p for p in _verify(no_ring, _payload(3)))
+
+
+def test_the_advice_schema_stays_simple_enough_to_compile():
+    """スキーマは平らに保つこと。**実測で `Schema is too complex.` を踏んでいます。**"""
+    import json
+
+    from kaigyou_intel.schemas import AdviceReport
+
+    def shape(node, depth=0):
+        arrays = unions = 0
+        deepest = depth
+        if isinstance(node, dict):
+            if node.get("type") == "array":
+                arrays += 1
+            if "anyOf" in node or "oneOf" in node:
+                unions += 1
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            return arrays, unions, deepest
+        for child in children:
+            a, u, d = shape(child, depth + 1)
+            arrays += a
+            unions += u
+            deepest = max(deepest, d)
+        return arrays, unions, deepest
+
+    schema = AdviceReport.model_json_schema()
+    arrays, unions, depth = shape(schema)
+    # 落ちたときの CompetitorSurvey は 配列 8・union 2・深さ 7 でした。
+    assert arrays < 8 and unions == 0 and depth <= 7, \
+        f"配列 {arrays} / union {unions} / 深さ {depth}"
+    assert len(json.dumps(schema, ensure_ascii=False)) < 5_200

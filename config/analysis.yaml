@@ -171,6 +171,10 @@ limits:
   # なお、**新しい外部事実が 1 件も増えなかった周の次は走りません。**
   # 同じ問いに同じ「公表されていない」が返ってくるだけで、増えるのは費用と
   # 時間だけです。3 にしても、2 周目が空振りならそこで止まります。
+  # 提言レポート（第II部）が仮説検証に使う回数。**0 で検索を止められます。**
+  advice_searches: 3
+  advice_fetches: 2
+
   research_rounds: 2
 
   # 2 周目に使ってよい検索回数。**1 周目より少なくします。**
@@ -367,13 +371,27 @@ steps:
     prompt_version: dd-facts-v1.0
     web_search: false
   2:
-    name: レポート執筆
+    name: プレDDレポート執筆
     prompt: dd_write.md
     prompt_version: dd-write-v1.0
     # 事実は確定済みで、ここでやるのは意味づけです。深く考えるより、渡した
     # 事実から離れないことのほうが効きます。
     effort: medium
     web_search: false
+  3:
+    name: 提言レポート執筆
+    # **ここだけが推論する段です。** 第I部（プレDD）は事実だけ、第II部は
+    # 「ここで開業するならどうするか」。混ぜると第I部が信用を失います。
+    #
+    # 2 回に分かれます。1 回目で STEP1〜7 を考えながら外部コンテクストを
+    # 探し（検索あり）、2 回目で 10 章のスキーマへ写します（検索なし）。
+    prompt: advice_research.md
+    prompt_structure: advice_structure.md
+    prompt_version: advice-v1.0
+    # 需要形成の筋道を組み立てる段なので、ここは削りません。
+    effort: high
+    effort_structure: low
+    web_search: true
 
 # ---------------------------------------------------------------------------
 # 旧・4段の探索型パイプライン（analysis_kind = research）。

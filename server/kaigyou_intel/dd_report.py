@@ -26,7 +26,8 @@ SEVERITY_LABEL = {"high": "高", "medium": "中", "low": "低"}
 
 def to_markdown(report: Mapping[str, Any], pack: Mapping[str, Any],
                 sources: Sequence[Mapping[str, Any]] = (),
-                disclaimer: str = "") -> str:
+                disclaimer: str = "",
+                advice: Mapping[str, Any] | None = None) -> str:
     """レポート 1 本ぶん。章の順番は設定（dd.yaml の chapters）が決めます。"""
     place = pack.get("location") or {}
     takeaway = {t.get("chapter"): t.get("takeaway")
@@ -43,6 +44,18 @@ def to_markdown(report: Mapping[str, Any], pack: Mapping[str, Any],
     lines += ["この文書は、**これから開業する人の事前調査**と、**既存医院を買う人の"
               "初期デューデリジェンス**の両方に使えるように書いてあります。"
               "第10章の総合評価は、その 2 つを分けて記しています。", ""]
+    if advice:
+        lines += ["**2 部構成です。**", "",
+                  "| | 何を書いてあるか | 推論 |",
+                  "|---|---|---|",
+                  "| 第I部 商圏プレDD | この商圏が**どうなっているか**。"
+                  "数字はすべてデータベースの値 | しない |",
+                  "| 第II部 開業提言 | ここで開業するなら**どうするか** | する |",
+                  "",
+                  "**分けてあるのは、混ぜると第I部が信用を失うから**です。"
+                  "事実の文書に戦略提言が混ざると、読み手はどこまでが確定で"
+                  "どこからが提案なのか分からなくなります。", ""]
+        lines += ["---", "", "# 第I部　商圏プレDD", ""]
 
     body = {
         "summary": lambda: _summary(report),
@@ -67,10 +80,107 @@ def to_markdown(report: Mapping[str, Any], pack: Mapping[str, Any],
             lines += [f"> {takeaway[key]}", ""]
         lines += render()
 
+    if advice:
+        lines += _advice(advice, pack)
     lines += _sources_block(sources)
     if disclaimer:
         lines += ["## 免責", "", disclaimer, ""]
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ------------------------------------------------------- 第II部（提言）
+#: 推論の印。**確定と推測を字面で分けるため**に強調の付け方を変えています。
+_TAG_LABEL = {
+    "FACT": "事実", "BENCHMARK": "比較", "PATTERN": "パターン",
+    "WHY": "背景", "HYPOTHESIS": "**仮説**", "INSIGHT": "解釈",
+    "IMPLICATION": "示唆", "ACTION": "**行動**",
+}
+
+_ROLE_CHAPTER = {"primary": "primary_patients", "secondary": "secondary_patients",
+                 "avoid": "avoid_competing"}
+
+
+def _advice(advice: Mapping[str, Any], pack: Mapping[str, Any]) -> list[str]:
+    """開業提言。**ここは推論です。** 第I部と字面で分けます。"""
+    from kaigyou_core import config as cfg
+
+    chapters = cfg.dd_config().get("advice_chapters") or []
+    heading = str(advice.get("title") or "").strip() or "開業提言"
+    lines = ["---", "", f"# 第II部　{heading}", "",
+             "**ここからは推論です。** 第I部が「この商圏はどうなっているか」"
+             "だったのに対し、ここは「ここで歯科医院を開業すると仮定したら"
+             "どうするか」です。仮説には印を付けています。", ""]
+
+    gaps = str(advice.get("information_gaps") or "").strip()
+    if gaps:
+        lines += ["> **競合について分かっていないこと**", "",
+                  f"> {gaps}", "",
+                  "> 分からないことを「競合が少ない」と読み替えていません。", ""]
+
+    by_role: dict[str, list[Mapping[str, Any]]] = {}
+    for segment in advice.get("segments") or []:
+        by_role.setdefault(str(segment.get("role")), []).append(segment)
+    catchments = {str(c.get("rank")): c for c in advice.get("catchments") or []}
+
+    render = {
+        "primary_patients": lambda: _segments(by_role.get("primary")),
+        "secondary_patients": lambda: _segments(by_role.get("secondary")),
+        "avoid_competing": lambda: _segments(by_role.get("avoid")),
+        "primary_catchment": lambda: _ring(catchments.get("primary")),
+        "secondary_catchment": lambda: _ring(catchments.get("secondary")),
+        "reason_to_visit": lambda: [str(advice.get("reason_to_visit") or "—"), ""],
+        "clinic_model": lambda: [str(advice.get("clinic_model") or "—"), ""],
+        "differentiation": lambda: [str(advice.get("differentiation") or "—"), ""],
+        "opening_risks": lambda: _bullets(advice.get("opening_risks")),
+        "before_opening": lambda: _bullets(advice.get("before_opening")),
+    }
+    for index, chapter in enumerate(chapters, start=1):
+        body = render.get(chapter.get("key"))
+        if body is None:
+            continue
+        lines += [f"## {index}. {chapter.get('title')}", ""]
+        lines += body()
+
+    steps = advice.get("reasoning") or []
+    if steps:
+        lines += ["## 付録：この提言に至った筋道", "",
+                  "**どこまでが確定で、どこからが推測か**を印で分けています。", ""]
+        for step in steps:
+            tag = str(step.get("tag") or "")
+            label = _TAG_LABEL.get(tag, tag)
+            source = str(step.get("source") or "").strip()
+            lines.append(f"- `{tag}` {label}　{step.get('statement')}"
+                         + (f"  \n  出典: {source}" if source else ""))
+        lines.append("")
+    return lines
+
+
+def _segments(segments: Sequence[Mapping[str, Any]] | None) -> list[str]:
+    if not segments:
+        return ["**この層は挙げられていません。**"
+                "データから根拠を引けなかったということです。", ""]
+    lines: list[str] = []
+    for one in segments:
+        lines += [f"**{one.get('label')}**", "",
+                  f"- 根拠となるデータ：{one.get('basis') or '—'}",
+                  f"- なぜこの層が存在するか：{one.get('why') or '—'}",
+                  f"- **この見立てが外れるとしたら**：{one.get('caution') or '—'}", ""]
+    return lines
+
+
+def _ring(ring: Mapping[str, Any] | None) -> list[str]:
+    if not ring:
+        return ["**引けていません。** 動線を説明できるデータが足りません。", ""]
+    return [f"- 範囲：{ring.get('extent') or '—'}",
+            f"- そう引いた根拠：{ring.get('basis') or '—'}",
+            f"- ここから期待すること：{ring.get('expectation') or '—'}", ""]
+
+
+def _bullets(items: Sequence[Any] | None) -> list[str]:
+    values = [str(x) for x in (items or []) if str(x).strip()]
+    if not values:
+        return ["—", ""]
+    return [f"- {x}" for x in values] + [""]
 
 
 # ------------------------------------------------------------------ 各章

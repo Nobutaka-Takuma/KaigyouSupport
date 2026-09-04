@@ -1443,3 +1443,78 @@ def verify_dd_report(report: Mapping[str, Any],
                 continue
             problems.append(f"本文の数値 {raw} は、渡した事実の中にありません")
     return problems
+
+
+# ===========================================================================
+# 提言レポート（第II部）。**ここでは推論します。**
+#
+# 第I部（プレDD）は事実だけで、推論を禁じています。この文書は逆で、
+# 「ここで開業するならどうするか」を組み立てます。**混ぜないのが要点**で、
+# 混ぜると第I部が「どこまでが確定か分からない文書」になります。
+#
+# スキーマは平らに保ちます。1〜3 章（主要／準主要／競争しない患者層）を
+# 3 本の配列に分けず、`role` を持つ 1 本にしているのはそのためです
+# （`Schema is too complex.` を実測で踏んでいます）。
+# ===========================================================================
+class AdviceSegment(BaseModel):
+    """患者層の見立て。**想像で作らず、データから推論します。**"""
+
+    role: str = Field(
+        description="primary（主要）/ secondary（準主要）/ avoid（競争しない）")
+    label: str = Field(description="どんな層か。「0〜14歳の子を持つ世帯」のように")
+    basis: str = Field(
+        description="**どのデータから**そう言えるか。2 つ以上を組み合わせること。"
+                    "「年少人口比が高い」だけでなく「＋世帯あたり人員が多い」まで")
+    why: str = Field(description="その層がこの地域に存在する背景（[WHY] または [HYPOTHESIS]）")
+    caution: str = Field(description="この見立てが外れるとしたら何が理由か")
+
+
+class AdviceCatchment(BaseModel):
+    """第1商圏・第2商圏。**距離だけでなく、動線で定義します。**"""
+
+    rank: str = Field(description="primary（第1商圏）/ secondary（第2商圏）")
+    extent: str = Field(description="範囲。半径だけでなく方向・動線で")
+    basis: str = Field(description="そう引いた根拠となるデータ")
+    expectation: str = Field(description="この範囲から何を期待するか")
+
+
+class AdviceEvidence(BaseModel):
+    """推論の 1 段。**印で、確定と推測を字面で分けます。**"""
+
+    tag: str = Field(
+        description="FACT / BENCHMARK / PATTERN / WHY / HYPOTHESIS / "
+                    "INSIGHT / IMPLICATION / ACTION のいずれか")
+    statement: str = Field(description="その段で言えること。1〜2 文")
+    source: str = Field(
+        default="",
+        description="FACT/BENCHMARK ならデータの出どころ、WHY なら参照した URL。"
+                    "推測なら空でよい")
+
+
+class AdviceReport(BaseModel):
+    """この商圏で歯科医院を開業すると仮定した提言。
+
+    **競合の情報が足りないときに「競合が少ない」「競合が弱い」と書かないこと。**
+    情報不足そのものを分析結果として書きます。
+    """
+
+    title: str = Field(description="提言レポートの表題")
+    reasoning: list[AdviceEvidence] = Field(
+        default_factory=list,
+        description="FACT → BENCHMARK → PATTERN → WHY → INSIGHT → IMPLICATION "
+                    "→ ACTION の連鎖。**この順に並べること**")
+    segments: list[AdviceSegment] = Field(
+        default_factory=list, description="第1〜3章。role で区別する")
+    catchments: list[AdviceCatchment] = Field(
+        default_factory=list, description="第4〜5章")
+    reason_to_visit: str = Field(description="第6章。なぜ他院ではなくここに来るのか")
+    clinic_model: str = Field(description="第7章。規模・ユニット数・診療時間・体制")
+    differentiation: str = Field(description="第8章。周辺と何で違うと言えるか")
+    opening_risks: list[str] = Field(
+        default_factory=list, description="第9章。開業そのものの主要リスク")
+    before_opening: list[str] = Field(
+        default_factory=list, description="第10章。開業前に追加取得すべき情報")
+    information_gaps: str = Field(
+        default="",
+        description="**競合について情報が足りない場合、その事実をここに書く。**"
+                    "足りないことを「競合が少ない」と読み替えないこと")

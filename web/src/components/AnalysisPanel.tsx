@@ -265,7 +265,7 @@ export function AnalysisPanel({
                 周辺一般は統計から地域の構造を読み、競合は 1 件ずつ Web で
                 調べます。検索の使い道が正反対なので、同じ実行の中には
                 入れられません。 */}
-            <StartButton kind="area" label="周辺一般の分析を開始する"
+            <StartButton kind="area" label="分析を開始する"
                          starting={starting} queued={queued} waiting={waiting}
                          active={kind} onStart={start} />
             <StartButton kind="competitors" label="周辺の競合を分析する"
@@ -285,12 +285,13 @@ export function AnalysisPanel({
         </p>
       ) : (
         <p className="analysis__lead">
-          自社DBに入っている統計・施設・駅・地価から<strong>事実を確定させ</strong>
-          （STEP1・API費用なし）、それを読んで10章のレポートに書き起こします
-          （STEP2）。<strong>数字はすべてDBの値</strong>で、LLMが書くのは
-          「その事実が何を意味するか」だけです。
-          これから開業する人の事前調査にも、既存医院を買う人の初期DDにも
-          使える形で出します。
+          自社DBの統計・施設・駅・地価から<strong>事実を確定させ</strong>
+          （STEP1・API費用なし）、2 部構成のレポートを作ります。
+          <strong>第I部 商圏プレDD</strong>はこの商圏がどうなっているかを
+          10 章で（推論しません／数字はすべてDBの値）、
+          <strong>第II部 開業提言</strong>はここで開業するならどうするかを
+          10 章で（主要患者・商圏の引き方・医院モデル・差別化まで）。
+          第II部だけが外部情報を調べ、推論します。
         </p>
       )}
 
