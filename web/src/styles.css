@@ -1169,6 +1169,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .md li { margin-bottom: 0.35rem; }
 .md hr { margin: 1.6rem 0; border: 0; border-top: 1px solid var(--line, #e5e9ef); }
 .md a { color: #2b6cb0; word-break: break-all; }
+.md code {
+  font-size: 0.82em; padding: 0.05rem 0.3rem; border-radius: 3px;
+  background: var(--muted-bg, #f4f6f8); color: #374151;
+}
 .md strong { color: #111827; }
 
 /* 表は本文より小さく。数字が並ぶので、行の高さも詰めます。 */

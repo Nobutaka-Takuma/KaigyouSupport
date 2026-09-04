@@ -2,9 +2,9 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import { renderMarkdown } from "../lib/markdown";
 import type {
-  AnalysisReport, AnalysisSource, ClientReportJson, CompetitorReportJson,
-  CompetitorTally, CountedLabel, Evidenced, PositioningMap, ReportBlock,
-  ReportJson,
+  AdviceReportJson, AnalysisReport, AnalysisSource, ClientReportJson,
+  CompetitorReportJson, CompetitorTally, CountedLabel, DDReportJson,
+  DerivedNumberJson, Evidenced, PositioningMap, ReportBlock, ReportJson,
 } from "../lib/types";
 
 /**
@@ -60,6 +60,11 @@ export function AnalysisReportView(
     return <CompetitorReportView report={report} json={report.report_json}
                                  jobId={jobId} />;
   }
+  // **プレDD と提言は、旧レポートのどれとも形が違います。** 見分けずに
+  // 落とすと、旧・働き用の描画が `decision` を読みに行って画面が消えます。
+  if (isDDReport(report.report_json)) {
+    return <DDReportView report={report} json={report.report_json} jobId={jobId} />;
+  }
   if (isClientReport(report.report_json)) {
     return <ClientReportView report={report} json={report.report_json} jobId={jobId} />;
   }
@@ -67,7 +72,7 @@ export function AnalysisReportView(
 }
 
 function isCompetitorReport(
-  json: ClientReportJson | ReportJson | CompetitorReportJson,
+  json: ClientReportJson | ReportJson | CompetitorReportJson | DDReportJson,
 ): json is CompetitorReportJson {
   return "character" in json && "landscape" in json;
 }
@@ -104,7 +109,7 @@ function MarkdownView({ markdown, jobId }: { markdown: string; jobId: string }) 
 /** 顧客提出用の形で保存されたレポートか。段の構成を変える前の古い
  *  ジョブは、タグ付きの働き用の形のまま残っています。 */
 function isClientReport(
-  json: ClientReportJson | ReportJson | CompetitorReportJson,
+  json: ClientReportJson | ReportJson | CompetitorReportJson | DDReportJson,
 ): json is ClientReportJson {
   return "verdict" in json && "support_needed" in json;
 }
@@ -723,5 +728,347 @@ function PositioningView(
       )}
       {map.note && <p className="report__note">{map.note}</p>}
     </div>
+  );
+}
+
+
+/* ---------------------------------------------------------------- プレDD
+
+   プレDD（第I部）と開業提言（第II部）は、**目的の違う 2 つの文書**です。
+   第I部は事実だけで推論しません。第II部は推論します。サーバは両方を 1 本の
+   Markdown に書き、report_json には第I部の構造と `advice`（第II部）を入れて
+   返します。
+
+   画面でも**混ぜません。** 続けて 1 枚に流すと、読み手はどこまでが確定で
+   どこからが提案なのか分からなくなります——分けてある意味が消えます。
+
+   実測：この形のレポートは、どの型にも当てはまらないまま旧・働き用の描画に
+   落ちて `Cannot read properties of undefined (reading 'primary_patients')`
+   で画面が真っ白になりました。型の見分けは、描く前にここで済ませます。
+*/
+
+/** 新しい 10 章のレポートか。**古い形と取り違えないこと。** */
+function isDDReport(
+  json: ClientReportJson | ReportJson | CompetitorReportJson | DDReportJson,
+): json is DDReportJson {
+  if ("takeaways" in json || "advice" in json) return true;
+  const verdict = (json as DDReportJson).verdict;
+  // 顧客提出用（ClientReportJson）にも verdict はありますが、開業と承継を
+  // 分けて書くのはこちらだけです。
+  return !!verdict && typeof verdict === "object" && "for_opening" in verdict;
+}
+
+/**
+ * 1 本の Markdown を、部ごとに切り分ける。
+ *
+ * 見出しで切ります（`# 第I部…` / `# 第II部…`）。**サーバが書いた文書だけを
+ * 相手にするので、これで足ります。** 提言まで走っていないジョブには第II部の
+ * 見出しがなく、そのときは全体が第I部です。
+ *
+ * 末尾の出典・免責はどちらの部のものでもないので、切り離します。出典は専用の
+ * タブに一覧があり、免責はレポートの下端に常に出ています。
+ */
+function splitParts(markdown: string) {
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const find = (pattern: RegExp) => lines.findIndex((line) => pattern.test(line));
+  const one = find(/^#\s*第I部/);
+  const two = find(/^#\s*第II部/);
+  const body = Math.max(one, two, 0);
+  const tail = lines.findIndex(
+    (line, i) => i > body && /^##\s*(出典|免責)/.test(line));
+  const end = tail < 0 ? lines.length : tail;
+  const join = (from: number, to: number) => lines.slice(from, to).join("\n").trim();
+
+  return {
+    // 表題と地点。第II部だけを開いた人にも、どの地点の話か分かるように。
+    head: one > 0 ? join(0, one) : "",
+    first: join(one < 0 ? 0 : one, two < 0 ? end : Math.min(two, end)),
+    second: two < 0 ? "" : join(two, end),
+  };
+}
+
+/** 章のキーと見出し。Markdown が無いジョブのための控えです（正は dd.yaml）。 */
+const DD_CHAPTER_LABEL: Record<string, string> = {
+  summary: "Executive Summary", trade_area: "商圏分析", competition: "競合分析",
+  location: "立地分析", demand: "人口・需要分析", outlook: "将来性",
+  risks: "リスク", growth: "成長余地・KSF",
+  further_dd: "追加DDで確認すべき事項", verdict: "総合評価",
+};
+
+const ADVICE_ROLE_LABEL: Record<string, string> = {
+  primary: "主要患者", secondary: "準主要患者",
+  avoid: "積極的に競争すべきではない患者層",
+};
+
+const ADVICE_RANK_LABEL: Record<string, string> = {
+  primary: "第1商圏", secondary: "第2商圏",
+};
+
+/**
+ * プレDD レポート。**第I部と第II部を、タブで分けて出します。**
+ *
+ * 既定は第I部です。事実を読んでから提言を読む順にしたいのと、提言まで
+ * 走っていないジョブでも最初のタブが空にならないためです。
+ */
+function DDReportView(
+  { report, json, jobId }:
+    { report: AnalysisReport; json: DDReportJson; jobId: string },
+) {
+  const parts = splitParts(report.report_markdown ?? "");
+  const advice = json.advice ?? null;
+  const hasAdvice = !!advice || !!parts.second;
+  const cited = list(report.sources).filter((s) => s.pattern_id).sort(byPriority);
+  const [open, setOpen] =
+    useState<"first" | "second" | "sources" | "markdown">("first");
+
+  return (
+    <div className="report">
+      <div className="report__summary">
+        <strong className="report__verdict">プレDD</strong>
+        {json.summary}
+      </div>
+
+      <div className="report__tabs" role="tablist">
+        {([["first", "第I部 商圏プレDD"],
+           ...(hasAdvice ? ([["second", "第II部 開業提言"]] as const) : []),
+           ["sources", `出典 (${cited.length})`],
+           ...(report.report_markdown
+               ? ([["markdown", "文書全体"]] as const) : []),
+          ] as const).map(([key, label]) => (
+          <button key={key} role="tab" aria-selected={open === key}
+                  className={open === key ? "is-active" : ""}
+                  onClick={() => setOpen(key)}>
+            {label}
+          </button>
+        ))}
+        {report.report_markdown && (
+          <button className="report__download" onClick={() => { void download(jobId); }}>
+            Markdownで保存
+          </button>
+        )}
+      </div>
+
+      {open === "first" && (
+        <div className="md">
+          {parts.head && (
+            <div dangerouslySetInnerHTML={{ __html: renderMarkdown(parts.head) }} />
+          )}
+          {parts.first
+            ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(parts.first) }} />
+            : <DDFactsView json={json} />}
+          {!hasAdvice && (
+            <p className="report__note">
+              このジョブでは第II部（開業提言）が生成されていません。
+              提言まで走ると、この上にもう 1 つタブが出ます。
+            </p>
+          )}
+        </div>
+      )}
+
+      {open === "second" && (
+        <div className="md">
+          {parts.second
+            ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(parts.second) }} />
+            : advice && <AdviceView advice={advice} />}
+        </div>
+      )}
+
+      {open === "sources" && <SourceList report={report} cited={cited} />}
+
+      {open === "markdown" && report.report_markdown && (
+        <MarkdownView markdown={report.report_markdown} jobId={jobId} />
+      )}
+
+      <p className="report__disclaimer">{report.disclaimer}</p>
+    </div>
+  );
+}
+
+/**
+ * Markdown が無いときの第I部。
+ *
+ * 保存された文書には Markdown が入っていますが、**古い行や、書き出しに
+ * 失敗した行では null です。** そのとき何も出さないと、レポートがあるのに
+ * 空の画面になります。構造のほうから読める形で出します。
+ */
+function DDFactsView({ json }: { json: DDReportJson }) {
+  const takeaways = list(json.takeaways);
+  const hypotheses = list(json.growth_hypotheses);
+  const verdict = json.verdict;
+
+  return (
+    <>
+      <h3>{json.title}</h3>
+      <p>{json.summary}</p>
+
+      {takeaways.length > 0 && <h4>各章の読みどころ</h4>}
+      {takeaways.map((item, i) => (
+        <p key={i}>
+          <strong>{DD_CHAPTER_LABEL[item.chapter] ?? item.chapter}</strong>
+          <br />{item.takeaway}
+        </p>
+      ))}
+
+      {hypotheses.length > 0 && (
+        <>
+          <h4>成長余地（仮説）</h4>
+          <p className="report__note">
+            確かめる対象であって、結論ではありません。
+          </p>
+          <ul>
+            {hypotheses.map((item, i) => (
+              <li key={i}>
+                <strong>{item.position}</strong>　{item.why}
+                <br />外れるとしたら：{item.caveat}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <DerivedTable items={list(json.derived)} title="本文で使った計算" />
+
+      {verdict && (
+        <>
+          <h4>総合評価</h4>
+          <p>{verdict.statement}</p>
+          <p><strong>これから開業する人にとって</strong>　{verdict.for_opening}</p>
+          <p><strong>既存医院を買う人にとって</strong>　{verdict.for_acquisition}</p>
+          <p className="report__counterpoint">
+            <strong>この評価が外れるとしたら</strong>　{verdict.counterpoint}
+          </p>
+        </>
+      )}
+
+      {list(json.unverified_numbers).length > 0 && (
+        <p className="report__note">
+          本文の次の数値は、確定した事実の一覧の中に見つけられませんでした：
+          {list(json.unverified_numbers).join("、")}
+        </p>
+      )}
+    </>
+  );
+}
+
+/** Markdown が無いときの第II部。**印で、確定と推測を字面で分けます。** */
+function AdviceView({ advice }: { advice: AdviceReportJson }) {
+  const segments = list(advice.segments);
+  const byRole = (role: string) => segments.filter((s) => s.role === role);
+
+  return (
+    <>
+      <h3>{advice.title}</h3>
+      <p className="report__note">
+        <strong>ここからは推論です。</strong>
+        第I部が「この商圏はどうなっているか」だったのに対し、ここは
+        「ここで開業すると仮定したらどうするか」です。
+      </p>
+
+      {advice.information_gaps && (
+        <p className="report__counterpoint">
+          <strong>競合について分かっていないこと</strong>　{advice.information_gaps}
+        </p>
+      )}
+
+      {["primary", "secondary", "avoid"].map((role) => (
+        <section key={role}>
+          <h4>{ADVICE_ROLE_LABEL[role]}</h4>
+          {byRole(role).length === 0 && (
+            <p>この層は挙げられていません。データから根拠を引けなかったということです。</p>
+          )}
+          {byRole(role).map((segment, i) => (
+            <p key={i}>
+              <strong>{segment.label}</strong>
+              <br />根拠：{segment.basis}
+              <br />背景：{segment.why}
+              <br />外れるとしたら：{segment.caution}
+            </p>
+          ))}
+        </section>
+      ))}
+
+      {list(advice.catchments).map((ring, i) => (
+        <section key={i}>
+          <h4>{ADVICE_RANK_LABEL[ring.rank] ?? ring.rank}</h4>
+          <p>
+            {ring.extent}
+            <br />根拠：{ring.basis}
+            <br />期待するもの：{ring.expectation}
+          </p>
+        </section>
+      ))}
+
+      <h4>患者を引き込む理由</h4>
+      <p>{advice.reason_to_visit}</p>
+      <h4>推奨する医院モデル</h4>
+      <p>{advice.clinic_model}</p>
+      <h4>差別化の方向性</h4>
+      <p>{advice.differentiation}</p>
+
+      {list(advice.opening_risks).length > 0 && (
+        <>
+          <h4>開業上の主要リスク</h4>
+          <ul>{list(advice.opening_risks).map((x, i) => <li key={i}>{x}</li>)}</ul>
+        </>
+      )}
+      {list(advice.before_opening).length > 0 && (
+        <>
+          <h4>開業前に追加取得すべき情報</h4>
+          <ul>{list(advice.before_opening).map((x, i) => <li key={i}>{x}</li>)}</ul>
+        </>
+      )}
+
+      <DerivedTable items={list(advice.derived)} title="提言で使った計算" />
+
+      {list(advice.reasoning).length > 0 && (
+        <>
+          <h4>付録：この提言に至った筋道</h4>
+          <ul>
+            {list(advice.reasoning).map((step, i) => (
+              <li key={i}>
+                <code>{step.tag}</code>　{step.statement}
+                {step.source && <><br />出典: {step.source}</>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * 計算した数字を、**式ごと**出す。
+ *
+ * 「年少人口比 13.1%」とだけ書かれても、読み手はその数字がどこから来たのか
+ * 追えません。式が並んでいれば、画面の中だけで確かめられます。検算は
+ * サーバがしていて（`ok`）、合わなかった行はそう見えるようにします。
+ */
+function DerivedTable(
+  { items, title }: { items: DerivedNumberJson[]; title: string },
+) {
+  if (items.length === 0) return null;
+  return (
+    <>
+      <h4>{title}</h4>
+      <div className="md__tablewrap">
+        <table>
+          <thead>
+            <tr><th>数字</th><th>式</th><th>値</th><th>検算</th></tr>
+          </thead>
+          <tbody>
+            {items.map((item, i) => (
+              <tr key={i}>
+                <td>{item.label}</td>
+                <td>{item.expression}</td>
+                <td>{item.value}{item.unit ?? ""}</td>
+                <td>{item.ok === false
+                  ? `✗ ${item.problem ?? ""}`.trim() : "✓"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

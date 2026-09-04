@@ -294,6 +294,37 @@ def test_one_run_produces_both_reports():
         assert f"## {index}. {title}" in tail, title
 
 
+def test_the_two_parts_can_be_split_the_way_the_screen_splits_them():
+    """画面は**見出しの字面**で 2 部に切り分けます。
+
+    ``web/src/components/AnalysisReport.tsx`` の ``splitParts`` が探すのは
+    ``# 第I部`` / ``# 第II部`` と、その後ろの ``## 出典`` / ``## 免責`` です。
+    出典と免責はどちらの部のものでもないので、切り離して別のタブに出します。
+
+    見出しを変えると、画面は**落ちません**——第I部のタブに全部が出たまま、
+    分けたつもりの表示になります。気づくのは顧客に見せたあとです。
+    """
+    import re
+
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    sources = [{"url": "https://city.example/plan", "title": "都市計画",
+                "source_type": "municipality", "pattern_id": "F001"}]
+    lines = dd_report.to_markdown(_written(), pack, sources, "免責",
+                                  advice=_advice()).splitlines()
+
+    def matches(pattern: str) -> list[int]:
+        return [i for i, line in enumerate(lines) if re.match(pattern, line)]
+
+    first, second = matches(r"^#\s*第I部"), matches(r"^#\s*第II部")
+    assert len(first) == 1 and len(second) == 1, "部の見出しは 1 本ずつ"
+    assert first[0] < second[0]
+
+    tail = [i for i in matches(r"^##\s*(出典|免責)") if i > second[0]]
+    assert tail, "出典・免責が第II部より前にあると、提言のタブから消えます"
+    assert not [i for i in matches(r"^##\s*(出典|免責)") if i < second[0]], \
+        "出典・免責は本文のあとに置くこと"
+
+
 def test_the_reader_is_told_which_part_reasons():
     """**どこまでが事実で、どこからが提案か。** 混ぜると第I部が信用を失います。"""
     pack = dd.fact_pack(_dataset(), None, "dental_clinic")

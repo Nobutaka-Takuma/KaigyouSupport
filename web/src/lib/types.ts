@@ -710,9 +710,70 @@ export interface PositioningMap {
   note?: string;
 }
 
+/**
+ * 本文で使った「計算した数字」。**式まで持ちます。**
+ *
+ * 値だけを持たせると、読み手はそれがどこから来たのか追えません。式があれば
+ * サーバが計算し直せて（`ok`）、画面でも確かめられます。
+ */
+export interface DerivedNumberJson {
+  label: string;
+  expression: string;
+  value: number;
+  unit?: string;
+  source?: string;
+  /** サーバが式を計算し直した結果。false なら本文の値と合っていません。 */
+  ok?: boolean;
+  computed?: number | null;
+  problem?: string | null;
+}
+
+/** 第II部（開業提言）。**ここは推論です。** 走らなかったジョブでは null。 */
+export interface AdviceReportJson {
+  title: string;
+  reasoning?: { tag: string; statement: string; source?: string }[];
+  segments?: { role: string; label: string; basis: string; why: string;
+               caution: string }[];
+  catchments?: { rank: string; extent: string; basis: string;
+                 expectation: string }[];
+  reason_to_visit: string;
+  clinic_model: string;
+  differentiation: string;
+  opening_risks?: string[];
+  before_opening?: string[];
+  /** 競合について分かっていないこと。**情報不足を「競合が少ない」と
+   *  読み替えないための欄です。** */
+  information_gaps?: string;
+  derived?: DerivedNumberJson[];
+}
+
+/**
+ * プレDD レポート（第I部）と、その提言（第II部 = `advice`）。
+ *
+ * 数字は STEP1 が確定させた事実の束から出ていて、ここに入っているのは
+ * 散文と読みどころだけです。本文そのものは `report_markdown` にあります。
+ */
+export interface DDReportJson {
+  title: string;
+  summary: string;
+  takeaways?: { chapter: string; takeaway: string }[];
+  growth_hypotheses?: { position: string; why: string; caveat: string }[];
+  derived?: DerivedNumberJson[];
+  /** 確定した事実の中に見つけられなかった本文の数値。**隠しません。** */
+  unverified_numbers?: string[];
+  verdict: {
+    statement: string;
+    /** 開業と承継では読み方が違うので、分けて書きます。 */
+    for_opening: string;
+    for_acquisition: string;
+    counterpoint: string;
+  };
+  advice?: AdviceReportJson | null;
+}
+
 export interface AnalysisReport {
-  /** 最終段の出力。顧客提出用まで走ったジョブは ClientReportJson。 */
-  report_json: ClientReportJson | ReportJson | CompetitorReportJson;
+  /** 最終段の出力。プレDD まで走ったジョブは DDReportJson。 */
+  report_json: ClientReportJson | ReportJson | CompetitorReportJson | DDReportJson;
   report_markdown: string | null;
   trace_ok: boolean | null;
   trace_problems: { where: string; problem: string }[] | null;
