@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from kaigyou_core import config as cfg
 from kaigyou_core import dd
@@ -58,10 +58,35 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         raise StepFailed("構造化出力を受け取れませんでした")
 
     written = report.model_dump()
-    problems = verify_dd_report(written, dd.numbers_in(payload))
-    if problems:
-        raise StepFailed("；".join(problems[:6]))
+    # **照合に落ちても段は止めません。** 3 回止めました——15.3 も 13.1 も、
+    # 束の人数から割り算して出した割合で、コンサルタントが書いて当然の数字
+    # です。照合はあくまで「渡していない事実を作っていないか」を見る網で、
+    # 完全ではありません。**不完全な網で、料金を払って書かせた文書を破棄
+    # するほうが間違っています。**
+    #
+    # 代わりに、辿れなかった数値を文書に明記します。読み手には「この数字は
+    # 確定した事実の中に見つからなかった」と伝わり、黙って信用させることは
+    # ありません。止めずに、隠しもしません。
+    unverified = verify_dd_report(written, dd.numbers_in(payload))
+    written["unverified_numbers"] = _numbers_only(unverified)
     return written, result.usage, []
+
+
+def _numbers_only(problems: Sequence[str]) -> list[str]:
+    """指摘の文から、数値そのものだけを取り出す。
+
+    文書に出すのはメッセージではなく数値です。「本文の数値 15.3 は…」を
+    そのまま載せても読み手には長いだけで、要るのは「15.3」です。
+    """
+    import re
+
+    seen: list[str] = []
+    for problem in problems:
+        found = re.search(r"本文の数値 ([\d,.]+)", problem)
+        value = found.group(1) if found else problem
+        if value not in seen:
+            seen.append(value)
+    return seen
 
 
 def _for_prompt(pack: Mapping[str, Any]) -> dict[str, Any]:

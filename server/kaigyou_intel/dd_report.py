@@ -80,12 +80,32 @@ def to_markdown(report: Mapping[str, Any], pack: Mapping[str, Any],
             lines += [f"> {takeaway[key]}", ""]
         lines += render()
 
+    lines += _unverified(report)
     if advice:
         lines += _advice(advice, pack)
     lines += _sources_block(sources)
     if disclaimer:
         lines += ["## 免責", "", disclaimer, ""]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _unverified(report: Mapping[str, Any]) -> list[str]:
+    """本文の数値のうち、確定した事実の中に見つけられなかったもの。
+
+    **止めずに、隠さない。** 照合は「渡していない事実を作っていないか」を
+    見る網で、完全ではありません。人数から割り算して出した割合のように、
+    書いて当然の数字も引っかかります。だから段は止めませんが、黙って信用
+    させることもしません。ここに出して、読み手に判断してもらいます。
+    """
+    values = [str(v) for v in (report.get("unverified_numbers") or []) if str(v)]
+    if not values:
+        return []
+    return ["## 本文の数値について", "",
+            "本文に出てくる次の数値は、**確定した事実の一覧の中に見つけられ"
+            "ませんでした。** 人数から計算した割合など、正しい数字である"
+            "ことも多いのですが、この文書だけでは確かめられません。"
+            "根拠が要る場面では、上の表の値をお使いください。", "",
+            "　" + "、".join(values), ""]
 
 
 # ------------------------------------------------------- 第II部（提言）

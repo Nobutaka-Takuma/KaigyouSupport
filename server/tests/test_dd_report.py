@@ -32,8 +32,11 @@ def _dataset() -> dict:
         "catchment": {"kind": "circle", "area_km2": 3.14,
                       "description": "半径1,000mの円"},
         "demand": {
-            "residents": {"by_radius": {"1000": {"population": 12000,
-                                                 "households": 5100}}},
+            # **人数だけ。** 割合は fact_pack が計算します——渡さないと
+            # LLM が割り算し、検算に弾かれて段が止まりました（実測 3 回）。
+            "residents": {"by_radius": {"1000": {
+                "population": 12000, "households": 5100,
+                "age_0_14": 1572, "age_15_64": 7596, "age_65_plus": 2832}}},
             "distribution": {"meshes": 8, "largest_mesh_share": 0.52,
                              "population_largest_mesh": 6240,
                              "meshes_with_no_residents": 0},
@@ -465,3 +468,74 @@ def test_the_scaling_does_not_open_a_hole_for_big_numbers():
     assert not verify_dd_report(
         {"summary": "450 人、12000 人です。", "takeaways": [], "verdict": {}},
         allowed)
+
+
+# ============================ 検算で段を止めない（実測：3 回止まった）
+#
+# 実測のエラー：
+#
+#     本文の数値 77.4 は、渡した事実の中にありません   （0.774 が束にある）
+#     本文の数値 15.3 は、渡した事実の中にありません   （人数から割った割合）
+#     本文の数値 13.1 は、渡した事実の中にありません   （同上）
+#
+# **照合は網であって、証明ではありません。** 人数から割り算して出した割合は
+# コンサルタントが書いて当然の数字で、それを理由に、料金を払って書かせた文書を
+# 破棄するほうが間違っています。止めずに、隠さない。
+
+def test_the_shares_the_model_would_otherwise_divide_for_are_provided():
+    """**割らせないための正しい直し方は、禁じることではなく渡すこと。**
+
+    束は人数（age_0_14: 4643）しか持っておらず、読み手に要る「年少人口比
+    13.1%」がありませんでした。渡さなければ LLM は割り算するしかありません。
+    """
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    row = (pack["demand"]["residents"]["by_radius"] or {}).get("1000") or {}
+    assert row.get("share_0_14_pct") is not None
+    assert row.get("share_15_64_pct") is not None
+    assert row.get("share_65_plus_pct") is not None
+    # 計算済みなので、そのまま書けば照合を通ること。
+    allowed = dd.numbers_in(pack)
+    for key in ("share_0_14_pct", "share_65_plus_pct"):
+        written = row[key]
+        assert not verify_dd_report(
+            {"summary": f"構成比は {written}% です。", "takeaways": [],
+             "verdict": {}}, allowed), key
+
+
+def test_the_demand_chapter_actually_receives_the_measures():
+    """**LLM が数字を作る理由を、こちらで作らない。**
+
+    layer で絞っていたら 1 件も残らず、この章に数字が渡っていませんでした。
+    """
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    assert pack["demand"]["measures"], "第5章に指標が 1 件も渡っていません"
+
+
+def test_an_untraceable_number_is_disclosed_not_fatal():
+    """**止めずに、隠さない。**
+
+    段を止めれば料金を払って書かせた文書が消えます。黙って通せば読み手が
+    根拠のない数字を信じます。どちらでもなく、文書に明記します。
+    """
+    from kaigyou_intel.steps.dd_write import _numbers_only
+
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    allowed = dd.numbers_in(pack)
+    written = {**_written(),
+               "summary": "患者は年間 45000 人と見込まれます。"}
+    untraceable = _numbers_only(verify_dd_report(written, allowed))
+    assert "45000" in untraceable
+
+    markdown = dd_report.to_markdown(
+        {**written, "unverified_numbers": untraceable}, pack, [], "免責")
+    assert "## 本文の数値について" in markdown
+    assert "45000" in markdown[markdown.index("## 本文の数値について"):]
+    # レポートは出ていること（止まっていない）。
+    assert "## 1. Executive Summary" in markdown
+
+
+def test_nothing_is_said_when_every_number_checks_out():
+    """辿れた文書に、余計な注記を足さないこと。"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    markdown = dd_report.to_markdown(_written(), pack, [], "免責")
+    assert "## 本文の数値について" not in markdown

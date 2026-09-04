@@ -143,16 +143,60 @@ def location_quality(dataset: Mapping[str, Any]) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ 第5章
 def demand(dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """人口と需要。常住・昼間・年齢構成。"""
+    """人口と需要。常住・昼間・年齢構成。
+
+    **割合まで計算して渡します。**
+
+    束が持っているのは人数（`age_0_14: 4643`）だけでした。ところが読み手に
+    要るのは「年少人口比 13.1%」です。渡さなければ LLM が割り算するしか
+    なく、実際そうして、検算に弾かれて段が 3 回止まりました。
+
+    **割らせないための正しい直し方は、禁じることではなく渡すことです。**
+    ここで計算すれば、値は毎回同じで、検算も通ります。
+    """
     d = dataset.get("demand") or {}
+    residents = dict(d.get("residents") or {})
+    by_radius = {}
+    for radius, row in (residents.get("by_radius") or {}).items():
+        by_radius[radius] = {**(row or {}), **_age_shares(row or {})}
+    if by_radius:
+        residents["by_radius"] = by_radius
+
+    daytime = dict(d.get("daytime") or {})
+    workers = daytime.get("workers")
+    resident_total = ((by_radius.get(str((dataset.get("query") or {})
+                                         .get("radius_m"))) or {}).get("population"))
+    if workers and resident_total:
+        # 昼夜比。**「働きに来る人が住む人の何割か」**は、この章でいちばん
+        # 訊かれる比です。
+        daytime["workers_per_100_residents"] = round(
+            float(workers) / float(resident_total) * 100, 1)
+
     return {
-        "residents": d.get("residents") or {},
-        "daytime": d.get("daytime") or {},
+        "residents": residents,
+        "daytime": daytime,
         "distribution": d.get("distribution") or {},
-        "measures": [m for m in ((dataset.get("measures") or {}).get("items") or [])
-                     if m.get("layer") in (None, "demand", "population")],
-        "insight_metrics": dataset.get("insight_metrics") or [],
+        # **絞りません。** layer で絞っていたら 1 件も残らず、この章に数字が
+        # 渡っていませんでした（LLM が自分で作る理由をこちらで作っていました）。
+        "measures": (dataset.get("measures") or {}).get("items") or [],
+        "insight_metrics": [m for m in (dataset.get("insight_metrics") or [])
+                            if isinstance(m, Mapping) and m.get("key")],
     }
+
+
+def _age_shares(row: Mapping[str, Any]) -> dict[str, Any]:
+    """年齢 3 区分の構成比（％）。**人数だけでは読めません。**"""
+    total = row.get("population")
+    if not total:
+        return {}
+    out: dict[str, Any] = {}
+    for key, name in (("age_0_14", "share_0_14_pct"),
+                      ("age_15_64", "share_15_64_pct"),
+                      ("age_65_plus", "share_65_plus_pct")):
+        value = row.get(key)
+        if value is not None:
+            out[name] = round(float(value) / float(total) * 100, 1)
+    return out
 
 
 # ------------------------------------------------------------------ 第6章
