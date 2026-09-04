@@ -80,6 +80,7 @@ def to_markdown(report: Mapping[str, Any], pack: Mapping[str, Any],
             lines += [f"> {takeaway[key]}", ""]
         lines += render()
 
+    lines += _derived(report)
     lines += _unverified(report)
     if advice:
         lines += _advice(advice, pack)
@@ -87,6 +88,37 @@ def to_markdown(report: Mapping[str, Any], pack: Mapping[str, Any],
     if disclaimer:
         lines += ["## 免責", "", disclaimer, ""]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _derived(report: Mapping[str, Any], heading: str = "本文で使った計算"
+             ) -> list[str]:
+    """本文の派生値を、**式ごと**出す。
+
+    「年少人口比 13.1%」とだけ書かれても、読み手はその数字がどこから来たのか
+    追えません。式が並んでいれば、文書の中だけで確かめられます。
+
+    確かめられなかった式も出します。**黙って消すと、その数字が本文に残った
+    まま根拠だけが消えます。**
+    """
+    rows = list(report.get("derived") or [])
+    if not rows:
+        return []
+    lines = [f"## {heading}", "",
+             "本文に出てくる数字のうち、**渡された事実から計算したもの**です。"
+             "式はこちらで計算し直して、答えが合っているかを確かめています。", ""]
+    lines += _table(["", "何の数字か", "式", "答え"],
+                    [["✓" if r.get("ok") else "✗",
+                      r.get("label") or "—",
+                      f"`{r.get('expression')}`",
+                      f"{r.get('value')}{r.get('unit') or ''}"]
+                     for r in rows])
+    failed = [r for r in rows if not r.get("ok")]
+    if failed:
+        lines += ["**✗ の行は確かめられませんでした。**", ""]
+        lines += [f"- {r.get('label') or r.get('expression')}：{r.get('problem')}"
+                  for r in failed]
+        lines.append("")
+    return lines
 
 
 def _unverified(report: Mapping[str, Any]) -> list[str]:
@@ -160,6 +192,8 @@ def _advice(advice: Mapping[str, Any], pack: Mapping[str, Any]) -> list[str]:
             continue
         lines += [f"## {index}. {chapter.get('title')}", ""]
         lines += body()
+
+    lines += _derived(advice, "提言で使った計算")
 
     steps = advice.get("reasoning") or []
     if steps:

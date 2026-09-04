@@ -1393,6 +1393,24 @@ class Verdict(BaseModel):
         description="この評価が外れるとしたら何が理由か。1 文")
 
 
+class DerivedNumber(BaseModel):
+    """本文で使う「計算した数字」。**式まで書かせます。**
+
+    割り算を禁じても守られず、黙って許すと根拠のない数字が残り、弾くと文書
+    ごと消えました（実測 3 回）。式を書かせれば、こちらで計算し直せます。
+    """
+
+    label: str = Field(description="何の数字か。「年少人口比」など")
+    expression: str = Field(
+        description="四則演算だけの式。**渡した事実の数をそのまま使うこと。**"
+                    "例: 1572 / 12000 * 100")
+    value: float = Field(description="その式の答え。丸めて構いません")
+    unit: str = Field(default="", description="%、人、件 など")
+    source: str = Field(
+        default="",
+        description="式に使った数がどこにあるか。「demand.residents.by_radius.1000」")
+
+
 class DDReport(BaseModel):
     """プレDD レポートの散文部分。
 
@@ -1408,6 +1426,11 @@ class DDReport(BaseModel):
         default_factory=list,
         description="第2章〜第8章それぞれの読みどころ")
     growth_hypotheses: list[GrowthHypothesis] = Field(default_factory=list)
+    derived: list[DerivedNumber] = Field(
+        default_factory=list,
+        description="本文で使った、渡した事実に**無い**数字。計算したものは"
+                    "すべてここに式ごと書くこと。書かずに本文へ出すと、"
+                    "根拠が辿れない数値として文書の末尾に列挙されます")
     verdict: Verdict
 
 
@@ -1526,6 +1549,10 @@ class AdviceReport(BaseModel):
         default_factory=list, description="第9章。開業そのものの主要リスク")
     before_opening: list[str] = Field(
         default_factory=list, description="第10章。開業前に追加取得すべき情報")
+    derived: list[DerivedNumber] = Field(
+        default_factory=list,
+        description="本文で使った、渡した事実に**無い**数字。計算したものは"
+                    "すべてここに式ごと書くこと")
     information_gaps: str = Field(
         default="",
         description="**競合について情報が足りない場合、その事実をここに書く。**"

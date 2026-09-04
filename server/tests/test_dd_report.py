@@ -539,3 +539,133 @@ def test_nothing_is_said_when_every_number_checks_out():
     pack = dd.fact_pack(_dataset(), None, "dental_clinic")
     markdown = dd_report.to_markdown(_written(), pack, [], "免責")
     assert "## 本文の数値について" not in markdown
+
+
+# ================================== 計算式まで出させて、こちらで計算し直す
+#
+# 割り算を禁じても守られず、黙って許すと根拠のない数字が残り、弾くと文書ごと
+# 消えました（実測 3 回）。第 4 の道が、式を出させてこちらで計算することです。
+#
+#     LLM   「年少人口比 13.1%」  式: 1572 / 12000 * 100
+#     こちら 1572 と 12000 が束にあるか確かめ、計算して 13.1 と一致するか見る
+#
+# これで派生値が**検証可能な事実**になり、読み手も式で追えます。
+
+def test_only_arithmetic_gets_through_the_evaluator():
+    """**`eval` に文字列を渡すのとは別物です。** 名前も呼び出しも通しません。"""
+    from kaigyou_core import arithmetic
+
+    assert arithmetic.evaluate("1572 / 12000 * 100") == pytest.approx(13.1)
+    assert arithmetic.evaluate("(10 + 2) * 3") == 36
+    assert arithmetic.evaluate("-5 + 3") == -2
+
+    for hostile in ("__import__('os').system('ls')", "population * 2",
+                    "open('/etc/passwd')", "2 ** 100", "[1,2][0]",
+                    "1 if True else 2", "lambda: 1"):
+        with pytest.raises(arithmetic.BadExpression):
+            arithmetic.evaluate(hostile)
+
+
+def test_a_formula_built_from_the_facts_becomes_a_usable_number():
+    """式が通れば、その答えは**本文で使ってよい数**になる。"""
+    from kaigyou_core import arithmetic
+
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    numbers = dd.numbers_in(pack)
+    row = pack["demand"]["residents"]["by_radius"]["1000"]
+    young, total = row["age_0_14"], row["population"]
+
+    checked = arithmetic.check(
+        [{"label": "年少人口比", "expression": f"{young} / {total} * 100",
+          "value": round(young / total * 100, 1), "unit": "%"}], numbers)
+    assert checked[0]["ok"], checked[0]["problem"]
+
+    allowed = numbers | arithmetic.verified_values(checked)
+    stated = round(young / total * 100, 1)
+    assert not verify_dd_report(
+        {"summary": f"年少人口比は {stated}% です。", "takeaways": [],
+         "verdict": {}}, allowed)
+
+
+def test_a_formula_using_a_number_nobody_supplied_is_rejected():
+    """**式の形をした作り話**を通さない。"""
+    from kaigyou_core import arithmetic
+
+    numbers = dd.numbers_in({"population": 12000})
+    checked = arithmetic.check(
+        [{"label": "作り話", "expression": "45000 / 3", "value": 15000}], numbers)
+    assert not checked[0]["ok"]
+    assert "45000" in checked[0]["problem"]
+
+
+def test_a_formula_whose_answer_does_not_match_is_rejected():
+    """式と答えが食い違っていたら、**式のほうを信じない。**"""
+    from kaigyou_core import arithmetic
+
+    numbers = dd.numbers_in({"a": 1572, "b": 12000})
+    checked = arithmetic.check(
+        [{"label": "ずれ", "expression": "1572 / 12000 * 100", "value": 99.9}],
+        numbers)
+    assert not checked[0]["ok"]
+    assert "99.9" in checked[0]["problem"]
+
+
+def test_rounding_the_answer_is_not_a_mismatch():
+    """「13.1」は小数第1位に丸めた値。**丸めたことを間違いにしない。**"""
+    from kaigyou_core import arithmetic
+
+    numbers = dd.numbers_in({"a": 1572, "b": 12000})
+    for stated in (13.1, 13, 13.10):
+        checked = arithmetic.check(
+            [{"label": "比", "expression": "1572 / 12000 * 100",
+              "value": stated}], numbers)
+        assert checked[0]["ok"], f"{stated}: {checked[0]['problem']}"
+
+
+def test_the_conversion_constants_do_not_need_to_be_in_the_facts():
+    """`% にするための 100` まで束に要求しない。"""
+    from kaigyou_core import arithmetic
+
+    checked = arithmetic.check(
+        [{"label": "比", "expression": "1572 / 12000 * 100", "value": 13.1}],
+        dd.numbers_in({"a": 1572, "b": 12000}))
+    assert checked[0]["ok"], checked[0]["problem"]
+
+
+def test_the_formulas_are_shown_to_the_reader_including_the_failed_ones():
+    """**黙って消さない。** 消すと、数字が本文に残ったまま根拠だけが消えます。"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    written = {**_written(), "derived": [
+        {"label": "年少人口比", "expression": "1572 / 12000 * 100",
+         "value": 13.1, "unit": "%", "ok": True, "computed": 13.1, "problem": ""},
+        {"label": "作り話", "expression": "45000 / 3", "value": 15000,
+         "unit": "人", "ok": False, "computed": 15000.0,
+         "problem": "式の 45000 が、確定した事実の中にありません"},
+    ]}
+    markdown = dd_report.to_markdown(written, pack, [], "免責")
+    section = markdown[markdown.index("## 本文で使った計算"):]
+    assert "`1572 / 12000 * 100`" in section
+    assert "✓" in section and "✗" in section
+    assert "式の 45000 が、確定した事実の中にありません" in section
+
+
+def test_the_advice_report_shows_its_formulas_too():
+    """提言（第II部）でも同じ。"""
+    pack = dd.fact_pack(_dataset(), None, "dental_clinic")
+    advice = {**_advice(), "derived": [
+        {"label": "高齢化率", "expression": "2832 / 12000 * 100", "value": 23.6,
+         "unit": "%", "ok": True, "computed": 23.6, "problem": ""}]}
+    markdown = dd_report.to_markdown(_written(), pack, [], "", advice=advice)
+    tail = markdown[markdown.index("# 第II部"):]
+    assert "## 提言で使った計算" in tail
+    assert "`2832 / 12000 * 100`" in tail
+
+
+def test_a_runaway_expression_is_refused():
+    """長い式は、たいてい説明ではなく辻褄合わせです。"""
+    from kaigyou_core import arithmetic
+
+    with pytest.raises(arithmetic.BadExpression):
+        arithmetic.evaluate(" + ".join(["1"] * 100))
+    with pytest.raises(arithmetic.BadExpression):
+        arithmetic.evaluate("1 / 0")

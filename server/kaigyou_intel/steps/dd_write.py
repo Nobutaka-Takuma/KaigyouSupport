@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+from kaigyou_core import arithmetic
 from kaigyou_core import config as cfg
 from kaigyou_core import dd
 from kaigyou_core.analysis import DEFAULT_CATEGORY
@@ -58,6 +59,15 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         raise StepFailed("構造化出力を受け取れませんでした")
 
     written = report.model_dump()
+
+    # **計算式を計算し直します。** LLM が書いた式を、こちらで評価して答えと
+    # 突き合わせます。式に出てくる数が束にあり、答えが合っていれば、その
+    # 派生値は**確かめられた事実**になり、本文で使ってよい数に加わります。
+    pack_numbers = dd.numbers_in(payload)
+    checked = arithmetic.check(written.get("derived") or [], pack_numbers)
+    written["derived"] = checked
+    allowed = pack_numbers | arithmetic.verified_values(checked)
+
     # **照合に落ちても段は止めません。** 3 回止めました——15.3 も 13.1 も、
     # 束の人数から割り算して出した割合で、コンサルタントが書いて当然の数字
     # です。照合はあくまで「渡していない事実を作っていないか」を見る網で、
@@ -67,7 +77,7 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
     # 代わりに、辿れなかった数値を文書に明記します。読み手には「この数字は
     # 確定した事実の中に見つからなかった」と伝わり、黙って信用させることは
     # ありません。止めずに、隠しもしません。
-    unverified = verify_dd_report(written, dd.numbers_in(payload))
+    unverified = verify_dd_report(written, allowed)
     written["unverified_numbers"] = _numbers_only(unverified)
     return written, result.usage, []
 

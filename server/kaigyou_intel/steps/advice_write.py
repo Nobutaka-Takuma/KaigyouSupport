@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
+from kaigyou_core import arithmetic
 from kaigyou_core import config as cfg
+from kaigyou_core import dd
 from kaigyou_core.analysis import DEFAULT_CATEGORY
 from kaigyou_intel import client as llm
 from kaigyou_intel.schemas import AdviceReport
@@ -78,6 +80,10 @@ def run(payload: Mapping[str, Any], category: str = DEFAULT_CATEGORY,
         raise StepFailed("構造化出力を受け取れませんでした")
 
     written = report.model_dump()
+    # 提言でも、計算した数字は式ごと出させて計算し直します。
+    written["derived"] = arithmetic.check(
+        written.get("derived") or [],
+        dd.numbers_in((payload.get("facts") or {})))
     problems = _verify(written, payload)
     if problems:
         raise StepFailed("；".join(problems[:5]))
