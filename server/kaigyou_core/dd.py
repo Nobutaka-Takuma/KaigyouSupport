@@ -360,10 +360,29 @@ def further_dd(dataset: Mapping[str, Any], survey: Mapping[str, Any] | None,
 
 
 def numbers_in(pack: Mapping[str, Any]) -> set[str]:
-    """事実の束に実在する数値の一覧（検算用）。
+    """事実の束にある数値を、**書かれうる形すべて**にして返す（検算用）。
 
-    レポートの本文は LLM が書きます。**束に無い数字が本文に出ていたら、
-    それは作られた数字です。** 検算はこの集合との照合で行います。
+    レポートの本文は LLM が書きます。束に無い数字が本文に出ていたら、それは
+    作られた数字です——という検算のための集合ですが、**素の値だけを入れると
+    厳しすぎます。**
+
+    実測：束の `largest_mesh_share` は `0.337` です。ところがこのモジュールの
+    レンダラ自身が `34%` と印字します。LLM が同じ事実を `33.7%` と書いたら、
+    **自分がやっている変換を自分で禁じている**ことになり、実際に
+
+        本文の数値 77.4 は、渡した事実の中にありません
+        本文の数値 13.6 は、渡した事実の中にありません  …
+
+    で段が止まりました。0.774 も 0.136 も束にある値です。
+
+    だから、値ごとに「人が書くならこう書く」形を並べて許します。
+
+        割合 0.337  →  0.337 / 33.7 / 34 / 33.70
+        面積 6.9366 →  6.9366 / 6.937 / 6.94 / 6.9 / 7
+
+    **これは検算を緩めるのではなく、正しい検算に直しています。** 捕まえたい
+    のは「渡していない事実を作ること」（年間45,000人、成功率68% など）で、
+    渡した事実の書き方の違いではありません。
     """
     found: set[str] = set()
 
@@ -377,10 +396,44 @@ def numbers_in(pack: Mapping[str, Any]) -> set[str]:
         elif isinstance(node, bool):
             return
         elif isinstance(node, (int, float)):
-            found.add(_normalise(node))
+            found.update(_renderings(float(node)))
 
     walk(pack)
     return found
+
+
+#: 丸め方。小数第 4 位まで、と整数。
+_PLACES = (0, 1, 2, 3, 4)
+
+
+def _renderings(value: float) -> set[str]:
+    """1 つの値を、人が書きうる形にひらく。
+
+    **変換は向きを限定します。** 何にでも ×100 と ÷100 を掛けると、束の
+    450 が 45,000 を許してしまい、作られた数字が素通りします（実測）。
+
+    掛けてよいのは、その値が**その単位でありうる**ときだけです。
+
+        0〜1 の値   割合とみなして ×100（0.337 → 33.7）
+        1〜1000 の値 パーセントとみなして ÷100（33.7 → 0.337）
+
+    人口や距離のような大きい値には掛けません。割合として書かれることが
+    ないからです。
+    """
+    out: set[str] = set()
+    scales = [1.0]
+    magnitude = abs(value)
+    if magnitude <= 1.0:
+        scales.append(100.0)      # 割合 → パーセント
+    elif magnitude <= 1000.0:
+        scales.append(0.01)       # パーセント → 割合
+    for scale in scales:
+        scaled = value * scale
+        if abs(scaled) >= 1e13:
+            continue
+        for places in _PLACES:
+            out.add(_normalise(round(scaled, places)))
+    return out
 
 
 def _normalise(value: float) -> str:

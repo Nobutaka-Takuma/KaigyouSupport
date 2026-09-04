@@ -1437,12 +1437,24 @@ def verify_dd_report(report: Mapping[str, Any],
             token = raw.replace(",", "")
             if len(token) <= 1 or re.fullmatch(r"(19|20)\d\d", token):
                 continue
-            if token in allowed:
-                continue
-            if token.rstrip("0").rstrip(".") in allowed:
+            if token in allowed or _trimmed(token) in allowed:
                 continue
             problems.append(f"本文の数値 {raw} は、渡した事実の中にありません")
     return problems
+
+
+def _trimmed(token: str) -> str:
+    """末尾の 0 を落とす。**小数点があるときだけ。**
+
+    「33.70」と「33.7」は同じ数ですが、「45000」と「45」は違う数です。
+    整数から 0 を削ると、**丸い数ほど何かに当たるようになります** ——
+    実測：作られた 45,000 も 1,200,000 も 3,400 も、削られて 45 / 12 / 34 に
+    なり、束のどれかに当たって素通りしました。作られた数字は丸いことが多い
+    ので、これはいちばん通してはいけない抜け方でした。
+    """
+    if "." not in token:
+        return token
+    return token.rstrip("0").rstrip(".")
 
 
 # ===========================================================================

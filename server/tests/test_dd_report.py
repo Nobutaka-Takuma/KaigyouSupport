@@ -406,3 +406,62 @@ def test_the_advice_schema_stays_simple_enough_to_compile():
     assert arrays < 8 and unions == 0 and depth <= 7, \
         f"配列 {arrays} / union {unions} / 深さ {depth}"
     assert len(json.dumps(schema, ensure_ascii=False)) < 5_200
+
+
+# ================================= 検算が厳しすぎて段が止まった（実測の回帰）
+#
+# 実測：STEP2 が
+#
+#     本文の数値 77.4 は、渡した事実の中にありません
+#     本文の数値 13.6 は、渡した事実の中にありません  …
+#
+# で止まりました。0.774 も 0.136 も**束にある値**です。割合を 0〜1 で持ち、
+# 画面とレポートでは % で出しているので、同じ事実が 2 通りの数字で書かれます。
+# **自分のレンダラがやっている変換を、自分の検算が禁じていました。**
+
+def test_a_share_written_as_a_percentage_is_accepted():
+    """0.337 と 33.7% と 34% は同じ事実。**書き方の違いで止めない。**"""
+    allowed = dd.numbers_in({"share": 0.337, "coverage": 0.643})
+    for written in ("0.337", "33.7", "34", "33.70", "64.3", "0.64"):
+        assert not verify_dd_report(
+            {"summary": f"値は {written} です。", "takeaways": [], "verdict": {}},
+            allowed), written
+
+
+def test_rounding_is_allowed():
+    """「約6.94km²」で止めない。**丸めても値は変わっていません。**"""
+    allowed = dd.numbers_in({"area_km2": 6.9366})
+    for written in ("6.9366", "6.937", "6.94", "6.9", "7"):
+        assert not verify_dd_report(
+            {"summary": f"面積は {written} km² です。", "takeaways": [],
+             "verdict": {}}, allowed), written
+
+
+def test_a_round_invented_number_is_still_caught():
+    """**いちばん通してはいけない抜け方。**
+
+    「45000」の末尾の 0 を削ると「45」になります。整数から 0 を削っていた
+    ため、**丸い数ほど何かに当たって素通り**していました。作られた数字は
+    丸いことが多いので、この抜け方は致命的です。
+    """
+    allowed = dd.numbers_in({"clinics": 45, "meshes": 12, "share": 0.34})
+    for invented in ("45000", "1200000", "3400", "120"):
+        problems = verify_dd_report(
+            {"summary": f"患者は {invented} 人です。", "takeaways": [],
+             "verdict": {}}, allowed)
+        assert problems, f"{invented} が素通りしています"
+
+
+def test_the_scaling_does_not_open_a_hole_for_big_numbers():
+    """×100 は**割合にだけ**掛けること。
+
+    何にでも掛けると、束の 450 が 45,000 を許します。人口や距離が割合として
+    書かれることはないので、掛ける必要もありません。
+    """
+    allowed = dd.numbers_in({"population": 450, "workers": 12000})
+    assert verify_dd_report(
+        {"summary": "45000 人です。", "takeaways": [], "verdict": {}}, allowed)
+    # 元の値そのものは通ること。
+    assert not verify_dd_report(
+        {"summary": "450 人、12000 人です。", "takeaways": [], "verdict": {}},
+        allowed)
