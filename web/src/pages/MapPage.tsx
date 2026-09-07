@@ -991,10 +991,6 @@ export function MapPage() {
             </div>
           )}
 
-          {/* **地点を選ぶ前から出します。** 数字を見たあとに注意書きを読むのは
-              順番として遅く、そのころには読み方が決まっています。 */}
-          <Misreadings />
-
           {analysing && <p className="muted">分析中…</p>}
           {error && <p className="notice notice--error">分析に失敗しました: {error}</p>}
 
@@ -1105,6 +1101,13 @@ export function MapPage() {
               </ul>
             </div>
           )}
+
+          {/* **画面のいちばん下に置いています。**
+              地点を選ぶ前から出しているのは変わりません（読み方を確かめたく
+              なったときに、どの状態からでも辿れるように）。上に置くと、パネルを
+              開いていちばん先に目に入るのが注意書きになり、この画面の本題である
+              スコアと比較がその下に押し下げられます。 */}
+          <Misreadings />
         </aside>
       </div>
     </div>
