@@ -639,6 +639,90 @@ export interface ClientReportJson {
   judgement_note: string;
 }
 
+/**
+ * 似た規模の土地との比較（`/api/peers`）。
+ *
+ * スコアの percentile は分布の中の位置を返しますが、**相手の顔が見えません。**
+ * ここは名前のある比較相手を並べます。比較できなかったときは `unavailable` に
+ * 理由が入ります——**空欄は「比較したが差が無い」に見えます。**
+ */
+export interface PeerComparison {
+  basis: {
+    radius_m?: number;
+    profile?: string;
+    /** 比較できたのは、メッシュを取り込んである都道府県だけ。 */
+    pool?: { prefectures?: string[]; meshes?: number };
+    note?: string;
+  };
+  site: PeerRow;
+  tables: PeerTable[];
+  unavailable: { what: string; why: string }[];
+}
+
+export interface PeerTable {
+  key: string;
+  label: string;
+  reference: { description?: string; station?: string; population?: number };
+  columns: { key: string; label: string; unit?: string }[];
+  peers: PeerRow[];
+  peer_count: number;
+  /** 「同規模」と呼べる相手の数。順位と中央値はこの母数で出しています。 */
+  comparable_count: number;
+  site: PeerRow;
+  ranks: PeerRank[];
+  standouts: PeerStandout[];
+  supply_gap: PeerSupplyGap[];
+  caution: { peer?: string; label?: string; ratio?: number; why?: string }[];
+}
+
+export interface PeerRow {
+  label: string;
+  area?: string | null;
+  distance_km?: number | null;
+  /** false なら「参考」。表には出しますが、中央値と順位には入っていません。 */
+  inside_band: boolean;
+  /** その軸だけ同規模で、別の軸が桁違いだった理由。 */
+  guard_reason?: string;
+  values: Record<string, number | null>;
+}
+
+export interface PeerRank {
+  metric: string;
+  label: string;
+  unit?: string;
+  value: number;
+  median: number;
+  gap_vs_median_pct: number | null;
+  /** 率の軸だけ。**率どうしの差は率ではなくポイントで語ります。** */
+  gap_points?: number;
+  rank: number;
+  of: number;
+  position_label: string;
+}
+
+export interface PeerStandout {
+  metric: string;
+  label: string;
+  unit?: string;
+  value: number;
+  median: number;
+  gap_pct: number | null;
+  gap_points?: number | null;
+  direction: "high" | "low";
+  /** その向きが何を意味するか（設定の語）。 */
+  reading?: string | null;
+}
+
+export interface PeerSupplyGap {
+  label: string;
+  metric_label: string;
+  unit?: string;
+  value: number;
+  here: number;
+  gap_pct: number;
+  distance_km?: number | null;
+}
+
 export interface AnalysisSource {
   pattern_id: string | null;
   url: string;

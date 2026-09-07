@@ -25,6 +25,7 @@ import { AccessTable, CatchmentNote, LandPriceTable, PopulationOutlookTable,
          ProfileComparison, ScorePanel } from "../components/ScorePanel";
 import { DatasetExport } from "../components/DatasetExport";
 import { AnalysisPanel } from "../components/AnalysisPanel";
+import { PeerPanel } from "../components/PeerPanel";
 import { Misreadings } from "../components/Misreadings";
 import { SpecialtyPanel, SpecialtyProfiles } from "../components/SpecialtyPanel";
 
@@ -1041,6 +1042,16 @@ export function MapPage() {
               ))}
 
               <ScorePanel analysis={analysis} />
+
+              {/* **偏差値の次に来る問いに、その場で答えます。** 「歯科の供給
+                  100（非常に高い）」を見た人が次に訊くのは「新宿や池袋と
+                  比べても多いのか」で、分布の中の位置はそれに答えません。 */}
+              <PeerPanel
+                lat={analysis.location.lat}
+                lng={analysis.location.lng}
+                profile={profile}
+                catchment={catchment}
+              />
 
               {/* スコアは相対値まで。ここから先（なぜそうなのか、誰を狙うか）
                   は4段のLLM分析の仕事なので、スコアのすぐ下に置く。 */}

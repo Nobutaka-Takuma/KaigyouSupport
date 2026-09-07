@@ -31,6 +31,7 @@ from kaigyou_core.analysis import (
     walk_network_status,
 )
 from kaigyou_core.dataset import build_dataset, population_outlook
+from kaigyou_core import peers as peer_view
 from kaigyou_core import specialties as vocab
 from kaigyou_core.scoring import (
     ScoringModel,
@@ -361,6 +362,50 @@ def candidate_analysis(
     result["disclaimer"] = DISCLAIMER
     result["score_disclaimer"] = SCORE_DISCLAIMER
     return result
+
+
+@router.get("/peers", summary="似た規模の地点との比較")
+def peers(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    category: str = Query(DEFAULT_CATEGORY),
+    catchment: str = Query(DEFAULT_CATCHMENT, pattern="^(circle|walk)$"),
+    mesh_size_m: int | None = Query(None),
+    prefecture_code: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_conn),
+    model: ScoringModel = Depends(get_model),
+) -> dict[str, Any]:
+    """この地点は、**似た規模の土地の中でどこにいるか。**
+
+    候補地を見比べている画面でこそ要る問いです。スコアは分布の中の位置を
+    返しますが、**相手の顔が見えません**——「県内で上位6%」の次に読み手が
+    訊くのは「三島や掛川と比べてどうか」です。
+
+    **半径は地図の選択ではなく、メッシュを採点した半径です。** 比較相手の
+    数値はその半径で作ってあり、2km の商圏を 1km のメッシュと比べると、
+    同じ名前の別の量を比べることになります。どの半径で比べたかは basis に
+    入れて返します。
+
+    地点分析（/candidate-analysis）とは別の口にしてあります。地図のクリック
+    1 回に 1 秒足すより、パネルが自分で取りに来るほうが速く見えます。
+    """
+    prefecture_code = prefecture_code or prefecture_at(conn, lat, lng)
+    prefecture_code = default_prefecture(conn, prefecture_code)
+    mesh_size_m = resolve_mesh_size(conn, mesh_size_m, prefecture_code)
+    radius = model.mesh_scoring_radius_m
+    specialty = (model.profile.get("competition") or {}).get("specialty")
+    metrics = analyze_point(conn, lat, lng, radius, category, mesh_size_m,
+                            catchment, specialty)
+    view = peer_view.comparison(
+        conn, lat=lat, lng=lng, radius_m=radius, profile=model.profile_name,
+        site_metrics=metrics, facility_category=category,
+        config=cfg.peers_config(category))
+    if view is None:
+        # 設定が無い業態。**空の表ではなく、無い理由を返します。**
+        return {"basis": {}, "site": {}, "tables": [],
+                "unavailable": [{"what": "似た規模の地点との比較",
+                                 "why": f"{category} には比較の設定がありません"}]}
+    return view
 
 
 @router.get("/dataset", summary="1地点の商圏分析データセット（機械可読）")

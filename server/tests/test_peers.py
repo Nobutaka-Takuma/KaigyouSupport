@@ -369,3 +369,30 @@ def test_the_fact_pack_carries_the_comparison(conn):
     numbers = dd.numbers_in(pack)
     value = pack["peers"]["tables"][0]["peers"][0]["values"]["population"]
     assert f"{value:.0f}" in numbers, "比較相手の数字が検算の集合に入っていません"
+
+
+def test_the_map_can_ask_for_the_comparison_on_its_own(conn):
+    """地図のパネルが自分で取りに来る口（`/api/peers`）。
+
+    地点分析の応答に混ぜていないのは、**地図のクリック 1 回が 1 秒遅くなる**
+    からです。先に出るものが先に出るほうが、全部そろってから出るより速く
+    見えます。
+
+    半径は地図の選択ではなく、**メッシュを採点した半径**を使います。2km の
+    商圏を 1km で測ったメッシュと比べると、同じ名前の別の量を比べることに
+    なります。どの半径で比べたかは basis に入れて返します。
+    """
+    from fastapi.testclient import TestClient
+
+    from kaigyou_api.main import app
+
+    response = TestClient(app).get("/api/peers", params={
+        "lat": 35.6433, "lng": 139.6690, "profile": "default"})
+    assert response.status_code == 200
+    view = response.json()
+    assert set(view) >= {"basis", "site", "tables", "unavailable"}
+    assert view["basis"].get("radius_m"), "どの半径で比べたかが返っていません"
+    for table in view["tables"]:
+        # 画面はこの 3 つで描きます。欠けると、パネルが黙って痩せます。
+        assert set(table) >= {"label", "columns", "peers", "ranks",
+                              "standouts", "supply_gap", "comparable_count"}

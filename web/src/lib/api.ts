@@ -22,6 +22,7 @@ import type {
   GeoJSONResponse,
   Meta,
   MisreadingList,
+  PeerComparison,
   PrefectureList,
   RankingResponse,
   SpecialtyList,
@@ -158,6 +159,16 @@ export const api = {
     catchment?: "circle" | "walk";
     prefecture_code?: string;
   }) => get<CandidateAnalysis>("/candidate-analysis", params),
+
+  /** 似た規模の地点との比較。**地点分析とは別の口**です——地図のクリック
+   *  1 回に 1 秒足すより、パネルが自分で取りに来るほうが速く見えます。 */
+  peers: (params: {
+    lat: number;
+    lng: number;
+    profile?: string;
+    category?: string;
+    catchment?: string;
+  }) => get<PeerComparison>("/peers", params),
 
   rankings: (params: {
     limit?: number;
