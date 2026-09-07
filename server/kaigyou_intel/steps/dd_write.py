@@ -109,4 +109,8 @@ def _for_prompt(pack: Mapping[str, Any]) -> dict[str, Any]:
     trade = dict(trimmed.get("trade_area") or {})
     trade.pop("shape_note", None)
     trimmed["trade_area"] = trade
+    # 比較表の値そのものは載せません（表は Python が描きます）。中央値・順位・
+    # 際立った軸だけ残せば、**書ける内容は変わらずに束が 1 割小さくなります。**
+    if trimmed.get("peers"):
+        trimmed["peers"] = dd.peers_for_prompt(trimmed)
     return trimmed

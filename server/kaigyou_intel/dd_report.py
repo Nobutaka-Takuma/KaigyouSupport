@@ -140,6 +140,167 @@ def _unverified(report: Mapping[str, Any]) -> list[str]:
             "　" + "、".join(values), ""]
 
 
+# ----------------------------------------------------- 似た規模の土地との比較
+def _peers(pack: Mapping[str, Any]) -> list[str]:
+    """**名前のある比較相手**を横に並べる。
+
+    「県内で上位6%」は位置を教えますが、相手の顔が見えません。読み手が次に
+    訊くのは「三島や掛川と比べてどうか」で、percentile はそれに答えません。
+
+    比較できなかったときは、**空欄ではなく理由を書きます。** 相手が名前で
+    出る比較は、居ないことを黙って埋められません。
+    """
+    view = pack.get("peers") or {}
+    tables = view.get("tables") or []
+    unavailable = view.get("unavailable") or []
+    if not tables and not unavailable:
+        return []
+
+    lines = ["### 似た規模の土地と比べる", ""]
+    pool = ((view.get("basis") or {}).get("pool") or {})
+    if pool.get("prefectures"):
+        lines += ["比較できるのは、**メッシュを取り込んである都道府県**だけです"
+                  f"（{'・'.join(pool['prefectures'])}）。", ""]
+
+    for table in tables:
+        lines += _peer_table(table, view.get("site") or {})
+    for gap in unavailable:
+        lines += [f"- **{gap.get('what')}**：比較していません（{gap.get('why')}）"]
+    if unavailable:
+        lines.append("")
+    note = (view.get("basis") or {}).get("note")
+    if note:
+        lines += [f"※ {note}", ""]
+    return lines
+
+
+def _peer_table(table: Mapping[str, Any],
+                site: Mapping[str, Any]) -> list[str]:
+    columns = table.get("columns") or []
+    reference = table.get("reference") or {}
+    lines = [f"**{table.get('label')}**"
+             + (f"　{reference.get('description')}" if reference.get("description") else ""),
+             ""]
+
+    header = ["地点", "距離"] + [f"{c['label']}{_unit(c)}" for c in columns]
+    rows = [["**この地点**", "—"]
+            + [_peer_value(site, c) for c in columns]]
+    for peer in table.get("peers") or []:
+        label = peer.get("label") or "—"
+        if not peer.get("inside_band"):
+            # **同規模と呼べない相手は、字面で分けます。** 同じ太さで並べると、
+            # 読み手は全部を同規模の相手として読みます。
+            label += "（参考）"
+        rows.append([label,
+                     (f"{peer['distance_km']}km"
+                      if peer.get("distance_km") is not None else "—")]
+                    + [_peer_value(peer, c) for c in columns])
+    lines += _table(header, rows)
+
+    guarded = [p for p in (table.get("peers") or []) if p.get("guard_reason")]
+    if guarded:
+        lines += ["「参考」に落とした相手と、その理由：", ""]
+        lines += [f"- {p.get('label')}：{p.get('guard_reason')}" for p in guarded]
+        lines.append("")
+    for note in table.get("caution") or []:
+        if note.get("why"):
+            lines += [f"※ {note['why']}", ""]
+            break
+
+    ranks = table.get("ranks") or []
+    if ranks:
+        lines += [f"この地点の位置（同規模 {table.get('comparable_count')} 地点との比較）",
+                  ""]
+        lines += _table(["軸", "この地点", "同規模の中央値", "差", "順位"],
+                        [[r.get("label"),
+                          _with_unit(r.get("value"), r.get("unit")),
+                          _with_unit(r.get("median"), r.get("unit")),
+                          _gap(r), r.get("position_label") or "—"]
+                         for r in ranks])
+    elif table.get("peers"):
+        lines += ["**同規模と呼べる相手がいないため、順位は出していません。**"
+                  "上の表は参考として並べたものです。", ""]
+    return lines
+
+
+def _peer_standouts(pack: Mapping[str, Any]) -> list[str]:
+    """同規模の中で、**この地点だけ違う軸**。KSF を探す入口です。
+
+    答えではありません。「高齢層が厚い」までが事実で、そこで何をするかは
+    提言（第II部）の仕事です。
+    """
+    view = pack.get("peers") or {}
+    lines: list[str] = []
+    for table in view.get("tables") or []:
+        standouts = table.get("standouts") or []
+        if not standouts:
+            continue
+        lines += [f"### 同規模の中でこの地点だけ違うところ（{table.get('label')}）", ""]
+        for item in standouts:
+            gap = _gap({"gap_vs_median_pct": item.get("gap_pct"),
+                        "gap_points": item.get("gap_points"),
+                        "unit": item.get("unit")})
+            lines.append(
+                f"- **{item.get('label')}** "
+                f"{_with_unit(item.get('value'), item.get('unit'))}"
+                f"（同規模の中央値 {_with_unit(item.get('median'), item.get('unit'))}／{gap}）"
+                + (f"　{item['reading']}" if item.get("reading") else ""))
+        lines.append("")
+
+    supply = [(t, item) for t in (view.get("tables") or [])
+              for item in (t.get("supply_gap") or [])]
+    if supply:
+        lines += ["### 同規模の中で、医院1件あたり人口がこの地点より多い地点", "",
+                  "**推奨ではありません。** 数えたのは「医院1件あたりの人口」"
+                  "だけで、動線も、各院の中身も、この数字は見ていません。"
+                  "**売上や患者数の予測もしません。** 候補地を絞る入口として"
+                  "だけ使えます。", ""]
+        for table, item in supply:
+            lines.append(
+                f"- {item.get('label')}："
+                f"{_with_unit(item.get('value'), item.get('unit'))}"
+                f"（この地点 {_with_unit(item.get('here'), item.get('unit'))}）"
+                + (f"　{item['distance_km']}km" if item.get("distance_km") is not None else ""))
+        lines.append("")
+    return lines
+
+
+def _unit(column: Mapping[str, Any]) -> str:
+    unit = str(column.get("unit") or "")
+    return f"（{unit}）" if unit else ""
+
+
+def _peer_value(row: Mapping[str, Any], column: Mapping[str, Any]) -> str:
+    value = (row.get("values") or {}).get(column.get("key"))
+    if value is None:
+        return "—"
+    return f"{float(value):,.1f}" if str(column.get("unit")) == "%" \
+        else f"{float(value):,.0f}"
+
+
+def _with_unit(value: Any, unit: Any) -> str:
+    if value is None:
+        return "—"
+    unit = str(unit or "")
+    body = f"{float(value):,.1f}" if unit == "%" else f"{float(value):,.0f}"
+    return f"{body}{unit}"
+
+
+def _gap(row: Mapping[str, Any]) -> str:
+    """中央値との差。**率はポイント、実数は比。**
+
+    高齢化率 18.5% と中央値 20.4% の差は「1.9 ポイント」で、「9% 低い」では
+    ありません。後者は、読み手が人数の話だと受け取ります。
+    """
+    points = row.get("gap_points")
+    if points is not None:
+        return f"{float(points):+.1f}ポイント"
+    percent = row.get("gap_vs_median_pct")
+    if percent is None:
+        return "—"
+    return f"{float(percent):+.1f}%"
+
+
 # ------------------------------------------------------- 第II部（提言）
 #: 推論の印。**確定と推測を字面で分けるため**に強調の付け方を変えています。
 _TAG_LABEL = {
@@ -271,6 +432,10 @@ def _trade_area(pack: Mapping[str, Any]) -> list[str]:
     if isinstance(conc, Mapping) and conc.get("index") is not None:
         lines += [f"足元への集中度：**{conc['index']:.2f}**"
                   f"（1.00 なら商圏内に一様。{conc.get('note') or ''}）", ""]
+    # **この商圏を、似た規模の土地と並べます。** 単独の数字は、比較相手が
+    # 付いて初めて読めます——7,331 人が多いのか少ないのかは、7,331 だけを
+    # 見ていても決まりません。
+    lines += _peers(pack)
     return lines
 
 
@@ -475,7 +640,10 @@ def _risks(pack: Mapping[str, Any]) -> list[str]:
 
 def _growth(pack: Mapping[str, Any], report: Mapping[str, Any]) -> list[str]:
     g = pack.get("growth") or {}
-    lines: list[str] = []
+    # **KSF は「この地点だけ違うところ」から探します。** 同規模の中で全部が
+    # 平均なら、そこに勝ち筋は無いということです。だから比較の結果を、
+    # 仮説より先に置きます。
+    lines: list[str] = _peer_standouts(pack)
     axes = g.get("axes") or []
     if axes:
         lines += ["### 周囲と比べた位置（GIS が計算した値）", ""]

@@ -41,6 +41,7 @@ import psycopg
 
 from kaigyou_core import provenance as prov
 from kaigyou_core.positioning import build as positioning_of
+from kaigyou_core import peers
 from kaigyou_core import site
 from kaigyou_core.analysis import (
     DEFAULT_CATCHMENT,
@@ -1835,6 +1836,15 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
         specialty=specialty,
         specialty_label=vocab.label(specialty) if specialty else None,
         config=insights_config.get("benchmarks") or {})
+    # **分布の中の位置に加えて、名前のある比較相手を並べます。**
+    # 「県内で上位6%」は位置を教えますが、相手の顔が見えません。読み手が
+    # 次に訊くのは「三島や掛川と比べてどうか」で、percentile はそれに
+    # 答えません。取り込んである県の外は比べられないので、比べられなかった
+    # ことも一緒に返します。
+    peer_view = peers.comparison(
+        conn, lat=lat, lng=lng, radius_m=comparison_radius,
+        profile=model.profile_name, site_metrics=comparison_metrics,
+        facility_category=category, config=cfg.peers_config(category))
     insights = build_insights(measures, insights_config)
     # **ここが「GIS が確定する Fact」の要です。** percentile どうしの引き算を
     # LLM にやらせると解釈になり、ここでやれば Fact になります（指示書 §7・§17）。
@@ -1928,6 +1938,10 @@ def build_dataset(conn: psycopg.Connection, lat: float, lng: float, radius_m: in
             "benchmark_scopes": scope_summary(measures),
             "items": [m.as_dict() for m in measures],
         },
+        # 似た規模の土地との、**名前を挙げた比較**。分布の percentile とは
+        # 別の問いに答えます——「同規模の中でどうか」「同規模の中で供給が
+        # 薄いのはどこか」。
+        "peers": peer_view,
         # 同時に見るべき指標の組。結論は含まず、揃わなかったものを gaps に出します。
         # 地域の位置づけ。**単なる数字ではなく、「周囲と比べてどんな場所か」。**
         # LLM はこれを引用します（作りません）。

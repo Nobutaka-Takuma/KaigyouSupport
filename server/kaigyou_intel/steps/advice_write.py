@@ -37,8 +37,12 @@ def build_input(pack: Mapping[str, Any], dd_report: Mapping[str, Any] | None = N
 
     統計の生データは渡しません。事実の束に無い数字を本文に出させないためです。
     """
+    facts = dict(pack)
+    if facts.get("peers"):
+        # 提言でも、要るのは位置と際立った軸です（表は第I部が描いています）。
+        facts["peers"] = dd.peers_for_prompt(facts)
     return {
-        "facts": dict(pack),
+        "facts": facts,
         # 第I部が何と言ったか。**同じ地点で 2 つの文書が矛盾しないように。**
         "pre_dd_summary": (dd_report or {}).get("summary"),
         "pre_dd_verdict": (dd_report or {}).get("verdict"),

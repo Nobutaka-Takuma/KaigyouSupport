@@ -366,6 +366,23 @@ def dd_config(category: str | None = None) -> dict[str, Any]:
         return {}
 
 
+def peers_config(category: str | None = None) -> dict[str, Any]:
+    """類似地点ベンチマークの選び方と軸（config/<業態>/peers.yaml）。
+
+    **「似ている」の定義は業態で変わります。** 歯科は乗降客数と商圏人口で
+    似た土地を探しますが、飲食なら昼間人口と通行量、学習塾なら学齢人口の
+    ほうが効きます。似ているかどうかの基準をコードに埋めると、業態を足す
+    たびに配備が要ります。
+
+    無くても分析は成立します（比較の節が出ないだけ）。設定ファイルの不在で
+    データセット全体が 500 になるのは割に合いません。
+    """
+    try:
+        return load_yaml(business_file("peers.yaml", category))
+    except ConfigNotFound:
+        return {}
+
+
 def positioning_config(category: str | None = None) -> dict[str, Any]:
     """地域の位置づけの軸・しきい値・地域タイプ（config/<業態>/positioning.yaml）。
 

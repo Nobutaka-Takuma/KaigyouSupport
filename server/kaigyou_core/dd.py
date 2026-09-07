@@ -42,6 +42,7 @@ def fact_pack(dataset: Mapping[str, Any],
         "chapters": conf.get("chapters") or [],
         "location": _place(dataset),
         "trade_area": trade_area(dataset),
+        "peers": peers(dataset),
         "competition": competition(dataset, survey),
         "location_quality": location_quality(dataset),
         "demand": demand(dataset),
@@ -93,6 +94,58 @@ def trade_area(dataset: Mapping[str, Any]) -> dict[str, Any]:
         "concentration": site.get("concentration"),
         "shape_note": distribution.get("definition"),
     }
+
+
+def peers(dataset: Mapping[str, Any]) -> dict[str, Any]:
+    """似た規模の土地との比較。**数えたのは kaigyou_core.peers です。**
+
+    ここは形を整えるだけで、選び方も計算もしません。**同じ地点なら同じ表**が
+    出るように、比較は DB のデータからジョブ作成時に確定させてあります。
+
+    比較が成立しないことがあります——最寄駅に乗降客数が無い、メッシュを
+    取り込んでいない県、同規模の相手が居ない。**そのときは「無い」と書きます。**
+    percentile と違って、比較相手は名前で出るので、居ないことを黙って
+    埋めることができません（それが、この比較を入れた理由でもあります）。
+    """
+    view = dataset.get("peers") or {}
+    tables = list(view.get("tables") or [])
+    return {
+        "basis": view.get("basis") or {},
+        "site": view.get("site") or {},
+        "tables": tables,
+        "unavailable": list(view.get("unavailable") or []),
+        "available": bool(tables),
+    }
+
+
+def peers_for_prompt(pack: Mapping[str, Any]) -> dict[str, Any]:
+    """比較を、**プロンプトに載せる形**に絞る。
+
+    表そのものは Python が描きます。LLM に要るのは「この地点が同規模の中で
+    どこにいるか」と「どこが際立っているか」で、**相手 5 件 × 軸 8 本の値
+    すべてではありません。**
+
+    実測：束の 1 割（9,176 字 ≒ 4,200 トークン）が比較表の値でした。段 2 本に
+    毎回載せると 1 本あたり 2〜3 セント増えます。落とすのは値の一覧だけで、
+    中央値も順位も際立った軸も残るので、**書ける内容は変わりません。**
+    """
+    view = pack.get("peers") or {}
+    tables = []
+    for table in view.get("tables") or []:
+        tables.append({
+            "label": table.get("label"),
+            "compared_with": (table.get("reference") or {}).get("description"),
+            "comparable_count": table.get("comparable_count"),
+            # 相手の名前は残します。**名前のある比較であることが要点**なので。
+            "peers": [p.get("label") + ("" if p.get("inside_band") else "（参考）")
+                      for p in table.get("peers") or []],
+            "ranks": table.get("ranks") or [],
+            "standouts": table.get("standouts") or [],
+            "supply_gap": table.get("supply_gap") or [],
+        })
+    return {"tables": tables,
+            "unavailable": view.get("unavailable") or [],
+            "note": "表はこちらで描きます。**意味だけ書いてください。**"}
 
 
 # ------------------------------------------------------------------ 第3章
