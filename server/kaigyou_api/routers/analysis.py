@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from kaigyou_api.deps import DISCLAIMER, SCORE_DISCLAIMER, get_conn, get_model
 from kaigyou_core import config as cfg
-from kaigyou_core.db import column_exists
+from kaigyou_core.db import column_exists, table_exists
 from kaigyou_core import provenance
 from kaigyou_core.analysis import (
     DEFAULT_CATCHMENT,
@@ -32,6 +32,7 @@ from kaigyou_core.analysis import (
 )
 from kaigyou_core.dataset import build_dataset, population_outlook
 from kaigyou_core import peers as peer_view
+from kaigyou_core import town as town_facts
 from kaigyou_core import specialties as vocab
 from kaigyou_core.scoring import (
     ScoringModel,
@@ -446,6 +447,140 @@ def dataset(
         profile=profile, include_geometry=geometry, max_clinics=max_clinics,
         disclaimer=DISCLAIMER, score_disclaimer=SCORE_DISCLAIMER,
     )
+
+
+#: 街の診断はこの半径で。仕様の「周辺500m〜1km程度」の上のほう。
+TOWN_RADIUS_M = 1000
+
+
+@router.get("/town", summary="この街、どんな街？（街の意外な事実）")
+def town(
+    q: str | None = Query(None, description="駅名または市区町村名"),
+    lat: float | None = Query(None, ge=-90, le=90),
+    lng: float | None = Query(None, ge=-180, le=180),
+    radius: int | None = Query(None, ge=100, le=10000),
+    category: str = Query(DEFAULT_CATEGORY),
+    profile: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """**この街がどんな街か**を、公開データの比較から数枚のカードにして返す。
+
+    新しい数字は作りません。データセットが確定させた比較（percentile・順位・
+    軸のズレ・同規模の街との差）から、**離れているものを選んで並べ替えるだけ**
+    です。だから同じ地点なら何度呼んでも同じカードが出ます。
+
+    地点は座標でも、駅名・市区町村名でも指定できます。名前で引いたときは、
+    **何に当たったかと、他の候補**を返します——「府中」のように同じ名前の駅が
+    いくつもあるので、黙って 1 つ選ぶと別の街の話を読ませることになります。
+    """
+    if lat is None or lng is None:
+        if not q:
+            raise HTTPException(status_code=400,
+                                detail="q（駅名・市区町村名）か lat/lng が要ります。")
+        match, alternatives = _find_place(conn, q)
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(f"「{q}」に当たる駅・市区町村が見つかりませんでした。"
+                        "地図の画面から地点を指定することもできます。"))
+        lat, lng = match["lat"], match["lng"]
+    else:
+        match, alternatives = {"name": None, "kind": "point",
+                               "lat": lat, "lng": lng}, []
+
+    # **取り込んでいない土地を、別の県の分布で語らない。**
+    #
+    # 実測：メッシュが東京都だけの環境で「沼津」を引くと、県が特定できず
+    # 既定（人口最大の県＝東京都）に落ち、**沼津駅のカードに湯島・高井戸が
+    # 並びました。** 分析としては動いていて、画面も成立します——読み手だけが
+    # 気づけません。ここで止めて、取り込んでいないと言います。
+    if prefecture_at(conn, lat, lng) is None:
+        loaded = _loaded_prefectures(conn)
+        return {
+            "place": {"name": (match or {}).get("name"), "lat": lat, "lng": lng,
+                      "radius_m": TOWN_RADIUS_M, "prefecture": None,
+                      "municipality": None, "nearest_station": None,
+                      "station_distance_m": None},
+            "facts": [], "considered": 0,
+            "unavailable": [{
+                "what": f"{(match or {}).get('name') or 'この地点'}の分析",
+                "why": ("この地点の周辺には、取り込み済みの人口メッシュが"
+                        "ありません。いま比較できるのは"
+                        + ("・".join(loaded) if loaded else "（取り込み済みの都道府県なし）")
+                        + "です。")}],
+            "matched": match, "alternatives": alternatives,
+            "disclaimer": DISCLAIMER,
+        }
+
+    # **「この街」の縮尺は 1km。** 業態の既定（歯科は 500m）は開業候補地を
+    # 見るための半径で、街の話をするには小さすぎます。比較相手のメッシュ分布も
+    # 1km で作ってあるので、ここをそろえると表と本文の半径が食い違いません。
+    radius = radius or TOWN_RADIUS_M
+    dataset_doc = build_dataset(
+        conn, lat, lng, radius, category=category, profile=profile,
+        # カードに要るのは集計と比較だけです。医院の一覧も商圏の形も
+        # 使わないので、**運ばせません。**
+        include_geometry=False, max_clinics=0,
+        disclaimer=DISCLAIMER, score_disclaimer=SCORE_DISCLAIMER)
+    view = town_facts.diagnose(
+        dataset_doc, cfg.load_yaml(cfg.config_dir() / "town_facts.yaml"))
+    view["matched"] = match
+    view["alternatives"] = alternatives
+    view["disclaimer"] = DISCLAIMER
+    view["provenance"] = dataset_doc.get("provenance")
+    return view
+
+
+def _loaded_prefectures(conn: psycopg.Connection) -> list[str]:
+    """人口メッシュを取り込んである都道府県の名前。**空欄より名前を。**"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT prefecture_code AS code FROM population_mesh")
+        codes = [r["code"] for r in cur.fetchall() if r["code"]]
+    return [prefecture_name(conn, code) or code for code in sorted(codes)]
+
+
+def _find_place(conn: psycopg.Connection,
+                q: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """名前から地点をひく。**駅を先に、次に市区町村。**
+
+    同じ名前の駅は全国にあります（「府中」は東京・広島・北海道）。いちばん
+    乗降客数の多いものを既定にしつつ、**他の候補も返します**——黙って 1 つ
+    選ぶと、読み手は別の街の話を自分の街の話として読みます。
+    """
+    like = f"%{q.strip()}%"
+    rows: list[dict[str, Any]] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT name, prefecture_code, daily_passengers,
+                   ST_Y(geom) AS lat, ST_X(geom) AS lng
+            FROM stations
+            WHERE name ILIKE %s
+            ORDER BY daily_passengers DESC NULLS LAST, name
+            LIMIT 8
+            """, (like,))
+        rows = [{"name": f"{r['name']}駅", "kind": "station",
+                 "lat": float(r["lat"]), "lng": float(r["lng"]),
+                 "note": (f"{int(r['daily_passengers']):,}人/日"
+                          if r["daily_passengers"] else None)}
+                for r in cur.fetchall()]
+        if not rows and table_exists(conn, "municipalities"):
+            cur.execute(
+                """
+                SELECT name, prefecture_name,
+                       ST_Y(ST_PointOnSurface(geom)) AS lat,
+                       ST_X(ST_PointOnSurface(geom)) AS lng
+                FROM municipalities
+                WHERE name ILIKE %s AND geom IS NOT NULL
+                ORDER BY name LIMIT 8
+                """, (like,))
+            rows = [{"name": r["name"], "kind": "municipality",
+                     "lat": float(r["lat"]), "lng": float(r["lng"]),
+                     "note": r["prefecture_name"]}
+                    for r in cur.fetchall()]
+    if not rows:
+        return None, []
+    return rows[0], rows[1:]
 
 
 @router.get("/rankings", summary="メッシュ単位の候補地ランキング")

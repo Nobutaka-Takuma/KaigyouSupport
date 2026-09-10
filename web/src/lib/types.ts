@@ -640,6 +640,56 @@ export interface ClientReportJson {
 }
 
 /**
+ * 「この街、どんな街？」の 1 枚（`/api/town`）。
+ *
+ * **数えるのは Python、驚くのは読み手。** 画面はここに来た値を並べるだけで、
+ * 何が意外かの判断も、根拠の弱いものを落とす判断もサーバでしています。
+ */
+export interface TownFact {
+  id: string;
+  /** 話題。**同じ話題は 1 枚まで**（サーバで絞っています）。 */
+  theme: string;
+  /** level（単独の高さ）/ contrast（軸のズレ）/ peers（同規模の街と比べて） */
+  kind: string;
+  title: string;
+  fact: string;
+  /** 何と比べた結果か。**母集団の名前と件数が入ります。** */
+  comparison: string;
+  why_interesting: string;
+  source: string;
+  /** 0〜1。母集団の大きさから決まります。弱いものはサーバが落としています。 */
+  confidence: number;
+  surprise: number;
+  score: number;
+  detail?: Record<string, string | null>;
+}
+
+export interface TownDiagnosis {
+  place: {
+    name: string | null;
+    prefecture: string | null;
+    municipality: string | null;
+    lat: number;
+    lng: number;
+    radius_m: number;
+    nearest_station: string | null;
+    station_distance_m: number | null;
+  };
+  facts: TownFact[];
+  /** 何件の候補から選んだか。**5 枚の裏に何があったかを隠さないため。** */
+  considered: number;
+  /** 出せなかった比較と、その理由。全国順位が無いのはここに出ます。 */
+  unavailable: { what: string; why: string }[];
+  matched: { name: string | null; kind: string; lat: number; lng: number;
+             note?: string | null };
+  /** 同じ名前の別の街。「府中」は東京にも広島にもあります。 */
+  alternatives: { name: string; kind: string; lat: number; lng: number;
+                  note?: string | null }[];
+  generated_at?: string | null;
+  disclaimer?: string;
+}
+
+/**
  * 似た規模の土地との比較（`/api/peers`）。
  *
  * スコアの percentile は分布の中の位置を返しますが、**相手の顔が見えません。**

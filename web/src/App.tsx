@@ -3,6 +3,7 @@ import { NavLink, Route, Routes } from "react-router-dom";
 import { api } from "./lib/api";
 import { GlobalNotices } from "./components/DataNotices";
 import { MapPage } from "./pages/MapPage";
+import { TownPage } from "./pages/TownPage";
 import { RankingPage } from "./pages/RankingPage";
 import { ComparePage } from "./pages/ComparePage";
 import { AboutPage } from "./pages/AboutPage";
@@ -36,6 +37,7 @@ export default function App() {
           <NavLink to="/" end>
             地図・候補地分析
           </NavLink>
+          <NavLink to="/town">この街、どんな街？</NavLink>
           <NavLink to="/ranking">ランキング</NavLink>
           <NavLink to="/compare">候補地比較</NavLink>
           <NavLink to="/reports">マイレポート</NavLink>
@@ -50,6 +52,7 @@ export default function App() {
       <main className="app__main">
         <Routes>
           <Route path="/" element={<MapPage />} />
+          <Route path="/town" element={<TownPage />} />
           <Route path="/ranking" element={<RankingPage />} />
           <Route path="/compare" element={<ComparePage />} />
           <Route path="/reports" element={<ReportsPage />} />

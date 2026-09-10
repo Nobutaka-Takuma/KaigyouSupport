@@ -45,6 +45,16 @@ function inline(raw: string): string {
   return autolink(coded);
 }
 
+/**
+ * 1 行ぶんの記法だけを HTML にする。**段落にはしません。**
+ *
+ * カード（`この街、どんな街？`）のように、既に `<p>` の中にいる短い文で
+ * 使います。`renderMarkdown` に渡すと段落が入れ子になります。
+ */
+export function renderInline(text: string): string {
+  return inline(text);
+}
+
 function isTableRow(line: string): boolean {
   return line.trimStart().startsWith("|");
 }

@@ -265,6 +265,62 @@ a { color: var(--accent); }
   text-align: center;
 }
 
+/* ------------------------------------------------ この街、どんな街？ */
+/* **入口は 1 行。** 地図を操作してもらうための画面ではありません。駅名を
+   1 つ入れたら、その街の意外なところが数枚返る——それだけの画面です。 */
+.town { max-width: 780px; margin: 0 auto; padding: 20px 16px 48px; overflow-y: auto; }
+.town__search h1 { margin: 8px 0 4px; font-size: 24px; }
+.town__row { display: flex; gap: 8px; margin: 12px 0 4px; }
+.town__row input {
+  flex: 1; padding: 10px 12px; font-size: 16px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+}
+.town__row button {
+  padding: 10px 18px; font-size: 15px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+}
+.town__row button:disabled { opacity: 0.5; cursor: default; }
+.town__head { margin: 22px 0 10px; }
+.town__head h2 { margin: 0 0 2px; font-size: 19px; }
+
+.town__cards { list-style: none; margin: 0; padding: 0; }
+.town__cards > li { margin-bottom: 12px; }
+.towncard {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  padding: 14px 16px;
+}
+/* 話題の色分けは**良し悪しではなく種類**です。単独の水準、軸のちぐはぐ、
+   似た街との差——読み手が「どういう種類の話か」を先に掴めるように。 */
+.towncard--level { border-left: 4px solid #6a95d8; }
+.towncard--contrast { border-left: 4px solid #b45309; }
+.towncard--peers { border-left: 4px solid #1a7f37; }
+.towncard__head { display: flex; align-items: center; gap: 8px; }
+.towncard__no {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%; font-size: 12px;
+  background: var(--muted-bg, #f4f6f8); color: var(--muted);
+}
+.towncard__kind { font-size: 12px; color: var(--muted); }
+.towncard__title { margin: 6px 0 4px; font-size: 17px; }
+.towncard__fact { margin: 0 0 2px; font-weight: 600; }
+.towncard__comparison { margin: 0 0 6px; font-size: 13px; color: #374151; }
+.towncard__why { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.towncard__foot {
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  border-top: 1px solid var(--line, #e5e9ef); padding-top: 8px;
+}
+
+.town__alts, .town__gaps, .town__more { margin: 20px 0; }
+.town__alts h3, .town__gaps h3 { font-size: 15px; margin: 0 0 4px; }
+.town__alts ul, .town__gaps ul { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.town__gaps li { margin-bottom: 4px; color: var(--muted); }
+.town__disclaimer { font-size: 12px; color: var(--muted); line-height: 1.7; }
+
+@media (max-width: 700px) {
+  .town__search h1 { font-size: 20px; }
+  .town__row { flex-direction: column; }
+}
+
 /* -------------------------------------------------- 同規模の中でどこか */
 /* 偏差値の隣に置く比較。**相手の顔が見える**ことがこの節の要点なので、
    地点の名前と「参考」の区別が最初に目に入るようにしています。 */

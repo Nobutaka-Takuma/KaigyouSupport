@@ -26,6 +26,7 @@ import type {
   PrefectureList,
   RankingResponse,
   SpecialtyList,
+  TownDiagnosis,
 } from "./types";
 
 import { auth } from "./auth";
@@ -169,6 +170,15 @@ export const api = {
     category?: string;
     catchment?: string;
   }) => get<PeerComparison>("/peers", params),
+
+  /** 「この街、どんな街？」。駅名・市区町村名か、座標で引きます。 */
+  town: (params: {
+    q?: string;
+    lat?: number;
+    lng?: number;
+    radius?: number;
+    profile?: string;
+  }) => get<TownDiagnosis>("/town", params),
 
   rankings: (params: {
     limit?: number;
